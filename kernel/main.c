@@ -16,6 +16,7 @@
 #include "kheap.h"
 #include "gic.h"
 #include "timer.h"
+#include "sched.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -55,6 +56,44 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
             fb_put_pixel(x1 + t, y, color);
             fb_put_pixel(x2 - t, y, color);
         }
+    }
+}
+
+/*
+ * ticker_task — task demo (M2-03)
+ *
+ * Gira a priorità PRIO_HIGH (32). Ogni ~500ms stampa un contatore
+ * su UART dimostrando che il timer + scheduler funzionano.
+ * Chiama sched_yield() per cedere la CPU dopo ogni stampa.
+ */
+static void ticker_task(void)
+{
+    uint32_t count = 0;
+    uint64_t last  = 0;
+
+    while (1) {
+        uint64_t now = timer_now_ms();
+        if (now - last >= 500) {
+            last = now;
+            uart_puts("[TICKER] tick #");
+            /* mini pr_dec inline */
+            char buf[12]; int len = 0;
+            uint32_t v = count;
+            if (v == 0) { uart_putc('0'); }
+            else {
+                while (v) { buf[len++] = '0' + (int)(v % 10); v /= 10; }
+                for (int i = len-1; i >= 0; i--) uart_putc(buf[i]);
+            }
+            uart_puts(" t=");
+            len = 0;
+            uint64_t t = now;
+            while (t) { buf[len++] = '0' + (int)(t % 10); t /= 10; }
+            if (len == 0) { uart_putc('0'); }
+            else { for (int i = len-1; i >= 0; i--) uart_putc(buf[i]); }
+            uart_puts("ms\n");
+            count++;
+        }
+        sched_yield();
     }
 }
 
@@ -160,7 +199,16 @@ void kernel_main(void)
     }
     timer_stats();
 
-    /* === Fase 7: Kernel Heap — named typed caches (M1-04) === */
+    /* === Fase 7: Scheduler FPP (M2-03) === */
+    sched_init();
+    /* Da qui: task switching via timer IRQ ogni 1ms.
+     * sched_tick() → need_resched → vectors.S → schedule() */
+
+    /* Task demo: ticker (prio 64) — stampa un contatore ogni ~500ms */
+    sched_task_create("ticker", ticker_task, PRIO_HIGH);
+    sched_stats();
+
+    /* === Fase 8: Kernel Heap — named typed caches (M1-04) === */
     kheap_init();
     /* Da qui: task_cache, port_cache, ipc_cache disponibili.
      * kmem_cache_alloc/free O(1) garantito (cache pre-caldate). */
@@ -238,12 +286,19 @@ void kernel_main(void)
     uart_puts("\n[NROS] ===================================\n");
     uart_puts("[NROS] Boot completato con successo!\n");
     uart_puts("[NROS] Framebuffer: CIAO MONDO! visualizzato\n");
-    uart_puts("[NROS] Sistema in idle loop\n");
+    uart_puts("[NROS] Scheduler FPP attivo — ticker ogni 500ms\n");
     uart_puts("[NROS] ===================================\n\n");
 
-    /* Idle loop - in un OS completo qui girerebbe lo scheduler */
+    /* Il task kernel entra nel suo loop:
+     * cede la CPU ogni ~2s e stampa le statistiche.
+     * Il timer IRQ ogni 1ms garantisce la preemption del ticker task. */
+    uint64_t last_stats = 0;
     while (1) {
-        /* WFE = Wait For Event - risparmio energetico ARM */
-        __asm__ volatile("wfe");
+        uint64_t now = timer_now_ms();
+        if (now - last_stats >= 2000) {
+            last_stats = now;
+            sched_stats();
+        }
+        sched_yield();
     }
 }

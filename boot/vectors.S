@@ -140,6 +140,30 @@ __exc_common:
     add     x2, sp, #0      /* arg2: puntatore al frame */
     bl      exception_handler
 
+    /* ── Preemption check (M2-03) ──────────────────────────────────
+     *
+     * Se need_resched è settato (dal timer ogni 1ms), chiama schedule()
+     * prima di tornare al task interrotto. Questo implementa la preemption
+     * hardware: ogni IRQ è un potenziale punto di context switch.
+     *
+     * In questo momento sullo stack:
+     *   SP+0 .. SP+287   frame eccezione (288 byte, intatto)
+     *   SP+288 .. SP+303 area x16/x17 originali (16 byte)
+     *
+     * schedule() → sched_context_switch() salva altri 96 byte sotto SP.
+     * Quando questo task è rischedulato, SP è ripristinato qui e
+     * il ripristino del frame (sotto) porta correttamente all'ERET.
+     *
+     * RT: WCET aggiunto = adrp + ldr + cbz + str + bl = 5 istruzioni
+     *     nel caso senza reschedule (fast path).
+     * ────────────────────────────────────────────────────────────── */
+    adrp    x0, need_resched
+    ldr     w1, [x0, :lo12:need_resched]
+    cbz     w1, .Lno_resched
+    str     wzr, [x0, :lo12:need_resched]
+    bl      schedule
+.Lno_resched:
+
     /* ── Ripristino ────────────────────────────────────────────────── */
     /* Ripristina ELR_EL1 e SPSR_EL1 */
     ldr     x0, [sp, #256]

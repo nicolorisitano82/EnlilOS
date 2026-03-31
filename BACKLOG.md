@@ -108,26 +108,20 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 
 ---
 
-### ⬜ M2-03 · Scheduler Real-Time
-**Priorità:** CRITICA
+### ✅ M2-03 · Scheduler Real-Time — Fixed-Priority Preemptive
+**Stato:** COMPLETATA
 
-**RT design:** non Round-Robin. Scelta tra due policy:
+**RT design:** FPP con 256 priorità, ready bitmap 256 bit, O(1) ricerca + switch.
 
-**Fixed-Priority Preemptive (FPP)** — più semplice, comune in sistemi embedded RT:
-- 256 livelli di priorità (come VxWorks/FreeRTOS)
-- Bit-mask a 256 bit per trovare la priorità più alta in O(1) (4 operazioni `CLZ`)
-- Preemption immediata: se task con priorità > corrente diventa READY → switch istantaneo
-
-**Earliest Deadline First (EDF)** — ottimale per utilizzo CPU:
-- Task ordinati per deadline assoluta
-- `pick_next()` = O(log N) con min-heap
-- Necessita deadline note a compile-time o al momento della creazione del task
-
-**Scelta per NROS:** FPP come policy base + EDF opzionale per task periodici dichiarati.
-
-- Context switch: salva x0-x30 + registri sistema, carica TTBR0 del nuovo task
-- **Latenza context switch target:** < 500ns (≈30 cicli registri + TLB flush ASID)
-- `schedule()` invocabile da qualsiasi contesto kernel (preemptible kernel)
+- `sched_tcb_t` (64B — fit in task_cache): sp, pid, priority, state, ticks_left, runtime_ns, deadline_ms
+- `ready_bitmap[4]` (256 bit): `__builtin_ctzll` → trova la priorità massima in O(1)
+- `run_queue[256]`: FIFO singly-linked per priorità, O(1) enqueue/dequeue
+- `sched_context_switch()` in assembly: salva x19-x28/x29/x30 (96B), swap SP → `ret`
+- `task_entry_trampoline`: abilita IRQ + salta a entry function (prima schedulazione)
+- **Preemption hardware**: `vectors.S` legge `need_resched` dopo ogni `exception_handler()` → chiama `schedule()` → ERET al nuovo task
+- `sched_tick()` O(1): decrementa quantum, setta `need_resched` a ogni 1ms
+- Task demo: `kernel` (prio=0), `idle` (prio=255, WFE loop), `ticker` (prio=32, 500ms)
+- Verificato: ticker stampa ogni 500ms, stats ogni 2s, runtime contabilizzato correttamente
 
 ---
 

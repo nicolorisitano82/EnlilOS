@@ -1,0 +1,504 @@
+/*
+ * NROS Microkernel - Fixed-Priority Preemptive Scheduler (M2-03)
+ *
+ * Implementazione FPP con:
+ *   - ready_bitmap[4] (256 bit): trova la priorità massima in O(1)
+ *   - run_queue[256]:  FIFO intrusive singly-linked per priorità
+ *   - task_pool[32]:   pool statico di sched_tcb_t (no kmalloc nel scheduler)
+ *   - sched_context_switch: assembly in sched_switch.S
+ *   - Preemption: need_resched settato da sched_tick(), letto da vectors.S
+ */
+
+#include "sched.h"
+#include "timer.h"
+#include "pmm.h"
+#include "uart.h"
+
+/* ── Costanti interne ────────────────────────────────────────────── */
+
+#define TICK_NS     (1000000ULL)    /* 1ms in nanosecondi               */
+
+/* ── Pool statico di task ─────────────────────────────────────────── */
+
+static sched_tcb_t    task_pool[SCHED_MAX_TASKS];
+static uint32_t  task_count;
+static uint32_t  next_pid;
+
+/* Stack statici per idle (nessuna alloc da buddy necessaria al boot) */
+static uint8_t   idle_stack[TASK_STACK_SIZE] __attribute__((aligned(16)));
+
+/* ── Scheduler state ─────────────────────────────────────────────── */
+
+/*
+ * ready_bitmap[4]: bit i settato ↔ esiste almeno un task READY a priorità i.
+ * Parola 0 → priorità 0-63, parola 1 → 64-127, ecc.
+ * Invariante mantenuta da rq_push/rq_pop.
+ */
+static uint64_t ready_bitmap[4];
+
+/*
+ * Run queue per priorità: singly-linked FIFO.
+ * rq_head[p] → primo task da schedulare (front della coda)
+ * rq_tail[p] → ultimo task inserito (back della coda)
+ */
+static sched_tcb_t *rq_head[256];
+static sched_tcb_t *rq_tail[256];
+
+/* Variabili globali esportate (usate da vectors.S e da altri moduli) */
+sched_tcb_t          *current_task;
+volatile uint32_t need_resched;
+
+/* ── Helpers UART ─────────────────────────────────────────────────── */
+
+static void pr_dec(uint64_t v)
+{
+    if (v == 0) { uart_putc('0'); return; }
+    char buf[20]; int len = 0;
+    while (v) { buf[len++] = '0' + (int)(v % 10); v /= 10; }
+    for (int i = len - 1; i >= 0; i--) uart_putc(buf[i]);
+}
+
+static void pr_hex64(uint64_t v)
+{
+    static const char h[] = "0123456789ABCDEF";
+    uart_puts("0x");
+    for (int s = 60; s >= 0; s -= 4) uart_putc(h[(v >> s) & 0xF]);
+}
+
+/* ── Ready bitmap: O(1) ──────────────────────────────────────────── */
+
+static inline void bitmap_set(uint8_t prio)
+{
+    ready_bitmap[prio >> 6] |= (1ULL << (prio & 63));
+}
+
+static inline void bitmap_clear(uint8_t prio)
+{
+    ready_bitmap[prio >> 6] &= ~(1ULL << (prio & 63));
+}
+
+/*
+ * bitmap_find_first — trova la priorità più alta (numero più basso) in O(1).
+ * Usa CTZ (count trailing zeros) = RBIT+CLZ su AArch64.
+ * Ritorna -1 se nessun bit è settato.
+ */
+static int bitmap_find_first(void)
+{
+    for (int w = 0; w < 4; w++) {
+        if (ready_bitmap[w]) {
+            /* __builtin_ctzll: numero di zeri dalla parte bassa
+             * = indice del primo bit settato nella parola [O(1)] */
+            return w * 64 + __builtin_ctzll(ready_bitmap[w]);
+        }
+    }
+    return -1;
+}
+
+/* ── Run queue FIFO per priorità: O(1) enqueue/dequeue ──────────── */
+
+/* Aggiunge task 't' in coda alla run queue della sua priorità */
+static void rq_push(sched_tcb_t *t)
+{
+    uint8_t p = t->priority;
+    t->next = NULL;
+    if (rq_head[p] == NULL) {
+        rq_head[p] = rq_tail[p] = t;
+    } else {
+        rq_tail[p]->next = t;
+        rq_tail[p] = t;
+    }
+    bitmap_set(p);
+}
+
+/* Estrae il primo task dalla run queue della priorità 'p' */
+static sched_tcb_t *rq_pop(uint8_t p)
+{
+    sched_tcb_t *t = rq_head[p];
+    if (t == NULL) return NULL;
+    rq_head[p] = t->next;
+    if (rq_head[p] == NULL) {
+        rq_tail[p] = NULL;
+        bitmap_clear(p);
+    }
+    t->next = NULL;
+    return t;
+}
+
+/* ── IRQ save/restore per critical sections ─────────────────────── */
+
+static inline uint64_t irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile(
+        "mrs %0, daif\n"
+        "msr daifset, #2\n"
+        : "=r"(flags) :: "memory"
+    );
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags)
+{
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+}
+
+/* ── Allocazione task dal pool ───────────────────────────────────── */
+
+static sched_tcb_t *task_alloc(void)
+{
+    if (task_count >= SCHED_MAX_TASKS) return NULL;
+    sched_tcb_t *t = &task_pool[task_count++];
+    /* Zero-init già garantita dal BSS, ma azzeriamo esplicitamente
+     * per i task re-usati (non in questa versione, ma per sicurezza) */
+    t->sp          = 0;
+    t->pid         = next_pid++;
+    t->priority    = PRIO_NORMAL;
+    t->state       = TCB_STATE_READY;
+    t->flags       = TCB_FLAG_KERNEL;
+    t->ticks_left  = SCHED_TICK_QUANTUM;
+    t->runtime_ns  = 0;
+    t->budget_ns   = 0;
+    t->period_ms   = 0;
+    t->deadline_ms = 0;
+    t->name        = "(unnamed)";
+    t->next        = NULL;
+    return t;
+}
+
+/* ── Setup stack iniziale per un nuovo task ──────────────────────── */
+
+/*
+ * Prepara il frame iniziale per sched_context_switch sul task 't'.
+ * Quando il task sarà schedulato per la prima volta:
+ *   - sched_context_switch carica next->sp
+ *   - ripristina x19-x29, x30
+ *   - ret salta a x30 = task_entry_trampoline
+ *   - trampoline abilita IRQ, chiama x19 = entry_fn
+ *
+ * Layout del frame (96 byte, crescita verso il basso):
+ *   stack_top - 96  [x19=entry, x20=0] ← sp salvato in t->sp
+ *   stack_top - 80  [x21=0, x22=0]
+ *   stack_top - 64  [x23=0, x24=0]
+ *   stack_top - 48  [x25=0, x26=0]
+ *   stack_top - 32  [x27=0, x28=0]
+ *   stack_top - 16  [x29=0, x30=trampoline]
+ *   stack_top       ← cima dello stack
+ */
+static void task_setup_stack(sched_tcb_t *t, uint8_t *stack_top, sched_fn entry)
+{
+    /* Il frame ha 96 byte: 6 coppie di stp */
+    uint64_t *frame = (uint64_t *)(uintptr_t)(stack_top - 96);
+
+    frame[0] = (uint64_t)(uintptr_t)entry;          /* x19 = entry fn   */
+    frame[1] = 0;                                    /* x20              */
+    frame[2] = 0; frame[3] = 0;                     /* x21, x22         */
+    frame[4] = 0; frame[5] = 0;                     /* x23, x24         */
+    frame[6] = 0; frame[7] = 0;                     /* x25, x26         */
+    frame[8] = 0; frame[9] = 0;                     /* x27, x28         */
+    frame[10] = 0;                                   /* x29 (fp = 0)     */
+    frame[11] = (uint64_t)(uintptr_t)task_entry_trampoline; /* x30 = LR */
+
+    t->sp = (uint64_t)(uintptr_t)frame;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_init — inizializzazione scheduler
+ * ══════════════════════════════════════════════════════════════════ */
+void sched_init(void)
+{
+    uart_puts("[SCHED] Inizializzazione scheduler FPP...\n");
+
+    /* ── 1. Crea il task "kernel" per il contesto corrente ────────
+     *
+     * kernel_main è già in esecuzione su questo stack (boot stack).
+     * Non allochiamo un nuovo stack — usiamo quello corrente.
+     * t->sp = 0: verrà popolato alla prima chiamata di sched_context_switch.
+     */
+    sched_tcb_t *kern = task_alloc();
+    kern->name      = "kernel";
+    kern->priority  = PRIO_KERNEL;
+    kern->state     = TCB_STATE_RUNNING;
+    kern->flags     = TCB_FLAG_KERNEL;
+    kern->ticks_left = SCHED_TICK_QUANTUM;
+    /* sp = 0: non è ancora stato salvato; sched_context_switch lo salverà */
+    current_task = kern;
+
+    uart_puts("[SCHED]   task 'kernel' (pid=0, prio=");
+    pr_dec(kern->priority);
+    uart_puts(") — corrente\n");
+
+    /* ── 2. Crea il task "idle" (priorità 255) ────────────────────
+     *
+     * Usa uno stack statico per evitare dipendenza dal buddy allocator.
+     * Il task idle gira con WFE quando nessun altro task è READY.
+     */
+    sched_tcb_t *idle = task_alloc();
+    idle->name      = "idle";
+    idle->priority  = PRIO_IDLE;
+    idle->state     = TCB_STATE_READY;
+    idle->flags     = TCB_FLAG_KERNEL | TCB_FLAG_IDLE;
+    idle->ticks_left = 0xFF; /* quantum illimitato per l'idle */
+
+    uint8_t *idle_top = idle_stack + TASK_STACK_SIZE;
+    task_setup_stack(idle, idle_top, (sched_fn)NULL); /* entry = NULL: trampoline gestisce */
+
+    /* Per il task idle, usiamo una funzione speciale come entry */
+    extern void sched_idle_fn(void);
+    /* Sovrascrivi x19 nel frame con sched_idle_fn */
+    uint64_t *frame = (uint64_t *)(uintptr_t)idle->sp;
+    frame[0] = (uint64_t)(uintptr_t)sched_idle_fn;
+
+    rq_push(idle);
+
+    uart_puts("[SCHED]   task 'idle' (pid=1, prio=255) — ready\n");
+
+    /* ── 3. Registra sched_tick come callback del timer ───────────*/
+    timer_set_tick_callback(sched_tick);
+
+    uart_puts("[SCHED] Scheduler FPP pronto — ");
+    pr_dec(task_count);
+    uart_puts(" task iniziali\n");
+}
+
+/* ── Funzione del task idle (esportata per sched_switch.S) ─────────
+ *
+ * Gira per sempre: WFE mette il core in sleep fino al prossimo evento
+ * (IRQ, FIQ, SEV). Dopo WFE chiama schedule() per cedere la CPU se
+ * un task a priorità più alta è diventato READY (wake-up event).
+ */
+void sched_idle_fn(void)
+{
+    while (1) {
+        __asm__ volatile("wfe");
+        schedule();
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_task_create — crea un nuovo kernel task
+ * ══════════════════════════════════════════════════════════════════ */
+sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priority)
+{
+    sched_tcb_t *t = task_alloc();
+    if (!t) {
+        uart_puts("[SCHED] PANIC: task pool esaurito\n");
+        while (1) __asm__ volatile("wfe");
+    }
+
+    /* Alloca stack da 4KB dal buddy allocator */
+    uint64_t stack_pa = phys_alloc_page();
+    uint8_t *stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
+
+    t->name      = name;
+    t->priority  = priority;
+    t->state     = TCB_STATE_READY;
+    t->flags     = TCB_FLAG_KERNEL;
+    t->ticks_left = SCHED_TICK_QUANTUM;
+
+    task_setup_stack(t, stack_top, entry);
+
+    /* Aggiunge alla run queue */
+    {
+        uint64_t flags = irq_save();
+        rq_push(t);
+        /* Preemption immediata se il nuovo task ha priorità maggiore */
+        if (current_task && priority < current_task->priority)
+            need_resched = 1;
+        irq_restore(flags);
+    }
+
+    uart_puts("[SCHED] Task creato: '");
+    uart_puts(name);
+    uart_puts("' pid=");
+    pr_dec(t->pid);
+    uart_puts(" prio=");
+    pr_dec(priority);
+    uart_puts(" stack=");
+    pr_hex64(stack_pa);
+    uart_puts("\n");
+
+    return t;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * schedule — cuore dello scheduler FPP
+ *
+ * Seleziona il task READY a priorità massima ed esegue il switch.
+ * WCET: O(1) — 4 CLZ + lookup + sched_context_switch (16 istruzioni)
+ * ══════════════════════════════════════════════════════════════════ */
+void schedule(void)
+{
+    uint64_t flags = irq_save();
+
+    /* ── Trova il task a priorità massima ─────────────────────────
+     * bitmap_find_first() restituisce il numero di bit più basso = priorità
+     * più alta. Se -1: nessun task READY (non dovrebbe succedere: idle è sempre
+     * READY). In quel caso non switchiamo.
+     */
+    int next_prio = bitmap_find_first();
+    if (next_prio < 0 || next_prio > 255) {
+        irq_restore(flags);
+        return;
+    }
+
+    sched_tcb_t *next = rq_pop((uint8_t)next_prio);
+    if (!next) {
+        irq_restore(flags);
+        return;
+    }
+
+    sched_tcb_t *prev = current_task;
+
+    /* ── Nessun switch necessario ─────────────────────────────────*/
+    if (next == prev) {
+        /* Reinserisci nella coda (lo avevamo estratto) */
+        rq_push(next);
+        irq_restore(flags);
+        return;
+    }
+
+    /* ── Aggiorna stati ───────────────────────────────────────────*/
+
+    /* prev: se era RUNNING → torna READY (a meno che sia BLOCKED/ZOMBIE) */
+    if (prev->state == TCB_STATE_RUNNING) {
+        prev->state = TCB_STATE_READY;
+        rq_push(prev);
+    }
+    /* Se prev è BLOCKED o ZOMBIE: non torna in run_queue */
+
+    /* Ricarica quantum se esaurito */
+    if (prev->ticks_left == 0)
+        prev->ticks_left = SCHED_TICK_QUANTUM;
+
+    next->state = TCB_STATE_RUNNING;
+    next->ticks_left = next->ticks_left ? next->ticks_left : SCHED_TICK_QUANTUM;
+
+    current_task = next;
+
+    /* ── Context switch ───────────────────────────────────────────
+     * Da qui in poi esecuzione è sospesa (prev) o ripresa (da una
+     * precedente sospensione). IRQ rimangono disabilitati durante lo switch.
+     */
+    irq_restore(flags);       /* abilita IRQ prima del switch */
+    sched_context_switch(prev, next);
+    /* ← quando prev è rischedulato, ritorna qui */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_yield — cede volontariamente la CPU
+ * ══════════════════════════════════════════════════════════════════ */
+void sched_yield(void)
+{
+    uint64_t flags = irq_save();
+    if (current_task)
+        current_task->ticks_left = 0;   /* forza re-insert in coda */
+    irq_restore(flags);
+    schedule();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_block — blocca il task corrente
+ * ══════════════════════════════════════════════════════════════════ */
+void sched_block(void)
+{
+    uint64_t flags = irq_save();
+    if (current_task)
+        current_task->state = TCB_STATE_BLOCKED;
+    irq_restore(flags);
+    schedule();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_unblock — sblocca un task
+ * ══════════════════════════════════════════════════════════════════ */
+void sched_unblock(sched_tcb_t *t)
+{
+    if (!t) return;
+    uint64_t flags = irq_save();
+    if (t->state == TCB_STATE_BLOCKED) {
+        t->state = TCB_STATE_READY;
+        t->ticks_left = SCHED_TICK_QUANTUM;
+        rq_push(t);
+        if (current_task && t->priority < current_task->priority)
+            need_resched = 1;
+    }
+    irq_restore(flags);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_tick — IRQ handler del timer, chiamato ogni 1ms
+ *
+ * WCET: O(1) — no alloc, no lock, no uart.
+ * ══════════════════════════════════════════════════════════════════ */
+void sched_tick(uint64_t jiffies)
+{
+    if (!current_task) return;
+
+    /* Aggiorna tempo CPU consumato */
+    current_task->runtime_ns += TICK_NS;
+
+    /* Decrementa il quantum */
+    if (current_task->ticks_left > 0)
+        current_task->ticks_left--;
+
+    /* Quantum esaurito: richiedi reschedule */
+    if (current_task->ticks_left == 0)
+        need_resched = 1;
+
+    /* Overrun detection: deadline superata */
+    if (current_task->deadline_ms > 0 &&
+        jiffies > current_task->deadline_ms &&
+        !(current_task->flags & TCB_FLAG_IDLE)) {
+        /* Non stampiamo nell'IRQ handler: troppo lento.
+         * Settiamo solo un flag — il logging avviene in sched_stats(). */
+        need_resched = 1;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_stats
+ * ══════════════════════════════════════════════════════════════════ */
+
+static const char *state_str(uint8_t s)
+{
+    switch (s) {
+    case TCB_STATE_RUNNING: return "RUNNING";
+    case TCB_STATE_READY:   return "READY  ";
+    case TCB_STATE_BLOCKED: return "BLOCKED";
+    case TCB_STATE_ZOMBIE:  return "ZOMBIE ";
+    default:                 return "???????";
+    }
+}
+
+void sched_stats(void)
+{
+    uart_puts("[SCHED] ── Task attivi ────────────────────────────────\n");
+    uart_puts("[SCHED]  PID  PRI  STATE    TICKS   RUNTIME(ms)  NAME\n");
+    uart_puts("[SCHED]  ───  ───  ───────  ──────  ───────────  ────────────\n");
+    for (uint32_t i = 0; i < task_count; i++) {
+        sched_tcb_t *t = &task_pool[i];
+        uart_puts("[SCHED]  ");
+        /* pid */
+        uart_putc('0' + (int)(t->pid / 10));
+        uart_putc('0' + (int)(t->pid % 10));
+        uart_puts("   ");
+        /* priority */
+        if (t->priority < 100) uart_putc(' ');
+        if (t->priority < 10)  uart_putc(' ');
+        pr_dec(t->priority);
+        uart_puts("  ");
+        uart_puts(state_str(t->state));
+        uart_puts("  ");
+        /* ticks_left */
+        uart_putc(' ');
+        if (t->ticks_left < 10) uart_putc(' ');
+        pr_dec(t->ticks_left);
+        uart_puts("      ");
+        /* runtime in ms */
+        pr_dec(t->runtime_ns / 1000000ULL);
+        uart_puts("          ");
+        uart_puts(t->name);
+        uart_puts("\n");
+    }
+    uart_puts("[SCHED] ─────────────────────────────────────────────\n");
+}

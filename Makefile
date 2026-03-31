@@ -24,7 +24,8 @@ LDFLAGS  = -T linker.ld -nostdlib
 
 # Sorgenti
 ASM_SRCS = boot/boot.S \
-           boot/vectors.S
+           boot/vectors.S \
+           kernel/sched_switch.S
 C_SRCS   = kernel/main.c \
            kernel/microkernel.c \
            kernel/exception.c \
@@ -33,6 +34,7 @@ C_SRCS   = kernel/main.c \
            kernel/kheap.c \
            kernel/gic.c \
            kernel/timer.c \
+           kernel/sched.c \
            drivers/uart.c \
            drivers/framebuffer.c
 
