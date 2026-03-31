@@ -14,6 +14,7 @@
 #include "mmu.h"
 #include "pmm.h"
 #include "kheap.h"
+#include "gic.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -96,7 +97,22 @@ void kernel_main(void)
     kfree(o2);
     uart_puts("[PMM] Test alloc/free OK\n");
 
-    /* === Fase 5: Kernel Heap — named typed caches (M1-04) === */
+    /* === Fase 5: GIC-400 Interrupt Controller (M2-01) === */
+    gic_init();
+    /* Registra IRQ UART0 (SPI #33) — livello driver, level-triggered.
+     * Handler stub: al boot vogliamo solo il GIC funzionante; il vero
+     * driver UART interrupt-driven arriva con M4-01. */
+    gic_register_irq(IRQ_UART0, NULL,         /* NULL → default handler */
+                     NULL, GIC_PRIO_DRIVER, GIC_FLAG_LEVEL);
+    gic_enable_irq(IRQ_UART0);
+
+    /* Abilita IRQ globali sul core — da qui il GIC può interrompere il kernel */
+    gic_enable_irqs();
+    uart_puts("[GIC] IRQ globali abilitati — DAIF.I = 0\n");
+
+    gic_stats();
+
+    /* === Fase 7: Kernel Heap — named typed caches (M1-04) === */
     kheap_init();
     /* Da qui: task_cache, port_cache, ipc_cache disponibili.
      * kmem_cache_alloc/free O(1) garantito (cache pre-caldate). */
@@ -110,10 +126,10 @@ void kernel_main(void)
     kmem_cache_free(ipc_cache,  m1);
     uart_puts("[KHEAP] Test named cache alloc/free OK\n");
 
-    /* === Fase 6: Microkernel === */
+    /* === Fase 8: Microkernel === */
     mk_init();
 
-    /* === Fase 7: Framebuffer === */
+    /* === Fase 9: Framebuffer === */
     fb_init();
 
     /* Crea task per i server di sistema (stile Hurd) */

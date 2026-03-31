@@ -184,18 +184,19 @@ void exception_handler(exc_source_t src, exc_type_t type,
 
 /* ── IRQ Handler ─────────────────────────────────────────────────────── */
 /*
- * Stub iniziale. Sarà sostituito dal vero handler GIC-400 in M2-01.
- * Per ora stampa solo il numero di IRQ sull'UART e ritorna.
+ * Chiamato da exception_handler() per ogni IRQ ricevuto.
+ * Delega a gic_handle_irq() che esegue IAR→dispatch→EOIR in O(1).
+ *
+ * RT: questo percorso NON deve allocare memoria, NON deve acquisire lock
+ * non-preemptibili, NON deve stampare su UART (tranne in handler specifici).
  */
+#include "gic.h"
+
 void irq_handler(exc_source_t src, exception_frame_t *frame)
 {
     (void)src;
     (void)frame;
-    /*
-     * Qui andrà la lettura dell'IAR (Interrupt Acknowledge Register)
-     * del GIC e il dispatch all'handler registrato.
-     * Per ora: nessuna azione, il kernel continua normalmente.
-     */
+    gic_handle_irq();
 }
 
 /* ── Inizializzazione ────────────────────────────────────────────────── */

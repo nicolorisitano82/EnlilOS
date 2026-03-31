@@ -75,17 +75,20 @@ fondamentale ha una cache dedicata con nome, free list propria e limite configur
 
 ## MILESTONE 2 — Interrupt e Timer RT
 
-### ⬜ M2-01 · GIC-400 — Interrupt Controller
-**Priorità:** CRITICA
+### ✅ M2-01 · GIC-400 — Interrupt Controller
+**Stato:** COMPLETATA
 
-**RT design:** mapping diretto IRQ → handler senza ricerca. Tabella handler indicizzata
-per numero IRQ (array, non lista). Nessuna allocazione in `irq_register()`.
+**RT design:** tabella di dispatch `irq_table[256]` indicizzata direttamente sull'IRQ ID.
+Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 
 - GICD @ `0x08000000`, GICC @ `0x08010000`
-- Priorità hardware per IRQ: 0-255, usare le stesse priorità dei task RT
-- Latenza dal segnale IRQ all'ingresso in handler C: target < 1µs (≈60 cicli @ 60MHz)
-- **Interrupt nesting:** abilitare (`CPSR.I` abbassato appena salvato il contesto minimo)
-  per permettere a IRQ ad alta priorità di interrompere handler di priorità bassa
+- 256 linee IRQ rilevate da `GICD_TYPER.ITLinesNumber` al boot
+- Priorità hardware 0–255: `GIC_PRIO_REALTIME=0x40`, `GIC_PRIO_DRIVER=0x80`, `GIC_PRIO_MIN=0xF0`
+- `gic_handle_irq()`: IAR read → bounds check → call → EOIR write = WCET costante (3 MMIO + 1 call)
+- `gic_register_irq()`: O(1) — scrittura array + 3 MMIO, chiamare al boot
+- `gic_enable_irqs()` / `gic_disable_irqs()`: inline `msr daifclr/daifset, #2`
+- IRQ UART0 (#33) registrato e abilitato; zero spurious interrupt al boot
+- `irq_handler()` in `exception.c` ora chiama `gic_handle_irq()` (non più stub)
 
 ---
 
@@ -243,7 +246,99 @@ Tutto in RAM → latenza di accesso O(1), adatto a task RT che leggono config al
 
 ---
 
-## MILESTONE 6 — ELF Loader
+## MILESTONE 5b — GPU & Display (Apple M-series Metal-compatible)
+
+> **Principio:** tutta la pipeline grafica (framebuffer, compositing, rendering 2D/3D)
+> passa **esclusivamente** attraverso il chip grafico integrato del processore M-series.
+> Il kernel non scrive mai pixel direttamente in RAM — usa il GPU per ogni operazione
+> di output visivo. Questo garantisce DMA coerenza, banda ottimale e zero CPU stall
+> sulle operazioni grafiche.
+>
+> **Nota su QEMU:** in ambiente di sviluppo si usa `virtio-gpu` o `ramfb` come proxy;
+> le API del driver GPU sono progettate per essere sostituibili senza cambiare il codice
+> dei client (server grafico, compositor).
+
+---
+
+### ⬜ M5b-01 · GPU Driver — Virtio-GPU (dev) / Apple AGX (target)
+**Priorità:** ALTA
+
+**Architettura:**
+- Il kernel espone un'interfaccia `gpu_ops_t` astratta (stile `vfs_ops_t`)
+- In sviluppo: backend `virtio-gpu` su QEMU (`-device virtio-gpu-pci`)
+- Su M-series reale: backend **Apple AGX GPU** via MMIO (compatibile con driver Asahi Linux)
+- Nessun accesso diretto al framebuffer dalla CPU dopo l'init — tutto passa per command buffer GPU
+
+**Componenti:**
+- `drivers/gpu/virtio_gpu.c` — implementazione virtio-gpu per QEMU
+- `drivers/gpu/agx.c` — stub Apple AGX (M1/M2/M3), MMIO map dal device tree
+- `include/gpu.h` — interfaccia astratta `gpu_ops_t`
+
+**Operazioni GPU esposte:**
+```c
+gpu_ops_t {
+    int  (*init)(void);
+    void (*flush)(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    void (*blit)(gpu_buf_t *src, gpu_buf_t *dst, gpu_rect_t *r);
+    void (*fill_rect)(gpu_buf_t *dst, gpu_rect_t *r, uint32_t color);
+    void (*draw_text)(gpu_buf_t *dst, uint32_t x, uint32_t y,
+                      const char *str, uint32_t fg, uint32_t bg);
+}
+```
+
+**RT design:**
+- Command buffer DMA pre-allocato al boot (nessuna allocazione in hot path)
+- `gpu_flush()` asincrono con completion callback → non blocca il core RT
+- Priorità IRQ GPU = `GIC_PRIO_DRIVER` (non interrompe task hard-RT)
+
+---
+
+### ⬜ M5b-02 · Scanout & Display Engine
+**Priorità:** ALTA (dipende da M5b-01)
+
+La GPU gestisce il **display engine** — il kernel non mantiene mai un framebuffer
+software accessibile dalla CPU in modalità operativa:
+
+- **Scanout buffer** allocato in memoria GPU-accessibile (IOMMU mappato)
+- **Page flip** atomico: il compositor prepara il frame in un back buffer,
+  poi flip — il display engine commuta senza tearing
+- **Vsync IRQ**: segnalato dalla GPU al GIC, sveglia il compositor con latenza < 1ms
+- Risoluzione dinamica: il driver negozia con il display (`EDID` o `Display Stream Compression`)
+
+**Integrazione con il server grafico (M7-02):**
+- Il server grafico (user-space, stile Wayland) scrive in surface buffer GPU
+- Passa il buffer al compositor via IPC con zero-copy (shared GPU memory handle)
+- Il compositor chiama `gpu_flush()` → scanout → display
+
+---
+
+### ⬜ M5b-03 · GPU Memory Manager
+**Priorità:** MEDIA (dipende da M5b-01)
+
+Gestione della VRAM / memoria GPU-mappata:
+
+- Pool di **GPU buffer objects** (GBO) pre-allocati al boot
+- `gpu_alloc(size, type)`: O(1) da pool, tipi: `GPU_MEM_SCANOUT`, `GPU_MEM_TEXTURE`, `GPU_MEM_CMD`
+- `gpu_free(gbo)`: O(1) — ritorno al pool
+- **IOMMU mapping** per DMA sicuro: la GPU vede solo le sue regioni autorizzate
+- Cache management: `gpu_flush_cache(gbo)` prima di submit command buffer
+
+---
+
+### ⬜ M5b-04 · 2D Rendering Accelerato
+**Priorità:** MEDIA (dipende da M5b-02)
+
+Operazioni 2D eseguite sulla GPU, non sulla CPU:
+
+- `gpu_fill_rect()` — riempimento rettangolo (sfondo desktop, finestre)
+- `gpu_blit()` — copia buffer accelerata (scroll, finestre trasparenti)
+- `gpu_draw_glyph()` — rendering font bitmap/vettoriale via GPU shader semplice
+- `gpu_alpha_blend()` — compositing con canale alpha (trasparenza finestre)
+
+Tutti i comandi vengono accodati in un **command ring** e sottomessi in batch
+per massimizzare il throughput GPU e minimizzare il numero di context switch GPU.
+
+---
 
 ### ⬜ M6-01 · ELF64 Static Loader
 **Priorità:** CRITICA
@@ -300,21 +395,24 @@ Text mode 80×25 su framebuffer. Shell ELF statico con comandi: `ls`, `cat`, `ec
 
 ```
 M1-01 ✅ → M1-02 ✅
-M1-02 → M1-03 → M1-04
-M1-03 → M2-01 → M2-02 → M2-03
+M1-02 → M1-03 ✅ → M1-04 ✅
+M1-03 → M2-01 ✅ → M2-02 → M2-03
 M2-03 → M3-01 → M3-02
 M3-02 → M4-01
 M3-02 → M5-01 → M5-02 → M5-03/M5-04
-         M5-05 ─────────────────────┐
-M3-02 → M6-01 ←──────────────────── ┘
+         M5-05 ──────────────────────┐
+M5-01 → M5b-01 → M5b-02 → M5b-03   │
+                 M5b-04 ─────────────┤
+M3-02 → M6-01 ←─────────────────────┘
 M6-01 → M6-02 → M7-02
 M2-03 → M7-01
 ```
 
 ## Prossimi tre step consigliati
 
-1. **M2-01** GIC-400 — 2 ore
-2. **M2-02** ARM Generic Timer (1ms tick) — 1-2 ore
-3. **M2-03** Scheduler FPP a 256 priorità — 3-4 ore
+1. **M2-02** ARM Generic Timer (1ms tick) — 1-2 ore
+2. **M2-03** Scheduler FPP a 256 priorità — 3-4 ore
+3. **M5b-01** GPU driver (virtio-gpu su QEMU, stub AGX) — 3-4 ore
 
-Dopo questi tre, il sistema è un microkernel RT preemptivo funzionante.
+Dopo M2-02 + M2-03 il sistema è un microkernel RT preemptivo funzionante.
+Dopo M5b-01 tutta la grafica transita dalla GPU — zero accessi CPU al framebuffer.
