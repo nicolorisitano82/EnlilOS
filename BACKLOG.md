@@ -186,6 +186,42 @@ Echo, modalità canonica, backspace, CTRL+C → SIGINT. Non in hot path RT.
 
 ---
 
+### ⬜ M4-04 · Supporto Font UTF-8 completo
+**Priorità:** MEDIA
+
+Estendere il sistema di rendering testuale per supportare l'intero set Unicode via UTF-8.
+Il font bitmap attuale copre solo ASCII 32–90 (maiuscole A–Z + numeri + punteggiatura base).
+
+**Componenti:**
+
+- **Decoder UTF-8** (`kernel/utf8.c`): decodifica sequenze multi-byte in codepoint Unicode,
+  WCET O(n) dove n = lunghezza stringa in byte. Sequenze malformate → U+FFFD (replacement char).
+
+- **Font bitmap esteso** (`drivers/font_unicode.c`):
+  - Piano 0 (BMP): blocchi essenziali — Latin Extended (U+0080–U+024F), Greek (U+0370–U+03FF),
+    Cyrillic (U+0400–U+04FF), simboli comuni (U+2000–U+27FF), box drawing (U+2500–U+257F)
+  - Font 8×16 PSF2 (PC Screen Font v2) — formato standard Linux, ~256KB per il BMP completo
+  - Lookup O(1) per ASCII, O(log N) con tabella ordinata per codepoints supplementari
+
+- **`fb_draw_char_utf8(x, y, codepoint, fg, bg)`**: rendering di un singolo codepoint
+- **`fb_draw_string_utf8(x, y, utf8_str, fg, bg)`**: rendering di stringa UTF-8 completa
+- **`fb_draw_string_centered_utf8(utf8_str, fg, bg)`**: centrato
+
+**Formato font PSF2:**
+  - Header 32 byte: magic `0x864AB572`, versione, dimensione header, flag, num glyph, byte per glyph
+  - Opzionale: Unicode table (codepoint → glyph index)
+  - Incluso come array statico nel kernel (oggetto `.o` generato da `objcopy`)
+
+**RT design:** il font risiede in `.rodata` (read-only, cache-friendly).
+Il rendering non alloca memoria — scrive direttamente nel framebuffer buffer.
+`fb_draw_string_utf8()` non è in hot path RT (solo per output UI).
+
+**Tool build:**
+  - `tools/gen_font.py`: converte font PSF2 → array C per inclusione diretta
+  - Alternativa: `objcopy -I binary font.psf font.o` + simboli `_binary_font_psf_start/end`
+
+---
+
 ## MILESTONE 5 — Filesystem ReiserFS
 
 ### ⬜ M5-01 · VirtIO Block Device
