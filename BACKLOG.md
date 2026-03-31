@@ -92,16 +92,19 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 
 ---
 
-### ⬜ M2-02 · ARM Generic Timer
-**Priorità:** CRITICA — pilastro del sistema RT
+### ✅ M2-02 · ARM Generic Timer
+**Stato:** COMPLETATA
 
-**RT design:** il timer è l'unico elemento che garantisce i deadline.
+**RT design:** Physical EL1 Timer (CNTP) con reload via CNTP_TVAL — nessun drift accumulato.
 
-- Frequenza letta da `CNTFRQ_EL0` (tipicamente 62.5 MHz su QEMU)
-- Tick del sistema: **1ms** (1000Hz) per granularità sufficiente a task con deadline 5ms+
-- `get_time_ns()` — lettura diretta di `CNTP_TVAL_EL0`, O(1), nessuna lock
-- **Time accounting per task:** ogni task ha un `budget_ns` (tempo CPU rimanente nel periodo)
-- **Overrun detection:** se un task usa più del suo budget → log + preemption immediata
+- `CNTFRQ_EL0 = 62500000 Hz (62.5 MHz)` — letto dal firmware QEMU al boot
+- Tick: **1ms (1000 Hz)** — period = 62500 cicli, reload a ogni IRQ
+- `timer_now_ns()` O(1): `(cntpct * ns_per_tick_frac) >> 32`, nessuna divisione
+- `timer_now_ms()` O(1): legge `jiffies` con barriera di memoria
+- `timer_delay_us()`: busy-wait via CNTPCT_EL0, solo per uso init
+- IRQ PPI #30 registrato nel GIC prio=`REALTIME=0x40`, edge-triggered
+- `timer_set_tick_callback(fn)`: hook per lo scheduler M2-03
+- Verificato su QEMU: 8 tick in ~10ms, elapsed ~10.041ms, errore < 0.5%
 
 ---
 

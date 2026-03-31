@@ -15,6 +15,7 @@
 #include "pmm.h"
 #include "kheap.h"
 #include "gic.h"
+#include "timer.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -111,6 +112,53 @@ void kernel_main(void)
     uart_puts("[GIC] IRQ globali abilitati — DAIF.I = 0\n");
 
     gic_stats();
+
+    /* === Fase 6: ARM Generic Timer (M2-02) === */
+    timer_init();
+    timer_start();
+    /* Da qui: tick ogni 1ms, jiffies incrementato dall'IRQ handler.
+     * timer_now_ns() O(1), timer_now_ms() O(1) — usabili ovunque. */
+
+    /* Verifica che il timer stia girando: aspetta 10ms e controlla jiffies */
+    {
+        uint64_t t0 = timer_now_ns();
+        timer_delay_us(10000);   /* busy-wait 10ms — solo al boot */
+        uint64_t t1 = timer_now_ns();
+        uint64_t elapsed_us = (t1 - t0) / 1000;
+        uart_puts("[TIMER] Test: elapsed ~");
+        /* stampa semplice senza printf */
+        uint64_t ms = elapsed_us / 1000;
+        uint64_t us_rem = elapsed_us % 1000;
+        if (ms > 0) { /* pr_dec non è visibile qui, usiamo UART diretta */
+            char buf[8]; int len = 0;
+            uint64_t v = ms;
+            while (v) { buf[len++] = '0' + (int)(v % 10); v /= 10; }
+            for (int i = len-1; i >= 0; i--) uart_putc(buf[i]);
+        } else {
+            uart_putc('0');
+        }
+        uart_puts(".");
+        {
+            char buf[4]; int len = 0;
+            uint64_t v = us_rem;
+            while (v) { buf[len++] = '0' + (int)(v % 10); v /= 10; }
+            while (len < 3) buf[len++] = '0';
+            for (int i = len-1; i >= 0; i--) uart_putc(buf[i]);
+        }
+        uart_puts(" ms — jiffies=");
+        {
+            char buf[12]; int len = 0;
+            uint64_t v = timer_now_ms();
+            if (v == 0) { uart_putc('0'); }
+            else {
+                while (v) { buf[len++] = '0' + (int)(v % 10); v /= 10; }
+                for (int i = len-1; i >= 0; i--) uart_putc(buf[i]);
+            }
+        }
+        uart_puts("\n");
+        (void)elapsed_us;
+    }
+    timer_stats();
 
     /* === Fase 7: Kernel Heap — named typed caches (M1-04) === */
     kheap_init();

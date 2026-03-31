@@ -32,6 +32,7 @@ C_SRCS   = kernel/main.c \
            kernel/pmm.c \
            kernel/kheap.c \
            kernel/gic.c \
+           kernel/timer.c \
            drivers/uart.c \
            drivers/framebuffer.c
 
