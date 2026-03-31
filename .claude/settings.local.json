@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make clean:*)",
+      "Bash(make)",
+      "Bash(brew install:*)",
+      "Bash(timeout 5 qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel nros.elf)",
+      "Bash(gtimeout 5 qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel /Users/nicolo/nros/nros.elf)",
+      "Bash(aarch64-elf-objdump -h nros.elf)",
+      "Bash(aarch64-elf-objdump -d nros.elf)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
