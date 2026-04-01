@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Context Switch AArch64 (M2-03)
+ * EnlilOS Microkernel - Context Switch AArch64 (M2-03)
  *
  * sched_context_switch(task_t *prev, task_t *next)
  *   x0 = prev   (task_t*, sp a offset 0)

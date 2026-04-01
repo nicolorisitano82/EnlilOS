@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - MMU Implementation (M1-02)
+ * EnlilOS Microkernel - MMU Implementation (M1-02)
  * AArch64 Virtual Memory — identity mapping RT-ottimizzato
  *
  * Struttura page table scelta per il real-time:
@@ -182,18 +182,18 @@ static void mmu_enable(void)
 
 void mmu_init(void)
 {
-    uart_puts("[NROS] MMU: costruzione page table...\n");
+    uart_puts("[EnlilOS] MMU: costruzione page table...\n");
 
     build_page_tables();
 
-    uart_puts("[NROS] MMU: L1[0] = MMIO  (0x00000000-0x3FFFFFFF) Device-nGnRnE\n");
-    uart_puts("[NROS] MMU: L1[1] = RAM   (0x40000000-0x7FFFFFFF) Normal WB\n");
-    uart_puts("[NROS] MMU: abilitazione MMU + D-cache + I-cache...\n");
+    uart_puts("[EnlilOS] MMU: L1[0] = MMIO  (0x00000000-0x3FFFFFFF) Device-nGnRnE\n");
+    uart_puts("[EnlilOS] MMU: L1[1] = RAM   (0x40000000-0x7FFFFFFF) Normal WB\n");
+    uart_puts("[EnlilOS] MMU: abilitazione MMU + D-cache + I-cache...\n");
 
     mmu_enable();
 
     /* Se arriviamo qui la MMU è attiva e il codice gira cacheable */
-    uart_puts("[NROS] MMU attiva — cache abilitate\n");
+    uart_puts("[EnlilOS] MMU attiva — cache abilitate\n");
 }
 
 /*

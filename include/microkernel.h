@@ -1,13 +1,13 @@
 /*
- * NROS Microkernel - Core del Microkernel
+ * EnlilOS Microkernel - Core del Microkernel
  * Architettura stile GNU Hurd:
  *   - Il kernel gestisce solo: IPC, scheduling, gestione memoria
  *   - I driver girano come task in user-space (server)
  *   - La comunicazione avviene tramite message passing
  */
 
-#ifndef NROS_MICROKERNEL_H
-#define NROS_MICROKERNEL_H
+#ifndef ENLILOS_MICROKERNEL_H
+#define ENLILOS_MICROKERNEL_H
 
 #include "types.h"
 

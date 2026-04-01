@@ -1,0 +1,545 @@
+/*
+ * EnlilOS Microkernel - Syscall Base (M3-01 / M3-02)
+ *
+ * Implementa:
+ *   - syscall_table[256]: dispatch O(1)
+ *   - fd_table[SCHED_MAX_TASKS][MAX_FD]: file descriptor per task
+ *   - task_brk[SCHED_MAX_TASKS]: program break per task
+ *   - 13 syscall base + ENOSYS fallback
+ *
+ * RT: nessuna allocazione nel dispatch path. WCET = O(1).
+ */
+
+#include "syscall.h"
+#include "keyboard.h"
+#include "sched.h"
+#include "timer.h"
+#include "tty.h"
+#include "pmm.h"
+#include "uart.h"
+#include "types.h"
+
+/* ════════════════════════════════════════════════════════════════════
+ * File descriptor table
+ * ════════════════════════════════════════════════════════════════════ */
+
+#define MAX_FD          16
+
+#define FD_TYPE_FREE    0
+#define FD_TYPE_CONSOLE 1   /* stdin / stdout / stderr → UART */
+#define FD_TYPE_NULL    2   /* /dev/null */
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  flags;     /* O_RDONLY / O_WRONLY / O_RDWR */
+    uint16_t _pad;
+} fd_entry_t;
+
+/*
+ * Indicizzata per [pid % SCHED_MAX_TASKS][fd].
+ * Tutti i task partono con 0/1/2 preimpostati come CONSOLE.
+ */
+static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
+
+/*
+ * Program break per task (indirizzato come sopra).
+ * brk=0 → non ancora inizializzato.
+ */
+static uint64_t task_brk[SCHED_MAX_TASKS];
+
+/* ── Helpers ──────────────────────────────────────────────────────── */
+
+/* Confronto stringhe senza libreria C */
+static int streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (*a == *b);
+}
+
+/* Indice nel fd_table per il task corrente */
+static inline int task_idx(void)
+{
+    if (!current_task) return 0;
+    return (int)(current_task->pid % SCHED_MAX_TASKS);
+}
+
+/* Restituisce l'entry fd, NULL se fuori range o free */
+static fd_entry_t *fd_get(int fd)
+{
+    if (fd < 0 || fd >= MAX_FD) return NULL;
+    fd_entry_t *e = &fd_tables[task_idx()][fd];
+    return (e->type != FD_TYPE_FREE) ? e : NULL;
+}
+
+/* Alloca il primo fd libero >= 3 (non tocca stdin/stdout/stderr) */
+static int fd_alloc(void)
+{
+    int idx = task_idx();
+    for (int i = 3; i < MAX_FD; i++) {
+        if (fd_tables[idx][i].type == FD_TYPE_FREE)
+            return i;
+    }
+    return -1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Tabella globale
+ * ════════════════════════════════════════════════════════════════════ */
+
+syscall_entry_t syscall_table[SYSCALL_MAX];
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 1 — write
+ *
+ * args: fd, buf, count
+ * RT-safe: O(n) su UART (n ≤ 4096), nessuna allocazione
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_write(uint64_t args[6])
+{
+    int         fd    = (int)args[0];
+    const char *buf   = (const char *)(uintptr_t)args[1];
+    uint64_t    count = args[2];
+
+    if (!buf)   return ERR(EFAULT);
+    if (!count) return 0;
+    if (count > 4096) count = 4096;
+
+    fd_entry_t *e = fd_get(fd);
+    if (!e) return ERR(EBADF);
+
+    if (e->type == FD_TYPE_NULL)    return count;   /* discard */
+    if (e->type != FD_TYPE_CONSOLE) return ERR(EBADF);
+
+    for (uint64_t i = 0; i < count; i++)
+        uart_putc(buf[i]);
+
+    return count;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 2 — read
+ *
+ * args: fd, buf, count
+ * RT-safe: non-blocking. Console in modalita' canonica via line discipline.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_read(uint64_t args[6])
+{
+    int      fd  = (int)args[0];
+    char    *buf = (char *)(uintptr_t)args[1];
+    uint64_t cnt = args[2];
+
+    fd_entry_t *e = fd_get(fd);
+    if (!e) return ERR(EBADF);
+    if (!buf || cnt == 0) return ERR(EFAULT);
+
+    if (e->type == FD_TYPE_NULL)    return 0;       /* EOF */
+    if (e->type != FD_TYPE_CONSOLE) return ERR(EBADF);
+
+    if (cnt > 4096) cnt = 4096;
+    return tty_read(buf, cnt);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 3 — exit
+ *
+ * args: exit_code
+ * Non ritorna mai. Segna il task ZOMBIE e blocca.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_exit(uint64_t args[6])
+{
+    (void)args;
+    if (current_task)
+        current_task->state = TCB_STATE_ZOMBIE;
+    sched_block();
+    return 0;   /* unreachable */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 4 — open
+ *
+ * args: path, flags, mode (ignorato)
+ * Supporta: /dev/console, /dev/tty, /dev/null
+ * Tutto il resto → ENOENT (VFS non ancora disponibile, M5-02)
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_open(uint64_t args[6])
+{
+    const char *path  = (const char *)(uintptr_t)args[0];
+    uint8_t     oflags = (uint8_t)args[1];
+
+    if (!path) return ERR(EFAULT);
+
+    int fd = fd_alloc();
+    if (fd < 0) return ERR(ENFILE);
+
+    int idx = task_idx();
+
+    if (streq(path, "/dev/console") || streq(path, "/dev/tty") ||
+        streq(path, "/dev/stdin")   || streq(path, "/dev/stdout") ||
+        streq(path, "/dev/stderr")) {
+        fd_tables[idx][fd].type  = FD_TYPE_CONSOLE;
+        fd_tables[idx][fd].flags = oflags;
+        return (uint64_t)fd;
+    }
+    if (streq(path, "/dev/null")) {
+        fd_tables[idx][fd].type  = FD_TYPE_NULL;
+        fd_tables[idx][fd].flags = oflags;
+        return (uint64_t)fd;
+    }
+
+    /* VFS non disponibile fino a M5-02 */
+    return ERR(ENOENT);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 5 — close
+ *
+ * args: fd
+ * Non si chiudono fd 0/1/2 (protezione stdin/stdout/stderr).
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_close(uint64_t args[6])
+{
+    int fd = (int)args[0];
+
+    if (fd < 0 || fd >= MAX_FD) return ERR(EBADF);
+
+    /* Protezione su fd standard */
+    if (fd <= 2) return ERR(EBADF);
+
+    int idx = task_idx();
+    if (fd_tables[idx][fd].type == FD_TYPE_FREE) return ERR(EBADF);
+
+    fd_tables[idx][fd].type  = FD_TYPE_FREE;
+    fd_tables[idx][fd].flags = 0;
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 6 — fstat
+ *
+ * args: fd, struct stat *buf
+ * Stub: ritorna 0 per console e null, EBADF altrimenti.
+ * Popolamento completo della struct stat richiede M5-02 (VFS).
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_fstat(uint64_t args[6])
+{
+    int fd = (int)args[0];
+
+    fd_entry_t *e = fd_get(fd);
+    if (!e) return ERR(EBADF);
+
+    /*
+     * struct stat non popolata: il chiamante deve aspettare M5-02.
+     * Ritorniamo 0 (successo) per non bloccare chi controlla solo
+     * il codice di ritorno (es. newlib isatty → fstat → controlla S_IFCHR).
+     * Il buffer puntato da args[1] NON viene scritto.
+     */
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 7 — mmap
+ *
+ * args: addr(hint), length, prot, flags, fd, offset
+ * Solo MAP_ANONYMOUS supportato. MMU identity-mapped → PA == VA.
+ * Usa il buddy allocator per allocare pagine fisiche contigue.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_mmap(uint64_t args[6])
+{
+    /* uint64_t addr_hint = args[0]; (ignorato) */
+    uint64_t length = args[1];
+    /* uint32_t prot  = (uint32_t)args[2]; */
+    uint32_t flags  = (uint32_t)args[3];
+    /* int      mapfd = (int)args[4]; */
+    /* uint64_t off   = args[5]; */
+
+    if (length == 0)                return MAP_FAILED_VA;
+    if (!(flags & MAP_ANONYMOUS))   return MAP_FAILED_VA;
+
+    /* Calcola ordine buddy (pagine = ceiling(length / 4096)) */
+    uint64_t pages = (length + 4095ULL) / 4096ULL;
+    if (pages > 256) return MAP_FAILED_VA;  /* max 1MB per chiamata */
+
+    uint32_t order = 0;
+    uint64_t p = pages;
+    while (p > 1) { p >>= 1; order++; }
+    if ((1ULL << order) < pages) order++;
+    if (order > 10) order = 10;
+
+    uint64_t pa = phys_alloc_pages(order);
+    if (pa == 0) return MAP_FAILED_VA;
+
+    /* Zero-fill: evita leakage di dati kernel in user-space */
+    uint8_t *ptr = (uint8_t *)(uintptr_t)pa;
+    uint64_t alloc_bytes = (1ULL << order) * 4096ULL;
+    for (uint64_t i = 0; i < alloc_bytes; i++) ptr[i] = 0;
+
+    return pa;  /* identity map: PA == VA */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 8 — munmap
+ *
+ * args: addr, length
+ * Rilascia le pagine al buddy allocator.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_munmap(uint64_t args[6])
+{
+    uint64_t addr   = args[0];
+    uint64_t length = args[1];
+
+    if (addr == 0 || length == 0) return ERR(EINVAL);
+
+    uint64_t pages = (length + 4095ULL) / 4096ULL;
+    uint32_t order = 0;
+    uint64_t p = pages;
+    while (p > 1) { p >>= 1; order++; }
+    if ((1ULL << order) < pages) order++;
+    if (order > 10) order = 10;
+
+    phys_free_pages(addr, order);
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 9 — brk
+ *
+ * args: new_brk (0 = query)
+ * Gestisce il program break per il task corrente.
+ * Il break cresce verso l'alto a partire da HEAP_BASE.
+ * Non alloca pagine (usa mmap per quello): traccia solo il puntatore.
+ *
+ * RT: O(1), nessuna allocazione.
+ * ════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Ogni task ha uno spazio heap virtuale distinto:
+ *   task[i] → base = HEAP_BASE + i * HEAP_TASK_SIZE
+ *
+ * Con MMU identity-mapped, questo richiede che le aree non si
+ * sovrappongano. 4MB per task è più che sufficiente per M3-M6.
+ */
+#define HEAP_BASE       0x60000000ULL   /* 1.5 GB fisico */
+#define HEAP_TASK_SIZE  0x00400000ULL   /* 4 MB per task */
+
+static uint64_t sys_brk(uint64_t args[6])
+{
+    if (!current_task) return ERR(ENOMEM);
+
+    int idx = task_idx();
+
+    /* Prima chiamata: inizializza il break alla base dell'area del task */
+    if (task_brk[idx] == 0)
+        task_brk[idx] = HEAP_BASE + (uint64_t)idx * HEAP_TASK_SIZE;
+
+    uint64_t new_brk = args[0];
+
+    /* args[0] == 0 → query del break corrente */
+    if (new_brk == 0)
+        return task_brk[idx];
+
+    uint64_t base  = HEAP_BASE + (uint64_t)idx * HEAP_TASK_SIZE;
+    uint64_t limit = base + HEAP_TASK_SIZE;
+
+    if (new_brk < base || new_brk >= limit)
+        return task_brk[idx];   /* ritorna vecchio break = ENOMEM implicito */
+
+    task_brk[idx] = new_brk;
+    return new_brk;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 10 — execve
+ *
+ * Stub: richiede ELF loader (M6-02).
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_execve(uint64_t args[6])
+{
+    (void)args;
+    return ERR(ENOSYS);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 11 — fork
+ *
+ * Stub: richiede copy-on-write MMU (M6+).
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_fork(uint64_t args[6])
+{
+    (void)args;
+    return ERR(ENOSYS);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 12 — waitpid
+ *
+ * args: pid, status_ptr (ignorato), options, timeout_ms
+ * RT-safe con timeout_ms > 0: attesa bounded garantita.
+ *
+ * pid > 0: attende quel task specifico
+ * pid == -1: nessun parent tracking ancora → ECHILD
+ * WNOHANG: polling non-blocking (RT-safe incondizionatamente)
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_waitpid(uint64_t args[6])
+{
+    int32_t  pid_arg    = (int32_t)args[0];
+    /* args[1] = status ptr (ignorato) */
+    uint32_t options    = (uint32_t)args[2];
+    uint64_t timeout_ms = args[3];
+
+    /* pid = -1: attesa di "qualsiasi figlio" — non supportata senza fork */
+    if (pid_arg < 0) return ERR(ECHILD);
+
+    sched_tcb_t *t = sched_task_find((uint32_t)pid_arg);
+    if (!t) return ERR(ECHILD);
+
+    /* WNOHANG: non blocca, ritorna 0 se non ancora zombie */
+    if (options & WNOHANG)
+        return (t->state == TCB_STATE_ZOMBIE) ? (uint64_t)pid_arg : 0;
+
+    /*
+     * Attesa con timeout.
+     * timeout_ms = 0 → attesa illimitata (sconsigliato per task RT).
+     * Il loop cede la CPU ad ogni iterazione → non è busy-wait puro.
+     */
+    uint64_t deadline = (timeout_ms > 0)
+        ? timer_now_ms() + timeout_ms
+        : (uint64_t)-1ULL;
+
+    while (t->state != TCB_STATE_ZOMBIE) {
+        if (timer_now_ms() >= deadline)
+            return ERR(EAGAIN);
+        sched_yield();
+    }
+
+    return (uint64_t)pid_arg;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 13 — clock_gettime
+ *
+ * args: clock_id, struct timespec *ts
+ * Scrive { tv_sec, tv_nsec } nel puntatore ts.
+ * RT-safe O(1): legge CNTPCT_EL0 direttamente.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_clock_gettime(uint64_t args[6])
+{
+    /* clock_id: CLOCK_REALTIME=0, CLOCK_MONOTONIC=1 — entrambi usano CNTPCT */
+    timespec_t *ts = (timespec_t *)(uintptr_t)args[1];
+
+    uint64_t ns = timer_now_ns();
+
+    if (ts) {
+        ts->tv_sec  = (int64_t)(ns / 1000000000ULL);
+        ts->tv_nsec = (int64_t)(ns % 1000000000ULL);
+    }
+
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * ENOSYS fallback
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_enosys(uint64_t args[6])
+{
+    (void)args;
+    return ERR(ENOSYS);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * syscall_init — popola la tabella e inizializza le strutture dati
+ * ════════════════════════════════════════════════════════════════════ */
+void syscall_init(void)
+{
+    /* 1. Inizializza fd_table: fd 0/1/2 = CONSOLE per tutti i task */
+    for (int i = 0; i < SCHED_MAX_TASKS; i++) {
+        fd_tables[i][0].type = FD_TYPE_CONSOLE; /* stdin  */
+        fd_tables[i][1].type = FD_TYPE_CONSOLE; /* stdout */
+        fd_tables[i][2].type = FD_TYPE_CONSOLE; /* stderr */
+        for (int j = 3; j < MAX_FD; j++)
+            fd_tables[i][j].type = FD_TYPE_FREE;
+    }
+
+    /* 2. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
+    for (int i = 0; i < SCHED_MAX_TASKS; i++)
+        task_brk[i] = 0;
+
+    tty_init();
+
+    /* 3. Riempi la tabella con ENOSYS */
+    for (int i = 0; i < SYSCALL_MAX; i++) {
+        syscall_table[i].handler = sys_enosys;
+        syscall_table[i].flags   = 0;
+        syscall_table[i].name    = "enosys";
+    }
+
+    /* 4. Registra le 13 syscall base */
+    syscall_table[SYS_WRITE] = (syscall_entry_t){
+        sys_write, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "write"
+    };
+    syscall_table[SYS_READ] = (syscall_entry_t){
+        sys_read, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "read"
+    };
+    syscall_table[SYS_EXIT] = (syscall_entry_t){
+        sys_exit, SYSCALL_FLAG_RT, "exit"
+    };
+    syscall_table[SYS_OPEN] = (syscall_entry_t){
+        sys_open, 0, "open"
+    };
+    syscall_table[SYS_CLOSE] = (syscall_entry_t){
+        sys_close, SYSCALL_FLAG_RT, "close"
+    };
+    syscall_table[SYS_FSTAT] = (syscall_entry_t){
+        sys_fstat, 0, "fstat"
+    };
+    syscall_table[SYS_MMAP] = (syscall_entry_t){
+        sys_mmap, 0, "mmap"
+    };
+    syscall_table[SYS_MUNMAP] = (syscall_entry_t){
+        sys_munmap, 0, "munmap"
+    };
+    syscall_table[SYS_BRK] = (syscall_entry_t){
+        sys_brk, SYSCALL_FLAG_RT, "brk"
+    };
+    syscall_table[SYS_EXECVE] = (syscall_entry_t){
+        sys_execve, 0, "execve"
+    };
+    syscall_table[SYS_FORK] = (syscall_entry_t){
+        sys_fork, 0, "fork"
+    };
+    syscall_table[SYS_WAITPID] = (syscall_entry_t){
+        sys_waitpid, SYSCALL_FLAG_RT, "waitpid"
+    };
+    syscall_table[SYS_CLOCK_GETTIME] = (syscall_entry_t){
+        sys_clock_gettime, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "clock_gettime"
+    };
+
+    uart_puts("[SYSCALL] 13 syscall base registrate\n");
+    uart_puts("[SYSCALL] fd_table: 0/1/2=CONSOLE per ");
+    /* stampa SCHED_MAX_TASKS senza printf */
+    uart_putc('0' + SCHED_MAX_TASKS / 10);
+    uart_putc('0' + SCHED_MAX_TASKS % 10);
+    uart_puts(" task slot\n");
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * syscall_dispatch — entry point da exception_handler (EC=0x15)
+ *
+ * Legge nr da frame->x[8], args da x0–x5, scrive risultato in x0.
+ * WCET: O(1).
+ * ════════════════════════════════════════════════════════════════════ */
+void syscall_dispatch(exception_frame_t *frame)
+{
+    uint64_t nr = frame->x[8];
+
+    if (nr >= SYSCALL_MAX) {
+        frame->x[0] = ERR(ENOSYS);
+        return;
+    }
+
+    uint64_t args[6] = {
+        frame->x[0], frame->x[1], frame->x[2],
+        frame->x[3], frame->x[4], frame->x[5],
+    };
+
+    frame->x[0] = syscall_table[nr].handler(args);
+}

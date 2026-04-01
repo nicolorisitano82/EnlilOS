@@ -1,9 +1,9 @@
 /*
- * NROS Microkernel - Tipi base
+ * EnlilOS Microkernel - Tipi base
  */
 
-#ifndef NROS_TYPES_H
-#define NROS_TYPES_H
+#ifndef ENLILOS_TYPES_H
+#define ENLILOS_TYPES_H
 
 typedef unsigned char       uint8_t;
 typedef unsigned short      uint16_t;

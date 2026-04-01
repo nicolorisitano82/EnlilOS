@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Linker Script
+ * EnlilOS Microkernel - Linker Script
  * Target: AArch64 (ARMv8-A)
  * Machine: QEMU virt (compatibile con architettura Apple M-series)
  */

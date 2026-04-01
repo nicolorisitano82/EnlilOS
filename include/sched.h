@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Fixed-Priority Preemptive Scheduler (M2-03)
+ * EnlilOS Microkernel - Fixed-Priority Preemptive Scheduler (M2-03)
  *
  * Policy: Fixed-Priority Preemptive (FPP)
  *   - 256 livelli di priorità (0 = massima, 255 = minima/idle)
@@ -39,8 +39,8 @@
  *   Questo garantisce preemption al ritorno da ogni IRQ (ogni 1ms).
  */
 
-#ifndef NROS_SCHED_H
-#define NROS_SCHED_H
+#ifndef ENLILOS_SCHED_H
+#define ENLILOS_SCHED_H
 
 #include "types.h"
 
@@ -152,10 +152,16 @@ void sched_tick(uint64_t jiffies);
  */
 void sched_stats(void);
 
+/*
+ * sched_task_find(pid) — cerca un task per PID nel pool statico. O(N).
+ * Ritorna NULL se nessun task attivo ha quel PID.
+ */
+sched_tcb_t *sched_task_find(uint32_t pid);
+
 /* Trampoline assembly — non chiamare direttamente */
 extern void task_entry_trampoline(void);
 
 /* Context switch assembly */
 void sched_context_switch(sched_tcb_t *prev, sched_tcb_t *next);
 
-#endif /* NROS_SCHED_H */
+#endif /* ENLILOS_SCHED_H */

@@ -1,15 +1,15 @@
 /*
- * NROS Microkernel - ARM Generic Timer (M2-02)
+ * EnlilOS Microkernel - ARM Generic Timer (M2-02)
  *
  * ARM ARMv8-A dispone di quattro timer per-core indipendenti, tutti
  * derivati dallo stesso contatore di sistema a 64 bit (CNTPCT_EL0):
  *
- *   EL1 Physical   (CNTP)  — usato da NROS per il tick di sistema
+ *   EL1 Physical   (CNTP)  — usato da EnlilOS per il tick di sistema
  *   EL1 Virtual    (CNTV)  — per processi user-space con offset virtuale
  *   EL2 Hypervisor (CNTHP) — riservato all'hypervisor
  *   EL3 Secure     (CNTPS) — riservato al monitor TrustZone
  *
- * NROS usa il Physical EL1 Timer (CNTP):
+ * EnlilOS usa il Physical EL1 Timer (CNTP):
  *   CNTFRQ_EL0  — frequenza del contatore di sistema (Hz, read-only)
  *   CNTPCT_EL0  — contatore corrente, 64 bit, incrementato a CNTFRQ Hz
  *   CNTP_TVAL_EL1 — valore ricaricabile: interrupt quando scende a 0
@@ -29,8 +29,8 @@
  *   registrato (futuro scheduler M2-03).
  */
 
-#ifndef NROS_TIMER_H
-#define NROS_TIMER_H
+#ifndef ENLILOS_TIMER_H
+#define ENLILOS_TIMER_H
 
 #include "types.h"
 
@@ -146,4 +146,4 @@ uint64_t timer_cntfrq(void);
  */
 void timer_stats(void);
 
-#endif /* NROS_TIMER_H */
+#endif /* ENLILOS_TIMER_H */

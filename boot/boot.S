@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Boot Code
+ * EnlilOS Microkernel - Boot Code
  * Target: AArch64 (ARMv8-A)
  *
  * Questo è il primo codice eseguito dal processore.

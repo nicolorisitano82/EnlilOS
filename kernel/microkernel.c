@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Core Implementation
+ * EnlilOS Microkernel - Core Implementation
  *
  * Implementazione base del microkernel stile GNU Hurd/Mach:
  *   - Task management (creazione/distruzione processi)
@@ -64,10 +64,10 @@ void mk_init(void)
         ports[i].active = false;
     }
 
-    uart_puts("[NROS] Microkernel inizializzato\n");
-    uart_puts("[NROS]   Max tasks: 64\n");
-    uart_puts("[NROS]   Max ports: 128\n");
-    uart_puts("[NROS]   IPC queue: 64 messaggi\n");
+    uart_puts("[EnlilOS] Microkernel inizializzato\n");
+    uart_puts("[EnlilOS]   Max tasks: 64\n");
+    uart_puts("[EnlilOS]   Max ports: 128\n");
+    uart_puts("[EnlilOS]   IPC queue: 64 messaggi\n");
 
     /* Crea il task kernel (task 0) */
     mk_task_create("kernel", TASK_TYPE_KERNEL, 0);
@@ -89,14 +89,14 @@ task_t *mk_task_create(const char *name, task_type_t type, uint64_t entry)
             tasks[i].entry_point = entry;
             tasks[i].stack_ptr = 0;
 
-            uart_puts("[NROS] Task creato: ");
+            uart_puts("[EnlilOS] Task creato: ");
             uart_puts(name);
             uart_puts("\n");
 
             return &tasks[i];
         }
     }
-    uart_puts("[NROS] ERRORE: nessuno slot task disponibile\n");
+    uart_puts("[EnlilOS] ERRORE: nessuno slot task disponibile\n");
     return NULL;
 }
 
@@ -104,7 +104,7 @@ void mk_task_destroy(uint32_t tid)
 {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].tid == tid && tasks[i].state != TASK_STATE_FREE) {
-            uart_puts("[NROS] Task distrutto: ");
+            uart_puts("[EnlilOS] Task distrutto: ");
             uart_puts(tasks[i].name);
             uart_puts("\n");
             tasks[i].state = TASK_STATE_DEAD;
@@ -128,7 +128,7 @@ int mk_ipc_send(uint32_t sender, uint32_t receiver, uint32_t type,
 {
     uint32_t next = (ipc_queue_tail + 1) % IPC_QUEUE_SIZE;
     if (next == ipc_queue_head) {
-        uart_puts("[NROS] ERRORE: coda IPC piena\n");
+        uart_puts("[EnlilOS] ERRORE: coda IPC piena\n");
         return -1;
     }
 
@@ -173,7 +173,7 @@ uint32_t mk_port_create(uint32_t owner_tid, const char *name)
             ports[i].active = true;
             mk_strcpy(ports[i].name, name, TASK_NAME_LEN);
 
-            uart_puts("[NROS] Porta creata: ");
+            uart_puts("[EnlilOS] Porta creata: ");
             uart_puts(name);
             uart_puts("\n");
 
@@ -206,7 +206,7 @@ port_t *mk_port_lookup(const char *name)
 
 void mk_log(const char *prefix, const char *msg)
 {
-    uart_puts("[NROS:");
+    uart_puts("[EnlilOS:");
     uart_puts(prefix);
     uart_puts("] ");
     uart_puts(msg);

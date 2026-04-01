@@ -1,4 +1,4 @@
-# NROS — Backlog Implementazioni
+# EnlilOS — Backlog Implementazioni
 ## Sistema Real-Time Microkernel su AArch64
 
 ---
@@ -127,42 +127,263 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 
 ## MILESTONE 3 — Syscall Interface
 
-### ⬜ M3-01 · Syscall Dispatcher
-**Priorità:** CRITICA
+### ✅ M3-01 · Syscall Dispatcher
+**Stato:** COMPLETATA
 
-**RT design:** tabella syscall indicizzata, nessuna ricerca. Ogni syscall ha una
-classe di priorità che influenza il suo scheduling (syscall RT non possono essere
-preemptate da syscall non-RT).
+**RT design:** tabella `syscall_table[256]` indicizzata direttamente: O(1), no ricerca.
 
-- Handler per `EC = 0x15` (SVC #0) nella vector table
-- Numero syscall in `x8`, argomenti `x0-x5`, ritorno `x0`
-- Syscall marcate RT/non-RT: le RT completano con priorità elevata
+- Handler per `EC = 0x15` (SVC AArch64) in `exception_handler()` → `syscall_dispatch()`
+- Numero syscall in `x8`, argomenti `x0–x5`, ritorno `x0` (ABI Linux AArch64)
+- Flag `SYSCALL_FLAG_RT` / `SYSCALL_FLAG_NOBLOCK` per classificazione RT
+- Stub RT-safe implementati: `write` (fd=1/2→UART), `read` (fd=0→EAGAIN), `exit` (zombie+block), `clock_gettime` (CNTPCT_EL0 O(1))
+- ENOSYS automatico per qualsiasi nr >= 256 o non registrato
+- `syscall_init()` chiamato dopo `sched_init()` al boot
 
 ---
 
-### ⬜ M3-02 · Syscall Base (13 syscall)
+### ✅ M3-02 · Syscall Base (13 syscall)
+**Stato:** COMPLETATA
 
-| Nr | Nome | RT-safe | Note |
-|----|------|---------|------|
-| 1 | `write` | Sì (buffered) | fd=1 → console, non blocca |
-| 2 | `read` | Sì (non-blocking) | fd=0 → keyboard, ritorna -EAGAIN se vuoto |
-| 3 | `exit` | Sì | Termina task, libera risorse |
-| 4 | `open` | No (I/O filesystem) | Non chiamare da task hard-RT |
-| 5 | `close` | Sì | |
-| 6 | `fstat` | No | |
-| 7 | `mmap` | No (alloca pagine) | Pre-allocare memoria al boot per task RT |
-| 8 | `munmap` | No | |
-| 9 | `brk` | No | |
-| 10 | `execve` | No | |
-| 11 | `fork` | No | |
-| 12 | `waitpid` | Sì (timed) | Con timeout obbligatorio per RT |
-| 13 | `clock_gettime` | Sì — O(1) | Lettura diretta `CNTP_TVAL` |
+| Nr | Nome | RT-safe | Implementazione |
+|----|------|---------|-----------------|
+| 1 | `write` | Sì | fd=1/2 → UART; fd_table per tipo; `/dev/null` → discard |
+| 2 | `read` | Sì (non-blocking) | fd=0 → EAGAIN (keyboard M4-01); `/dev/null` → EOF |
+| 3 | `exit` | Sì | TCB_STATE_ZOMBIE + sched_block(); non ritorna |
+| 4 | `open` | No | `/dev/console`, `/dev/tty`, `/dev/null`; ENOENT per il resto (VFS M5-02) |
+| 5 | `close` | Sì | Libera slot fd; protegge fd 0/1/2 |
+| 6 | `fstat` | No | Stub → 0 (struct stat non popolata, VFS M5-02) |
+| 7 | `mmap` | No | MAP_ANONYMOUS: phys_alloc_pages(order) + zero-fill; PA==VA (identity map) |
+| 8 | `munmap` | No | phys_free_pages(addr, order) |
+| 9 | `brk` | Sì | Per-task break pointer, area HEAP_BASE + idx×4MB; lazy-init; O(1) |
+| 10 | `execve` | — | ENOSYS (richiede ELF loader M6-02) |
+| 11 | `fork` | — | ENOSYS (richiede COW MMU M6+) |
+| 12 | `waitpid` | Sì (timed) | WNOHANG=polling; timeout_ms>0=bounded wait; sched_yield nel loop |
+| 13 | `clock_gettime` | Sì — O(1) | Scrive `{tv_sec, tv_nsec}` nel puntatore timespec; CNTPCT_EL0 |
+
+**Strutture aggiuntive:**
+- `fd_table[32][16]`: file descriptor per task, indicizzato su `pid % 32`; fd 0/1/2 preinizializzati CONSOLE
+- `task_brk[32]`: program break per task; HEAP_BASE=0x60000000, 4MB/task
+- `sched_task_find(pid)`: ricerca O(N) nel task_pool — usata da waitpid
+- `timespec_t { int64_t tv_sec; int64_t tv_nsec }`: scrivibile da clock_gettime
+
+---
+
+### ✅ M3-04 · GPU Syscall Interface — Apple AGX / Virtio-GPU
+**Priorità:** ALTA
+
+**Obiettivo:** esporre il chip grafico Apple AGX (M-series) o virtio-GPU (QEMU) in modo
+diretto a user-space via syscall, bypassando il server grafico per task che necessitano
+accesso GPU a bassa latenza (real-time rendering, compute shader, scanout diretto).
+
+**Contesto hardware Apple AGX:**
+L'Apple AGX è il nome della GPU integrata in tutti i chip M-series. Non ha una specifica
+pubblica — il driver open-source di riferimento è `asahi-gpu` (Asahi Linux). La GPU espone:
+- Command queues (CQ) tramite MMIO e shared memory ring buffer
+- Memoria GPU gestita tramite IOMMU (DART su M-series)
+- IRQ completamento via AIC (Apple Interrupt Controller)
+- Tile-based deferred rendering (TBDR) con vertex/fragment shader ISA proprietaria
+
+**RT design:**
+- Submit command buffer **non-blocking**: deposita nel ring e ritorna subito — O(1)
+- Wait con **deadline**: `gpu_wait()` bounded — mai unbounded in task RT
+- Buffer GPU pre-allocati al boot: zero allocazione nel hot path
+- Scanout diretto: `gpu_present()` fa page-flip atomico senza passare dal compositor
+- Software fallback su QEMU (`gpu_sw.c`): rasterizzazione CPU per sviluppo
+
+**Numeri syscall (range dedicato 120–139 — separati da ANE 100–119):**
+
+| Nr  | Nome                   | RT-safe | Firma C                                                             | Note |
+|-----|------------------------|---------|---------------------------------------------------------------------|------|
+| 120 | `gpu_query_caps`       | Sì — O(1)   | `(gpu_caps_t *out)`                                             | Versione chip, VRAM, feature flags |
+| 121 | `gpu_buf_alloc`        | No          | `(size_t size, uint32_t type) → gpu_buf_handle_t`               | Alloca GPU buffer object (GBO); solo al setup |
+| 122 | `gpu_buf_free`         | Sì — O(1)   | `(gpu_buf_handle_t h)`                                          | Rilascio a pool pre-allocato |
+| 123 | `gpu_buf_map_cpu`      | No          | `(gpu_buf_handle_t h) → void *`                                 | Mappa GBO in CPU address space (identity map) |
+| 124 | `gpu_buf_unmap_cpu`    | Sì — O(1)   | `(gpu_buf_handle_t h)`                                          | Invalida cache CPU, rilascia mapping |
+| 125 | `gpu_cmdqueue_create`  | No          | `(uint32_t type, uint32_t depth) → gpu_queue_handle_t`          | Crea command queue (RENDER / COMPUTE / BLIT) |
+| 126 | `gpu_cmdqueue_destroy` | No          | `(gpu_queue_handle_t q)`                                        | |
+| 127 | `gpu_cmdbuf_begin`     | **Sì**      | `(gpu_queue_handle_t q) → gpu_cmdbuf_t *`                       | Inizia registrazione comandi; ritorna puntatore al command buffer |
+| 128 | `gpu_cmdbuf_submit`    | **Sì**      | `(gpu_cmdbuf_t *cb, uint32_t prio) → gpu_fence_t`               | Submit non-blocking; ritorna fence per sincronizzazione |
+| 129 | `gpu_fence_wait`       | **Sì**      | `(gpu_fence_t f, uint64_t timeout_ns) → int`                    | Attende completamento con timeout; 0 = polling |
+| 130 | `gpu_fence_query`      | Sì — O(1)   | `(gpu_fence_t f) → int`                                         | Controlla stato fence senza bloccare |
+| 131 | `gpu_fence_destroy`    | Sì — O(1)   | `(gpu_fence_t f)`                                               | |
+| 132 | `gpu_present`          | **Sì**      | `(gpu_buf_handle_t scanout, uint32_t x, uint32_t y, uint32_t w, uint32_t h) → gpu_fence_t` | Page-flip atomico: submette scanout buffer al display engine |
+| 133 | `gpu_compute_dispatch` | **Sì**      | `(gpu_queue_handle_t q, gpu_buf_handle_t shader, uint32_t gx, uint32_t gy, uint32_t gz, gpu_buf_handle_t args) → gpu_fence_t` | Dispatch compute shader; non-blocking |
+
+**Strutture dati principali:**
+
+```c
+/* Capacità GPU */
+typedef struct {
+    uint32_t  vendor;           /* GPU_VENDOR_APPLE_AGX / GPU_VENDOR_VIRTIO */
+    uint32_t  device_id;        /* es. 0x6000 = M1, 0x6020 = M2, ... */
+    uint64_t  vram_bytes;       /* VRAM disponibile (shared con sistema su M-series) */
+    uint32_t  max_texture_dim;  /* dimensione massima texture (es. 16384) */
+    uint32_t  compute_units;    /* numero compute unit (shader core) */
+    uint32_t  flags;            /* GPU_CAP_COMPUTE | GPU_CAP_RT | GPU_CAP_SWFALLBACK */
+} gpu_caps_t;
+
+/* Handle opachi (indici in pool statico) */
+typedef uint32_t gpu_buf_handle_t;
+typedef uint32_t gpu_queue_handle_t;
+typedef uint64_t gpu_fence_t;          /* fence ID, 0 = invalid */
+
+/* Tipi di GPU buffer */
+#define GPU_BUF_VERTEX      (1 << 0)
+#define GPU_BUF_TEXTURE     (1 << 1)
+#define GPU_BUF_UNIFORM     (1 << 2)
+#define GPU_BUF_STORAGE     (1 << 3)
+#define GPU_BUF_SCANOUT     (1 << 4)   /* display scanout buffer */
+#define GPU_BUF_SHADER      (1 << 5)   /* compiled shader binary */
+
+/* Tipi di command queue */
+#define GPU_QUEUE_RENDER    0
+#define GPU_QUEUE_COMPUTE   1
+#define GPU_QUEUE_BLIT      2          /* copia/fill accelerata */
+
+/* Command buffer (puntatore diretto al ring buffer GPU-mapped) */
+typedef struct {
+    uint32_t  *cmds;        /* puntatore ai comandi GPU (write-combined) */
+    uint32_t   capacity;    /* numero massimo di comandi */
+    uint32_t   count;       /* comandi registrati finora */
+    uint32_t   queue_idx;   /* index nella gpu_queue */
+} gpu_cmdbuf_t;
+```
+
+**Architettura del driver:**
+
+```
+include/gpu.h               — syscall numbers + strutture pubbliche
+drivers/gpu/gpu.h           — interfaccia interna driver
+drivers/gpu/agx.c           — backend Apple AGX (M1/M2/M3/M4)
+drivers/gpu/virtio_gpu.c    — backend virtio-GPU per QEMU
+drivers/gpu/gpu_sw.c        — software fallback (rasterizzazione CPU)
+kernel/gpu_syscall.c        — implementazione syscall 120-133
+```
+
+**Differenze chiave rispetto alla pipeline normale (M5b):**
+- **M5b** è la pipeline completa del server grafico: compositor, Wayland, scanout tramite server
+- **M3-04** sono le syscall di accesso *diretto* al metallo: un task RT può scrivere in un
+  command buffer GPU e fare page-flip senza passare dal compositor — latenza ~50µs invece di ~5ms
+- Caso d'uso tipico: renderizzatore RT che deve rispettare deadline vsync (16.67ms a 60Hz)
+
+**Dipende da:** M3-01 (syscall dispatcher), M3-02 (mmap per buffer GPU)
+**Necessario per:** M5b-01 (il server grafico usa queste syscall internamente)
+
+---
+
+### ✅ M3-03 · ANE Syscall Interface — Apple Neural Engine
+**Stato:** COMPLETATA
+
+**Contesto hardware:**
+Il chip AI dei processori Apple M-series è l'**ANE** (Apple Neural Engine), un acceleratore
+hardware dedicato all'inferenza di reti neurali. Ogni generazione introduce più TOPS:
+
+| Chip | ANE TOPS | Core ANE |
+|------|----------|----------|
+| M1   | 11 TOPS  | 16 core  |
+| M2   | 15.8 TOPS| 16 core  |
+| M3   | 18 TOPS  | 16 core  |
+| M4   | 38 TOPS  | 16 core  |
+
+L'ANE accetta programmi compilati in formato **`.hwx`** (prodotto dal compilatore
+`anecc` / CoreML compiler di Apple). I dati di input/output usano il formato tiled
+**HWCX** (Height × Width × Channel × packed) in buffer DMA-coerenti.
+
+**RT design:**
+- Submit inferenza **non-blocking**: il task deposita il job e continua — O(1)
+- Wait con **deadline fissa**: `ane_wait()` blocca al massimo `timeout_ns` — mai unbounded
+- Buffer DMA pre-allocati al boot — zero `kmalloc` nel path di inferenza
+- Priorità job ereditata dal task chiamante (priority donation all'ANE scheduler)
+- ANE su QEMU: assente — il driver rileva la mancanza e usa un **software fallback**
+  (`ane_sw.c`) che esegue l'inferenza sulla CPU via codice C generato dall'offline compiler
+
+**Numeri syscall (range dedicato 100–119 — non collidono con POSIX):**
+
+| Nr  | Nome                    | RT-safe | Firma C                                                          | Note |
+|-----|-------------------------|---------|------------------------------------------------------------------|------|
+| 100 | `ane_query_caps`        | Sì — O(1)   | `(ane_caps_t *out)`                                          | Legge registro MMIO versione/TOPS, nessun I/O |
+| 101 | `ane_buf_alloc`         | No          | `(size_t size, uint32_t flags) → ane_buf_handle_t`           | Alloca buffer DMA-coerente; mai in hot path RT |
+| 102 | `ane_buf_free`          | Sì — O(1)   | `(ane_buf_handle_t h)`                                       | Libera da pool pre-allocato |
+| 103 | `ane_model_load`        | No          | `(const void *hwx_buf, size_t size) → ane_model_handle_t`   | Valida + carica programma `.hwx` nell'ANE; solo al setup |
+| 104 | `ane_model_unload`      | Sì — O(1)   | `(ane_model_handle_t m)`                                     | Rimuove modello dalla cache ANE |
+| 105 | `ane_inference_submit`  | **Sì**      | `(ane_model_handle_t m, ane_buf_handle_t in, ane_buf_handle_t out, uint32_t prio) → ane_job_handle_t` | Non-blocking: deposita job nella coda ANE e ritorna subito |
+| 106 | `ane_inference_wait`    | **Sì**      | `(ane_job_handle_t j, uint64_t timeout_ns) → int`            | Blocca fino a completamento o timeout; timeout = 0 → polling |
+| 107 | `ane_inference_run`     | No          | `(ane_model_handle_t m, ane_buf_handle_t in, ane_buf_handle_t out) → int` | Submit sincrono (= submit + wait senza timeout) — mai da task hard-RT |
+| 108 | `ane_job_cancel`        | Sì — O(1)   | `(ane_job_handle_t j) → int`                                 | Annulla job pending nella coda |
+| 109 | `ane_job_status`        | Sì — O(1)   | `(ane_job_handle_t j, ane_job_stat_t *out) → int`            | Legge stato job senza bloccare (polling RT-safe) |
+
+**Strutture dati principali:**
+
+```c
+/* Capacità hardware ANE */
+typedef struct {
+    uint32_t  version;          /* ANE HW version (0x30 = M1, 0x40 = M2, ...) */
+    uint32_t  num_cores;        /* numero core ANE (sempre 16 su M-series) */
+    uint32_t  tops_x100;        /* TOPS × 100 (es. 1100 = 11.0 TOPS) */
+    uint32_t  max_model_size;   /* dimensione massima programma .hwx in byte */
+    uint32_t  flags;            /* ANE_CAP_SWFALLBACK se su QEMU */
+} ane_caps_t;
+
+/* Handle opaco (indice in pool statico — 16 bit) */
+typedef uint32_t ane_buf_handle_t;
+typedef uint32_t ane_model_handle_t;
+typedef uint32_t ane_job_handle_t;
+
+/* Stato di un job in corso */
+typedef struct {
+    uint32_t  state;            /* ANE_JOB_PENDING / RUNNING / DONE / ERROR */
+    uint32_t  error_code;       /* 0 = OK */
+    uint64_t  submit_ns;        /* timestamp submit (CNTPCT_EL0) */
+    uint64_t  done_ns;          /* timestamp completamento */
+    uint64_t  cycles;           /* cicli ANE consumati (profilazione) */
+} ane_job_stat_t;
+```
+
+**Flags `ane_buf_alloc`:**
+- `ANE_BUF_INPUT`  — buffer di input per l'ANE (lettura dalla CPU, DMA read dall'ANE)
+- `ANE_BUF_OUTPUT` — buffer di output (scrittura dall'ANE, lettura dalla CPU)
+- `ANE_BUF_PINNED` — mai swappato (obbligatorio per task hard-RT)
+
+**Architettura del driver (componenti):**
+
+```
+include/ane.h               — syscall numbers + strutture pubbliche
+drivers/ane/ane.h           — interfaccia interna driver
+drivers/ane/ane_hw.c        — accesso MMIO ANE reale (M1/M2/M3/M4)
+drivers/ane/ane_sw.c        — software fallback (QEMU / CPU emulation)
+kernel/ane_syscall.c        — implementazione syscall 100-109
+```
+
+**Integrazione con lo scheduler:**
+- `ane_inference_submit()` assegna al job la priorità del `current_task` → priority inheritance
+- L'IRQ di completamento ANE (AIC line dedicata) sblocca i task in attesa via `sched_unblock()`
+- `sched_tcb_t` esteso con campo `ane_job_waiting` per fast-path unblock
+
+**Path di sviluppo:**
+1. **Stub QEMU** (software fallback): tutte le syscall compilano e funzionano su QEMU
+   via `ane_sw.c` (inferenza CPU). Permette lo sviluppo e il testing del layer syscall
+   senza hardware reale.
+2. **Driver ANE reale** (`ane_hw.c`): MMIO map da device tree Apple, command buffer
+   submission, IRQ completion — basato su reverse engineering Asahi Linux (`apple-ane`).
+3. **Compilatore offline** (`tools/anecc_wrapper/`): wrapper attorno al compilatore Apple
+   (`anecc`) o alternativa open source per produrre file `.hwx` da modelli ONNX/TFLite.
+
+**Implementazione:**
+- `include/ane.h` — strutture pubbliche, syscall numbers, flag, `ane_hwx_header_t`
+- `drivers/ane/ane_internal.h` — pool interni, `ane_backend_ops_t` vtable
+- `drivers/ane/ane_hw.c` — rilevamento Apple Silicon via `MIDR_EL1[31:24]==0x61`; TOPS/versione da PartNum; su QEMU delega a SW
+- `drivers/ane/ane_sw.c` — CPU fallback: identità (memcpy) se in/out stessa dimensione, zero-fill altrimenti; timing reale con `timer_now_ns()`
+- `kernel/ane_syscall.c` — pool statici (`buf[64]`, `model[16]`, `job[32]`), tutte e 10 le syscall, `ane_init()` che registra 100-109 in `syscall_table`
+- Fix timeout: `inference_wait` gestisce `UINT64_MAX` come attesa infinita (per `inference_run`)
+- Handle 1-based: 0 / `ANE_INVALID_HANDLE` = invalido
+
+**Dipende da:** M3-01 (syscall dispatcher), M5b-01 (driver MMIO ANE reale)
 
 ---
 
 ## MILESTONE 4 — Input da Tastiera
 
-### ⬜ M4-01 · PL050 PS/2 Keyboard
+### ✅ M4-01 · PL050 PS/2 Keyboard
 **Priorità:** ALTA
 
 **RT design:** driver interrupt-driven, zero polling. Ring buffer lock-free (SPSC).
@@ -174,51 +395,85 @@ preemptate da syscall non-RT).
 
 ---
 
-### ⬜ M4-02 · VirtIO Input
+### ✅ M4-02 · VirtIO Input
 **Priorità:** MEDIA
-Alternativa moderna al PS/2. Necessita VirtIO queue (vring) — implementare dopo M5-01.
+
+Alternativa moderna al PS/2 su QEMU `virt`, con backend `virtio-input`
+e fallback automatico su UART PL011.
+
+- `virtio-keyboard-device` via `virtio-mmio` (device ID 18)
+- Queue `eventq` con split vring statica
+- IRQ GIC dinamica: `IRQ_VIRTIO(slot)` ricavata dal MMIO slot trovato
+- Conversione `EV_KEY` Linux input → ASCII in ring buffer SPSC 256B
+- `keyboard_getc()` resta non-blocking e conserva l'API esistente
 
 ---
 
-### ⬜ M4-03 · Terminal Line Discipline
+### ✅ M4-03 · Terminal Line Discipline
 **Priorità:** MEDIA
-Echo, modalità canonica, backspace, CTRL+C → SIGINT. Non in hot path RT.
+
+Implementata una line discipline minimale sulla console:
+
+- Echo dei caratteri digitati su UART
+- Modalità canonica: `read()` ritorna solo linee complete terminate da newline
+- Editing locale con backspace
+- `CTRL+C` genera un `SIGINT` minimale sul task foreground della console
+- `read()` su console ritorna `-EINTR` quando c'è un interrupt pendente
+
+**Nota:** il sottosistema segnali completo non esiste ancora; la consegna di
+`SIGINT` è volutamente minimale e orientata a sbloccare `read()` e shell/task
+cooperativi senza introdurre ancora process group o handler utente.
 
 ---
 
-### ⬜ M4-04 · Supporto Font UTF-8 completo
+### ⬜ M4-05 · Mouse Input (VirtIO / PS/2)
 **Priorità:** MEDIA
 
-Estendere il sistema di rendering testuale per supportare l'intero set Unicode via UTF-8.
-Il font bitmap attuale copre solo ASCII 32–90 (maiuscole A–Z + numeri + punteggiatura base).
+Supporto puntatore per QEMU `virt`, con backend preferito `virtio-mouse-device`
+e compatibilità futura con PS/2 mouse dove disponibile.
 
-**Componenti:**
+- Probe `virtio-input` per device pointer/tablet via `virtio-mmio`
+- Eventi `EV_REL` / `EV_ABS` + pulsanti `BTN_LEFT/RIGHT/MIDDLE`
+- Ring buffer SPSC per eventi mouse (`dx`, `dy`, wheel, button mask)
+- API kernel non bloccante: `mouse_get_event()` / coda eventi per future syscall
+- Integrazione con server grafico/compositor per cursore, click e drag
+- Fallback opzionale PS/2 mouse (`IRQ_MOUSE`) se il target lo espone davvero
 
-- **Decoder UTF-8** (`kernel/utf8.c`): decodifica sequenze multi-byte in codepoint Unicode,
-  WCET O(n) dove n = lunghezza stringa in byte. Sequenze malformate → U+FFFD (replacement char).
+**Nota design:** il backend mouse deve riusare il pattern vring/IRQ/cache già
+introdotto in M4-02 per limitare la complessità e mantenere WCET prevedibile.
 
-- **Font bitmap esteso** (`drivers/font_unicode.c`):
-  - Piano 0 (BMP): blocchi essenziali — Latin Extended (U+0080–U+024F), Greek (U+0370–U+03FF),
-    Cyrillic (U+0400–U+04FF), simboli comuni (U+2000–U+27FF), box drawing (U+2500–U+257F)
-  - Font 8×16 PSF2 (PC Screen Font v2) — formato standard Linux, ~256KB per il BMP completo
-  - Lookup O(1) per ASCII, O(log N) con tabella ordinata per codepoints supplementari
+---
 
-- **`fb_draw_char_utf8(x, y, codepoint, fg, bg)`**: rendering di un singolo codepoint
-- **`fb_draw_string_utf8(x, y, utf8_str, fg, bg)`**: rendering di stringa UTF-8 completa
-- **`fb_draw_string_centered_utf8(utf8_str, fg, bg)`**: centrato
+### ✅ M4-04 · Supporto Font UTF-8 completo
+**Stato:** COMPLETATA
 
-**Formato font PSF2:**
-  - Header 32 byte: magic `0x864AB572`, versione, dimensione header, flag, num glyph, byte per glyph
-  - Opzionale: Unicode table (codepoint → glyph index)
-  - Incluso come array statico nel kernel (oggetto `.o` generato da `objcopy`)
+Esteso il sistema di rendering testuale per supportare UTF-8 con Latin-1 Supplement.
 
-**RT design:** il font risiede in `.rodata` (read-only, cache-friendly).
-Il rendering non alloca memoria — scrive direttamente nel framebuffer buffer.
-`fb_draw_string_utf8()` non è in hot path RT (solo per output UI).
+**Componenti implementati:**
 
-**Tool build:**
-  - `tools/gen_font.py`: converte font PSF2 → array C per inclusione diretta
-  - Alternativa: `objcopy -I binary font.psf font.o` + simboli `_binary_font_psf_start/end`
+- **Decoder UTF-8** (`kernel/utf8.c` + `include/utf8.h`):
+  - `utf8_decode(const char **s)` — decodifica 1–4 byte, avanza il puntatore, WCET O(1)
+  - `utf8_strlen(const char *s)` — conta codepoint (non byte), WCET O(n)
+  - Errori → U+FFFD; gestisce overlong, surrogate UTF-16, codepoint > U+10FFFF
+
+- **Font esteso inline** in `drivers/framebuffer.c`:
+  - `font_ext[]` — tabella ordinata di 65 codepoint (U+00C0–U+00FF + U+FFFD)
+    con bitmaps 8×16 per Latin-1 Supplement completo (accenti Western European)
+  - `font_ext_lookup(cp)` — ricerca binaria O(log 65) ≈ O(1) in pratica
+  - ASCII (U+0020–U+007E): lookup diretto O(1) nel `font_8x16` esistente
+
+- **API pubblica** (`include/framebuffer.h`):
+  - `fb_draw_char_utf8(x, y, codepoint, fg, bg)` — singolo codepoint
+  - `fb_draw_string_utf8(x, y, utf8_str, fg, bg)` — stringa UTF-8 completa
+  - `fb_draw_string_centered_utf8(utf8_str, fg, bg)` — centrata
+
+**Copertura font:**
+  - U+0020–U+007E: ASCII completo (32–126) — O(1)
+  - U+00C0–U+00FF: Latin-1 Supplement — lettere accentate IT/FR/DE/ES/PT — O(log N)
+  - Sconosciuto: glyph box U+FFFD
+
+**RT design:** `font_ext[]` in `.rodata` (cache-friendly). Nessuna allocazione.
+`fb_draw_string_utf8()` non è in hot path RT — solo per output UI.
 
 ---
 
@@ -293,7 +548,7 @@ Tutto in RAM → latenza di accesso O(1), adatto a task RT che leggono config al
 
 ---
 
-### ⬜ M5b-01 · GPU Driver — Virtio-GPU (dev) / Apple AGX (target)
+### ✅ M5b-01 · GPU Driver — Virtio-GPU (dev) / Apple AGX (target)
 **Priorità:** ALTA
 
 **Architettura:**
@@ -432,6 +687,11 @@ M1-02 → M1-03 ✅ → M1-04 ✅
 M1-03 → M2-01 ✅ → M2-02 → M2-03
 M2-03 → M3-01 → M3-02
 M3-02 → M4-01
+M3-01 → M3-04 (GPU syscall)
+M3-01 → M3-03 (ANE syscall)
+M3-02 → M3-04 (mmap per GPU buffer)
+M3-04 → M5b-01 (server grafico usa GPU syscall internamente)
+M3-03 → M5b-01 (pattern MMIO/DMA condiviso)
 M3-02 → M5-01 → M5-02 → M5-03/M5-04
          M5-05 ──────────────────────┐
 M5-01 → M5b-01 → M5b-02 → M5b-03   │
@@ -443,9 +703,10 @@ M2-03 → M7-01
 
 ## Prossimi tre step consigliati
 
-1. **M2-02** ARM Generic Timer (1ms tick) — 1-2 ore
-2. **M2-03** Scheduler FPP a 256 priorità — 3-4 ore
-3. **M5b-01** GPU driver (virtio-gpu su QEMU, stub AGX) — 3-4 ore
+1. **M5-01** VirtIO Block — storage base per VFS — 3-4 ore
+2. **M5b-02** Scanout & Display Engine — page-flip vsync-aware — 2-3 ore
+3. **M4-02** VirtIO Input — tastiera moderna (richiede pattern vring già fatto) — 2 ore
 
-Dopo M2-02 + M2-03 il sistema è un microkernel RT preemptivo funzionante.
+Dopo M4-01 le syscall read/write sono fully functional con tastiera reale.
+Dopo M3-04 un task RT può scrivere direttamente in un command buffer GPU con latenza ~50µs.
 Dopo M5b-01 tutta la grafica transita dalla GPU — zero accessi CPU al framebuffer.

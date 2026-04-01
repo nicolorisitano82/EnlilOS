@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Physical Memory Manager (M1-03)
+ * EnlilOS Microkernel - Physical Memory Manager (M1-03)
  *
  * Implementazione buddy + slab orientata al real-time.
  *

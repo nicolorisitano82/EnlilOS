@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Fixed-Priority Preemptive Scheduler (M2-03)
+ * EnlilOS Microkernel - Fixed-Priority Preemptive Scheduler (M2-03)
  *
  * Implementazione FPP con:
  *   - ready_bitmap[4] (256 bit): trova la priorità massima in O(1)
@@ -468,6 +468,18 @@ static const char *state_str(uint8_t s)
     case TCB_STATE_ZOMBIE:  return "ZOMBIE ";
     default:                 return "???????";
     }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * sched_task_find — cerca un task per PID nel pool statico
+ * ══════════════════════════════════════════════════════════════════ */
+sched_tcb_t *sched_task_find(uint32_t pid)
+{
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (task_pool[i].pid == pid)
+            return &task_pool[i];
+    }
+    return NULL;
 }
 
 void sched_stats(void)

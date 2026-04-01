@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Physical Memory Manager (M1-03)
+ * EnlilOS Microkernel - Physical Memory Manager (M1-03)
  *
  * Due allocatori con WCET diversi, scelti in base al contesto:
  *
@@ -19,8 +19,8 @@
  *  slab_warm(sz,n) O(n)  ← chiamare a boot, fuori da sezioni RT
  */
 
-#ifndef NROS_PMM_H
-#define NROS_PMM_H
+#ifndef ENLILOS_PMM_H
+#define ENLILOS_PMM_H
 
 #include "types.h"
 

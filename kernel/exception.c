@@ -1,11 +1,12 @@
 /*
- * NROS Microkernel - Exception Handler (M1-01)
+ * EnlilOS Microkernel - Exception Handler (M1-01)
  *
  * Decodifica ESR_EL1, stampa il contesto su UART e halt per eccezioni fatali.
  * Gli IRQ vengono separati per l'estensione al GIC-400 (M2-01).
  */
 
 #include "exception.h"
+#include "syscall.h"
 #include "uart.h"
 
 /* ── Helper: stampa uint64_t in hex su UART ─────────────────────────── */
@@ -136,21 +137,16 @@ void exception_handler(exc_source_t src, exc_type_t type,
         return;
     }
 
-    /* SVC da lower EL: punto di ingresso syscall (esteso in M3) */
+    /* SVC da lower EL: dispatch al syscall handler (M3-01) */
     if (type == EXC_TYPE_SYNC && src == EXC_SRC_LOWER64 && ec == EC_SVC_AA64) {
-        uint32_t svc_nr = (uint32_t)ESR_ISS(frame->esr);
-        uart_puts("[NROS] SVC #");
-        uart_putc('0' + svc_nr % 10);
-        uart_puts(" (syscall - non ancora implementata)\n");
-        /* Imposta ENOSYS in x0, continua */
-        frame->x[0] = (uint64_t)-38; /* ENOSYS */
+        syscall_dispatch(frame);
         return;
     }
 
     /* Tutte le altre eccezioni: dump e halt */
     uart_puts("\n");
     uart_puts("╔══════════════════════════════════════════════════╗\n");
-    uart_puts("║          NROS KERNEL EXCEPTION                  ║\n");
+    uart_puts("║          EnlilOS KERNEL EXCEPTION                  ║\n");
     uart_puts("╚══════════════════════════════════════════════════╝\n");
 
     uart_puts("\n  Sorgente  : "); uart_puts(src_to_string(src));  uart_puts("\n");
@@ -174,7 +170,7 @@ void exception_handler(exc_source_t src, exc_type_t type,
 
     dump_registers(frame);
 
-    uart_puts("\n[NROS] Eccezione fatale — sistema in halt\n\n");
+    uart_puts("\n[EnlilOS] Eccezione fatale — sistema in halt\n\n");
 
     /* Halt: loop infinito con WFE */
     while (1) {
@@ -214,5 +210,5 @@ void exception_init(void)
         "isb                        \n"
         ::: "x0"
     );
-    uart_puts("[NROS] Exception vectors installati\n");
+    uart_puts("[EnlilOS] Exception vectors installati\n");
 }

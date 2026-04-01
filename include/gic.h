@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - GIC-400 Interrupt Controller (M2-01)
+ * EnlilOS Microkernel - GIC-400 Interrupt Controller (M2-01)
  *
  * ARM Generic Interrupt Controller v2 (GIC-400) su QEMU virt machine.
  *
@@ -22,8 +22,8 @@
  *   DAIF.I abbassato nel handler → interrupt nesting hardware dal GIC.
  */
 
-#ifndef NROS_GIC_H
-#define NROS_GIC_H
+#ifndef ENLILOS_GIC_H
+#define ENLILOS_GIC_H
 
 #include "types.h"
 
@@ -62,7 +62,7 @@
 #define GIC_PPI_BASE        16      /* PPI: 16–31                       */
 #define GIC_SPI_BASE        32      /* SPI: 32–287                      */
 #define GIC_SPURIOUS        1023    /* ID spurious (nessun IRQ reale)   */
-#define GIC_MAX_IRQS        256     /* Numero massimo gestiti da NROS   */
+#define GIC_MAX_IRQS        256     /* Numero massimo gestiti da EnlilOS   */
 
 /* ── IRQ noti su QEMU virt ───────────────────────────────────────── */
 #define IRQ_TIMER_PHYS      30      /* ARM Generic Timer CNTP, PPI      */
@@ -70,9 +70,9 @@
 #define IRQ_TIMER_HYP       26      /* ARM Generic Timer CNTHP, PPI     */
 #define IRQ_UART0           33      /* PL011 UART0 @ 0x09000000, SPI 1  */
 #define IRQ_UART1           34      /* PL011 UART1, SPI 2               */
-#define IRQ_KBD             48      /* PL050 PS/2 keyboard, SPI 16      */
-#define IRQ_MOUSE           49      /* PL050 PS/2 mouse, SPI 17         */
-#define IRQ_VIRTIO(n)       (48+(n))/* VirtIO-blk/net/input, SPI 16-47 */
+#define IRQ_KBD             44      /* PL050 PS/2 keyboard @ 0x09060000, SPI 12 */
+#define IRQ_MOUSE           45      /* PL050 PS/2 mouse,   SPI 13               */
+#define IRQ_VIRTIO(n)       (48+(n))/* VirtIO-mmio bus, SPI 16+n                */
 
 /* ── Priorità GIC (0=massima, 255=minima) ────────────────────────── */
 #define GIC_PRIO_MAX        0x00    /* Priorità massima — NMI-like      */
@@ -188,4 +188,4 @@ static inline void gic_disable_irqs(void)
  */
 void gic_stats(void);
 
-#endif /* NROS_GIC_H */
+#endif /* ENLILOS_GIC_H */

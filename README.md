@@ -1,4 +1,4 @@
-# NROS - Nicolo's Realtime Operating System
+# EnlilOS - Nicolo's Realtime Operating System
 
 Microkernel per AArch64 (ARMv8-A), stile GNU Hurd.
 
@@ -12,7 +12,7 @@ Microkernel per AArch64 (ARMv8-A), stile GNU Hurd.
 │  └─────┬────┘ └─────┬────┘ └─────┬────┘    │
 │        │    IPC      │    IPC     │          │
 ├────────┴─────────────┴───────────┴──────────┤
-│              NROS Microkernel                │
+│              EnlilOS Microkernel                │
 │  ┌──────┐  ┌──────────┐  ┌──────────────┐  │
 │  │ IPC  │  │Scheduler │  │Memory Manager│  │
 │  └──────┘  └──────────┘  └──────────────┘  │

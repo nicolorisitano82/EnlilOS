@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - ARM Generic Timer (M2-02)
+ * EnlilOS Microkernel - ARM Generic Timer (M2-02)
  *
  * Usa il Physical EL1 Timer (CNTP):
  *
@@ -223,7 +223,7 @@ void timer_set_tick_callback(timer_tick_fn fn)
  * (cntpct * ns_per_tick_frac) >> NS_FRAC_SHIFT
  *
  * Attenzione: il prodotto cntpct * ns_per_tick_frac può superare 64 bit
- * per uptime > ~25 giorni. Per NROS (sistema embedded RT) è accettabile.
+ * per uptime > ~25 giorni. Per EnlilOS (sistema embedded RT) è accettabile.
  * ══════════════════════════════════════════════════════════════════ */
 uint64_t timer_now_ns(void)
 {

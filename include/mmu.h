@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - MMU (M1-02)
+ * EnlilOS Microkernel - MMU (M1-02)
  * AArch64 Virtual Memory — design orientato al real-time
  *
  * Scelte RT:
@@ -16,8 +16,8 @@
  *   0x00000000_40000000 – 0x00000000_7FFFFFFF  (1GB) RAM   → Normal WB cacheable
  */
 
-#ifndef NROS_MMU_H
-#define NROS_MMU_H
+#ifndef ENLILOS_MMU_H
+#define ENLILOS_MMU_H
 
 #include "types.h"
 

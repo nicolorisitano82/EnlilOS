@@ -1,10 +1,10 @@
 /*
- * NROS Microkernel - Exception Handling (M1-01)
+ * EnlilOS Microkernel - Exception Handling (M1-01)
  * AArch64 Exception Vector Table
  */
 
-#ifndef NROS_EXCEPTION_H
-#define NROS_EXCEPTION_H
+#ifndef ENLILOS_EXCEPTION_H
+#define ENLILOS_EXCEPTION_H
 
 #include "types.h"
 

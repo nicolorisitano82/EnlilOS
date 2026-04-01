@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - AArch64 Exception Vector Table (M1-01)
+ * EnlilOS Microkernel - AArch64 Exception Vector Table (M1-01)
  *
  * Ogni entry della vector table è 128 byte (0x80) = max 32 istruzioni.
  * save_context da sola è ~30 istruzioni → NON entra in 128 byte.

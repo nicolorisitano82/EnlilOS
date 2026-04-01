@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Kernel Heap: Named Typed Caches (M1-04)
+ * EnlilOS Microkernel - Kernel Heap: Named Typed Caches (M1-04)
  *
  * Ogni cache è un pool di oggetti della stessa dimensione, con:
  *  - free list intrusive (i primi 8 byte di ogni oggetto libero sono il

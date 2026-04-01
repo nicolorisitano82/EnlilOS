@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - Kernel Heap: Named Typed Caches (M1-04)
+ * EnlilOS Microkernel - Kernel Heap: Named Typed Caches (M1-04)
  *
  * Livello sopra il slab allocator di pmm.c.
  * Ogni cache ha un nome, una dimensione fissa, e una propria free list.
@@ -15,8 +15,8 @@
  *  - la backing memory viene da kmalloc() (→ slab, O(1) hot path)
  */
 
-#ifndef NROS_KHEAP_H
-#define NROS_KHEAP_H
+#ifndef ENLILOS_KHEAP_H
+#define ENLILOS_KHEAP_H
 
 #include "types.h"
 
@@ -99,4 +99,4 @@ extern kmem_cache_t *task_cache;    /* strutture task_t                 */
 extern kmem_cache_t *port_cache;    /* strutture IPC port_t             */
 extern kmem_cache_t *ipc_cache;     /* strutture ipc_message_t          */
 
-#endif /* NROS_KHEAP_H */
+#endif /* ENLILOS_KHEAP_H */

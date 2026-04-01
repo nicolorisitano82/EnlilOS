@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - PL011 UART Driver
+ * EnlilOS Microkernel - PL011 UART Driver
  * Target: QEMU virt machine (PL011 @ 0x09000000)
  *
  * In un microkernel maturo, questo driver girerebbe in user-space
@@ -21,6 +21,7 @@
 
 /* Flag bits */
 #define UART_FR_TXFF  (1 << 5)  /* Transmit FIFO full */
+#define UART_FR_RXFE  (1 << 4)  /* Receive FIFO empty */
 
 void uart_init(void)
 {
@@ -55,4 +56,12 @@ void uart_puts(const char *s)
             uart_putc('\r');
         uart_putc(*s++);
     }
+}
+
+int uart_getc_nonblock(void)
+{
+    if (MMIO_READ32(UART_FR) & UART_FR_RXFE)
+        return -1;
+
+    return (int)(MMIO_READ32(UART_DR) & 0xFFu);
 }

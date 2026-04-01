@@ -1,5 +1,5 @@
 #
-# NROS Microkernel - Build System
+# EnlilOS Microkernel - Build System
 # Target: AArch64 (ARMv8-A) - QEMU virt machine
 #
 
@@ -18,7 +18,7 @@ OBJDUMP  = $(CROSS)objdump
 
 # Flags
 CFLAGS   = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
-           -mcpu=cortex-a72 -Iinclude
+           -mcpu=cortex-a72 -Iinclude -Idrivers/ane -Idrivers/gpu
 ASFLAGS  = -mcpu=cortex-a72
 LDFLAGS  = -T linker.ld -nostdlib
 
@@ -35,15 +35,26 @@ C_SRCS   = kernel/main.c \
            kernel/gic.c \
            kernel/timer.c \
            kernel/sched.c \
+           kernel/tty.c \
+           kernel/syscall.c \
+           kernel/ane_syscall.c \
+           kernel/gpu_syscall.c \
+           kernel/utf8.c \
+           drivers/ane/ane_hw.c \
+           drivers/ane/ane_sw.c \
+           drivers/gpu/gpu_agx.c \
+           drivers/gpu/gpu_sw.c \
+           drivers/gpu/gpu_virtio.c \
            drivers/uart.c \
+           drivers/keyboard.c \
            drivers/framebuffer.c
 
 # Oggetti
 OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o)
 
 # Output
-KERNEL   = nros.elf
-KERNEL_BIN = nros.bin
+KERNEL   = enlil.elf
+KERNEL_BIN = enlil.bin
 
 # === Targets ===
 
@@ -52,7 +63,7 @@ KERNEL_BIN = nros.bin
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
 	@echo "  ╔══════════════════════════════════════╗"
-	@echo "  ║  NROS Microkernel - Build completata ║"
+	@echo "  ║  EnlilOS Microkernel - Build completata ║"
 	@echo "  ║  Output: $(KERNEL)                ║"
 	@echo "  ╚══════════════════════════════════════╝"
 	@echo ""
@@ -73,18 +84,42 @@ $(KERNEL_BIN): $(KERNEL)
 run: $(KERNEL)
 	qemu-system-aarch64 \
 		-machine virt \
+		-accel tcg \
 		-cpu cortex-a72 \
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL)
 
-# Esegui con QEMU + framebuffer (output grafico)
+# Esegui con QEMU + framebuffer RAMFB (SW backend, output grafico)
 run-fb: $(KERNEL)
 	qemu-system-aarch64 \
 		-machine virt \
+		-accel tcg \
 		-cpu cortex-a72 \
 		-m 512M \
+		-vga none \
+		-global virtio-mmio.force-legacy=false \
 		-device ramfb \
+		-device virtio-keyboard-device \
+		-display default,show-cursor=on \
+		-monitor none \
+		-serial stdio \
+		-kernel $(KERNEL)
+
+# Esegui con QEMU + VirtIO-GPU (M5b-01, backend virtio)
+# Apre finestra grafica via SDL/Cocoa; -serial stdio per UART su terminale.
+run-gpu: $(KERNEL)
+	qemu-system-aarch64 \
+		-machine virt \
+		-accel tcg \
+		-cpu cortex-a72 \
+		-m 512M \
+		-vga none \
+		-global virtio-mmio.force-legacy=false \
+		-device virtio-gpu-device \
+		-device virtio-keyboard-device \
+		-display default,show-cursor=on \
+		-monitor none \
 		-serial stdio \
 		-kernel $(KERNEL)
 
@@ -92,6 +127,7 @@ run-fb: $(KERNEL)
 debug: $(KERNEL)
 	qemu-system-aarch64 \
 		-machine virt \
+		-accel tcg \
 		-cpu cortex-a72 \
 		-m 512M \
 		-nographic \

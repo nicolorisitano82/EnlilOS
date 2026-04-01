@@ -1,5 +1,5 @@
 /*
- * NROS Microkernel - GIC-400 Interrupt Controller (M2-01)
+ * EnlilOS Microkernel - GIC-400 Interrupt Controller (M2-01)
  *
  * ARM Generic Interrupt Controller v2 (GIC-400).
  *
