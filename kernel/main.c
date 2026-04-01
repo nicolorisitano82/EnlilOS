@@ -23,6 +23,7 @@
 #include "blk.h"
 #include "ane.h"
 #include "gpu.h"
+#include "elf_loader.h"
 #include "ext4.h"
 #include "selftest.h"
 #include "vfs.h"
@@ -869,6 +870,9 @@ static void bootcli_execute_command(void)
         bootcli_push_line("fsync P   flush esplicito del singolo file");
         bootcli_push_line("truncate P N imposta la size di un file ext4 esistente");
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
+        bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
+        bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
+        bootcli_push_line("runelf P  carica e lancia un ELF64 statico da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
@@ -974,6 +978,37 @@ static void bootcli_execute_command(void)
             bootcli_push_error("sync", rc);
         else
             bootcli_push_line("sync OK: cache ext4 e mount VFS flushati.");
+    } else if (bootcli_streq(bootcli_input, "elfdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_demo(PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "ELF demo lanciato a EL0, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "execdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/EXEC1.ELF", "/EXEC1.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "execve demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_startswith(bootcli_input, "runelf ")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path(bootcli_input + 7, bootcli_input + 7,
+                             PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "ELF lanciato a EL0, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "mouse")) {
         if (!bootcli_mouse_ready) {
             bootcli_push_line("Mouse: nessun puntatore guest attivo.");
@@ -1133,6 +1168,7 @@ static void bootcli_init(void)
     bootcli_push_line("Digita 'help' e premi Invio per testare la tastiera.");
     bootcli_push_line("Prova anche: fs, ls /data, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
+    bootcli_push_line("M6-02: elfdemo, execdemo e runelf PATH per ELF64/execve a EL0.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)

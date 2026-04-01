@@ -165,6 +165,10 @@ __exc_common:
 .Lno_resched:
 
     /* ── Ripristino ────────────────────────────────────────────────── */
+    /* Ripristina SP_EL0 (necessario per execve e primo rientro EL0) */
+    ldr     x0, [sp, #248]
+    msr     sp_el0, x0
+
     /* Ripristina ELR_EL1 e SPSR_EL1 */
     ldr     x0, [sp, #256]
     msr     elr_el1, x0

@@ -20,6 +20,9 @@
 #define ROOT_NODE_DIR       1U
 #define ROOT_NODE_README    2U
 #define ROOT_NODE_BOOT      3U
+#define ROOT_NODE_DEMO_ELF  4U
+#define ROOT_NODE_EXEC1_ELF 5U
+#define ROOT_NODE_EXEC2_ELF 6U
 
 #define DEV_NODE_DIR        1U
 #define DEV_NODE_CONSOLE    2U
@@ -36,6 +39,13 @@ static const char vfs_root_readme[] =
     "EnlilOS bootstrap rootfs.\n"
     "Questo mount `/` e' read-only e prepara il passaggio a un initrd vero.\n"
     "I device node vivono sotto `/dev`.\n";
+
+extern const uint8_t _binary_user_demo_elf_start[];
+extern const uint8_t _binary_user_demo_elf_end[];
+extern const uint8_t _binary_user_execve_demo_elf_start[];
+extern const uint8_t _binary_user_execve_demo_elf_end[];
+extern const uint8_t _binary_user_execve_target_elf_start[];
+extern const uint8_t _binary_user_execve_target_elf_end[];
 
 static char vfs_root_boot_txt[256];
 static vfs_mount_t vfs_mounts[VFS_MAX_MOUNTS];
@@ -119,6 +129,15 @@ static void file_bind_mem(vfs_file_t *file, const vfs_mount_t *mount,
     file->size_hint = vfs_strlen(content);
 }
 
+static void file_bind_blob(vfs_file_t *file, const vfs_mount_t *mount,
+                           uint32_t node_id, uint32_t flags,
+                           const void *content, size_t size)
+{
+    file_reset(file, mount, node_id, flags);
+    file->cookie    = (uintptr_t)content;
+    file->size_hint = size;
+}
+
 static ssize_t memfile_read(vfs_file_t *file, void *buf, size_t count)
 {
     const char *src;
@@ -192,6 +211,26 @@ static int rootfs_open(const vfs_mount_t *mount, const char *relpath,
         file_bind_mem(out, mount, ROOT_NODE_BOOT, flags, vfs_root_boot_txt);
         return 0;
     }
+    if (vfs_streq(name, "DEMO.ELF")) {
+        file_bind_blob(out, mount, ROOT_NODE_DEMO_ELF, flags,
+                       _binary_user_demo_elf_start,
+                       (size_t)(_binary_user_demo_elf_end - _binary_user_demo_elf_start));
+        return 0;
+    }
+    if (vfs_streq(name, "EXEC1.ELF")) {
+        file_bind_blob(out, mount, ROOT_NODE_EXEC1_ELF, flags,
+                       _binary_user_execve_demo_elf_start,
+                       (size_t)(_binary_user_execve_demo_elf_end -
+                                _binary_user_execve_demo_elf_start));
+        return 0;
+    }
+    if (vfs_streq(name, "EXEC2.ELF")) {
+        file_bind_blob(out, mount, ROOT_NODE_EXEC2_ELF, flags,
+                       _binary_user_execve_target_elf_start,
+                       (size_t)(_binary_user_execve_target_elf_end -
+                                _binary_user_execve_target_elf_start));
+        return 0;
+    }
 
     return -ENOENT;
 }
@@ -227,11 +266,20 @@ static int rootfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
             return dirent_fill(out, "dev",
                                S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
         case 3:
+            return dirent_fill(out, "DEMO.ELF",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 4:
+            return dirent_fill(out, "EXEC1.ELF",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 5:
+            return dirent_fill(out, "EXEC2.ELF",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 6:
             if (mount_is_active("/data"))
                 return dirent_fill(out, "data",
                                    S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
             break;
-        case 4:
+        case 7:
             if (mount_is_active("/sysroot"))
                 return dirent_fill(out, "sysroot",
                                    S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);

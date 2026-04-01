@@ -9,9 +9,12 @@
 
 #include "selftest.h"
 #include "blk.h"
+#include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
+#include "sched.h"
 #include "syscall.h"
+#include "timer.h"
 #include "uart.h"
 #include "vfs.h"
 
@@ -264,12 +267,64 @@ static int selftest_case_ext4(void)
     return 0;
 }
 
+static int selftest_case_elf(void)
+{
+    static const char case_name[] = "elf-loader";
+    uint32_t pid = 0U;
+    uint64_t deadline;
+    sched_tcb_t *task;
+    int rc;
+
+    rc = elf64_spawn_path("/DEMO.ELF", "/DEMO.ELF", PRIO_KERNEL, &pid);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, pid != 0U, "pid demo ELF nullo");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task ELF non trovata");
+        if (task->state == TCB_STATE_ZOMBIE)
+            return 0;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, 0, "timeout attesa task ELF");
+    return -1;
+}
+
+static int selftest_case_execve(void)
+{
+    static const char case_name[] = "execve";
+    uint32_t pid = 0U;
+    uint64_t deadline;
+    sched_tcb_t *task;
+    int rc;
+
+    rc = elf64_spawn_path("/EXEC1.ELF", "/EXEC1.ELF", PRIO_KERNEL, &pid);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, pid != 0U, "pid execve demo nullo");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task execve non trovata");
+        if (task->state == TCB_STATE_ZOMBIE)
+            return 0;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, 0, "timeout attesa execve");
+    return -1;
+}
+
 int selftest_run_all(void)
 {
     static const selftest_case_t cases[] = {
         { "vfs-rootfs", selftest_case_rootfs },
         { "vfs-devfs",  selftest_case_devfs  },
         { "ext4-core",  selftest_case_ext4   },
+        { "elf-loader", selftest_case_elf    },
+        { "execve",     selftest_case_execve },
         { "gpu-stack",  gpu_selftest_run     },
     };
     uint32_t total = 0U;

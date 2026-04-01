@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "mmu.h"
 #include "timer.h"
 #include "pmm.h"
 #include "uart.h"
@@ -26,6 +27,20 @@ static uint32_t  next_pid;
 
 /* Stack statici per idle (nessuna alloc da buddy necessaria al boot) */
 static uint8_t   idle_stack[TASK_STACK_SIZE] __attribute__((aligned(16)));
+
+typedef struct {
+    mm_space_t *mm;
+    uint64_t    kernel_stack_pa;
+    uint64_t    user_entry;
+    uint64_t    user_sp;
+    uint64_t    argc;
+    uint64_t    argv;
+    uint64_t    envp;
+    uint64_t    auxv;
+    uint8_t     is_user;
+} sched_task_ctx_t;
+
+static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
 
 /* ── Scheduler state ─────────────────────────────────────────────── */
 
@@ -47,6 +62,17 @@ static sched_tcb_t *rq_tail[256];
 /* Variabili globali esportate (usate da vectors.S e da altri moduli) */
 sched_tcb_t          *current_task;
 volatile uint32_t need_resched;
+
+static inline uint32_t task_slot(const sched_tcb_t *t)
+{
+    return (uint32_t)(t - task_pool);
+}
+
+static inline sched_task_ctx_t *ctx_of(const sched_tcb_t *t)
+{
+    if (!t) return NULL;
+    return &task_ctx[task_slot(t)];
+}
 
 /* ── Helpers UART ─────────────────────────────────────────────────── */
 
@@ -146,8 +172,11 @@ static inline void irq_restore(uint64_t flags)
 
 static sched_tcb_t *task_alloc(void)
 {
+    uint32_t slot;
+
     if (task_count >= SCHED_MAX_TASKS) return NULL;
     sched_tcb_t *t = &task_pool[task_count++];
+    slot = task_count - 1U;
     /* Zero-init già garantita dal BSS, ma azzeriamo esplicitamente
      * per i task re-usati (non in questa versione, ma per sicurezza) */
     t->sp          = 0;
@@ -162,6 +191,16 @@ static sched_tcb_t *task_alloc(void)
     t->deadline_ms = 0;
     t->name        = "(unnamed)";
     t->next        = NULL;
+
+    task_ctx[slot].mm              = mmu_kernel_space();
+    task_ctx[slot].kernel_stack_pa = 0ULL;
+    task_ctx[slot].user_entry      = 0ULL;
+    task_ctx[slot].user_sp         = 0ULL;
+    task_ctx[slot].argc            = 0ULL;
+    task_ctx[slot].argv            = 0ULL;
+    task_ctx[slot].envp            = 0ULL;
+    task_ctx[slot].auxv            = 0ULL;
+    task_ctx[slot].is_user         = 0U;
     return t;
 }
 
@@ -280,6 +319,7 @@ void sched_idle_fn(void)
 sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priority)
 {
     sched_tcb_t *t = task_alloc();
+    sched_task_ctx_t *ctx;
     if (!t) {
         uart_puts("[SCHED] PANIC: task pool esaurito\n");
         while (1) __asm__ volatile("wfe");
@@ -294,6 +334,10 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
     t->state     = TCB_STATE_READY;
     t->flags     = TCB_FLAG_KERNEL;
     t->ticks_left = SCHED_TICK_QUANTUM;
+    ctx = ctx_of(t);
+    ctx->mm = mmu_kernel_space();
+    ctx->kernel_stack_pa = stack_pa;
+    ctx->is_user = 0U;
 
     task_setup_stack(t, stack_top, entry);
 
@@ -314,6 +358,65 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
     uart_puts(" prio=");
     pr_dec(priority);
     uart_puts(" stack=");
+    pr_hex64(stack_pa);
+    uart_puts("\n");
+
+    return t;
+}
+
+sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
+                                    uintptr_t entry, uintptr_t user_sp,
+                                    uintptr_t argc, uintptr_t argv,
+                                    uintptr_t envp, uintptr_t auxv,
+                                    uint8_t priority)
+{
+    sched_tcb_t *t = task_alloc();
+    sched_task_ctx_t *ctx;
+    uint64_t stack_pa;
+    uint8_t *stack_top;
+
+    if (!t || !mm) {
+        uart_puts("[SCHED] PANIC: impossibile creare task user\n");
+        while (1) __asm__ volatile("wfe");
+    }
+
+    stack_pa = phys_alloc_page();
+    stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
+
+    t->name       = name;
+    t->priority   = priority;
+    t->state      = TCB_STATE_READY;
+    t->flags      = TCB_FLAG_USER;
+    t->ticks_left = SCHED_TICK_QUANTUM;
+
+    ctx = ctx_of(t);
+    ctx->mm              = mm;
+    ctx->kernel_stack_pa = stack_pa;
+    ctx->user_entry      = entry;
+    ctx->user_sp         = user_sp;
+    ctx->argc            = argc;
+    ctx->argv            = argv;
+    ctx->envp            = envp;
+    ctx->auxv            = auxv;
+    ctx->is_user         = 1U;
+
+    task_setup_stack(t, stack_top, (sched_fn)0);
+
+    {
+        uint64_t flags = irq_save();
+        rq_push(t);
+        if (current_task && priority < current_task->priority)
+            need_resched = 1;
+        irq_restore(flags);
+    }
+
+    uart_puts("[SCHED] Task user creato: '");
+    uart_puts(name);
+    uart_puts("' pid=");
+    pr_dec(t->pid);
+    uart_puts(" prio=");
+    pr_dec(priority);
+    uart_puts(" kstack=");
     pr_hex64(stack_pa);
     uart_puts("\n");
 
@@ -374,6 +477,7 @@ void schedule(void)
     next->ticks_left = next->ticks_left ? next->ticks_left : SCHED_TICK_QUANTUM;
 
     current_task = next;
+    mmu_activate_space(sched_task_space(next));
 
     /* ── Context switch ───────────────────────────────────────────
      * Da qui in poi esecuzione è sospesa (prev) o ripresa (da una
@@ -468,6 +572,63 @@ static const char *state_str(uint8_t s)
     case TCB_STATE_ZOMBIE:  return "ZOMBIE ";
     default:                 return "???????";
     }
+}
+
+int sched_task_is_user(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    return (ctx && ctx->is_user) ? 1 : 0;
+}
+
+mm_space_t *sched_task_space(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    if (!ctx || !ctx->mm)
+        return mmu_kernel_space();
+    return ctx->mm;
+}
+
+int sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
+                           uintptr_t entry, uintptr_t user_sp,
+                           uintptr_t argc, uintptr_t argv,
+                           uintptr_t envp, uintptr_t auxv)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+
+    if (!ctx || !mm)
+        return -1;
+
+    t->flags &= (uint8_t)~TCB_FLAG_KERNEL;
+    t->flags |= TCB_FLAG_USER;
+    ctx->mm         = mm;
+    ctx->user_entry = entry;
+    ctx->user_sp    = user_sp;
+    ctx->argc       = argc;
+    ctx->argv       = argv;
+    ctx->envp       = envp;
+    ctx->auxv       = auxv;
+    ctx->is_user    = 1U;
+    return 0;
+}
+
+void sched_task_bootstrap(uint64_t entry_reg)
+{
+    sched_task_ctx_t *ctx = ctx_of(current_task);
+
+    if (ctx && ctx->is_user) {
+        sched_enter_user(ctx->argc, ctx->argv, ctx->envp, ctx->auxv,
+                         ctx->user_sp, ctx->user_entry);
+        while (1) __asm__ volatile("wfe");
+    }
+
+    if (entry_reg != 0ULL) {
+        ((sched_fn)(uintptr_t)entry_reg)();
+    }
+
+    if (current_task)
+        current_task->state = TCB_STATE_ZOMBIE;
+    sched_block();
+    while (1) __asm__ volatile("wfe");
 }
 
 /* ══════════════════════════════════════════════════════════════════

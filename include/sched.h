@@ -60,6 +60,7 @@
 #define TCB_FLAG_KERNEL     (1 << 0)    /* task kernel (non user-space)  */
 #define TCB_FLAG_IDLE       (1 << 1)    /* task idle                     */
 #define TCB_FLAG_RT         (1 << 2)    /* hard real-time                */
+#define TCB_FLAG_USER       (1 << 3)    /* task user-space (EL0)         */
 
 /* ── Priorità predefinite ───────────────────────────────────────── */
 #define PRIO_MAX            0           /* massima priorità              */
@@ -71,6 +72,7 @@
 
 /* ── Tipo entry function ────────────────────────────────────────── */
 typedef void (*sched_fn)(void);
+typedef struct mm_space mm_space_t;
 
 /* ════════════════════════════════════════════════════════════════════
  * sched_tcb_t — Task Control Block, 64 byte esatti (fit in task_cache)
@@ -123,6 +125,17 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry,
                                 uint8_t priority);
 
 /*
+ * Crea un task user-space. Il codice entra a EL0 con stack/argv/envp/auxv gia'
+ * preparati dal loader ELF. Il kernel stack resta separato e serve per IRQ e
+ * syscall provenienti da EL0.
+ */
+sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
+                                    uintptr_t entry, uintptr_t user_sp,
+                                    uintptr_t argc, uintptr_t argv,
+                                    uintptr_t envp, uintptr_t auxv,
+                                    uint8_t priority);
+
+/*
  * schedule() — seleziona ed esegue il task con priorità massima. O(1).
  */
 void schedule(void);
@@ -157,6 +170,19 @@ void sched_stats(void);
  * Ritorna NULL se nessun task attivo ha quel PID.
  */
 sched_tcb_t *sched_task_find(uint32_t pid);
+
+int         sched_task_is_user(const sched_tcb_t *t);
+mm_space_t *sched_task_space(const sched_tcb_t *t);
+int         sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
+                                   uintptr_t entry, uintptr_t user_sp,
+                                   uintptr_t argc, uintptr_t argv,
+                                   uintptr_t envp, uintptr_t auxv);
+
+/* Helper del trampoline assembly */
+void sched_task_bootstrap(uint64_t entry_reg);
+void sched_enter_user(uint64_t argc, uint64_t argv,
+                      uint64_t envp, uint64_t auxv,
+                      uint64_t user_sp, uint64_t entry);
 
 /* Trampoline assembly — non chiamare direttamente */
 extern void task_entry_trampoline(void);

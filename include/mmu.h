@@ -123,6 +123,19 @@
                          PTE_ATTRINDX(MT_DEVICE) | PTE_AP_EL1_RW | \
                          PTE_PXN | PTE_UXN)
 
+/* ── Layout user-space minimo (M6-01) ─────────────────────────────── */
+
+#define MMU_USER_BASE        0x0000007FC0000000ULL
+#define MMU_USER_LIMIT       0x0000008000000000ULL
+#define MMU_USER_STACK_TOP   0x0000007FFF000000ULL
+#define MMU_USER_STACK_SIZE  (8ULL * 1024ULL * 1024ULL)
+
+#define MMU_PROT_USER_R      (1U << 0)
+#define MMU_PROT_USER_W      (1U << 1)
+#define MMU_PROT_USER_X      (1U << 2)
+
+typedef struct mm_space mm_space_t;
+
 /* ── API pubblica ──────────────────────────────────────────────────── */
 
 /*
@@ -177,5 +190,37 @@ void cache_invalidate_range(uintptr_t start, size_t size);
  * mmu_enabled() — ritorna 1 se la MMU è attiva.
  */
 int mmu_enabled(void);
+
+/*
+ * Spazio di indirizzamento corrente e kernel root.
+ * Tutti gli mm_space condividono le mappature kernel lower-VA, ma possono
+ * aggiungere mapping user-space nel window alto [MMU_USER_BASE, MMU_USER_LIMIT).
+ */
+mm_space_t *mmu_kernel_space(void);
+mm_space_t *mmu_current_space(void);
+mm_space_t *mmu_space_create(void);
+void        mmu_space_destroy(mm_space_t *space);
+void        mmu_activate_space(mm_space_t *space);
+
+/*
+ * Alloca backing fisico, mappa il range user e lo azzera.
+ * start/size devono essere allineati a 4KB e restare nel window user.
+ */
+int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
+                                size_t size, uint32_t prot);
+
+/*
+ * Traduce un VA user di 'space' in un puntatore kernel valido (identity-mapped
+ * sulla RAM fisica backing del range). Ritorna NULL se il range non e'
+ * interamente mappato nello stesso extent.
+ */
+void       *mmu_space_resolve_ptr(mm_space_t *space, uintptr_t va, size_t size);
+
+/*
+ * Esegue il prefault di un range all'interno di uno specifico mm_space.
+ * Fuori dal path RT: usa uno switch temporaneo di TTBR0 per warm-up del TLB.
+ */
+int         mmu_prefault_space_range(mm_space_t *space,
+                                     uintptr_t start, uintptr_t end);
 
 #endif

@@ -30,8 +30,9 @@
  *
  * Operazioni:
  *   1. Abilita IRQ (msr daifclr, #2) — erano disabilitati durante il switch
- *   2. Chiama x19 (entry function del task, salvata nel frame iniziale)
- *   3. Se la entry function ritorna → loop infinito sicuro (non dovrebbe)
+ *   2. Delega a sched_task_bootstrap(x19) che decide se entrare in un task
+ *      kernel oppure salta a EL0 per il primo task user-space.
+ *   3. Se il bootstrap ritorna → loop infinito sicuro (non dovrebbe)
  */
 
 .section .text
@@ -80,10 +81,33 @@ task_entry_trampoline:
      * Da questo momento il task gira con IRQ abilitati. */
     msr     daifclr, #2
 
-    /* x19 = entry function (salvata da sched_task_create nel frame iniziale) */
-    blr     x19
+    /* x19 = entry function kernel oppure 0 per task user-space.
+     * Il bootstrap legge current_task e decide il percorso corretto. */
+    mov     x0, x19
+    bl      sched_task_bootstrap
 
     /* Se la funzione ritorna (non dovrebbe per task kernel permanenti):
      * loop sicuro per evitare esecuzione di codice arbitrario. */
 .Ltask_returned:
     b       .Ltask_returned
+
+/* ── sched_enter_user ───────────────────────────────────────────── */
+
+.global sched_enter_user
+.type   sched_enter_user, %function
+sched_enter_user:
+    /* ABI:
+     *   x0 = argc
+     *   x1 = argv
+     *   x2 = envp
+     *   x3 = auxv
+     *   x4 = user_sp
+     *   x5 = entry
+     *
+     * x0-x3 restano visibili al task EL0 dopo l'ERET. */
+    msr     sp_el0, x4
+    msr     elr_el1, x5
+    mov     x6, xzr              /* SPSR_EL1 = EL0t, IRQ abilitati */
+    msr     spsr_el1, x6
+    isb
+    eret

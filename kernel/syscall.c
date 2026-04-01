@@ -12,6 +12,8 @@
 
 #include "syscall.h"
 #include "keyboard.h"
+#include "elf_loader.h"
+#include "mmu.h"
 #include "sched.h"
 #include "timer.h"
 #include "tty.h"
@@ -19,6 +21,9 @@
 #include "uart.h"
 #include "types.h"
 #include "vfs.h"
+
+extern void *memcpy(void *dst, const void *src, size_t n);
+extern void *memset(void *dst, int value, size_t n);
 
 /* ════════════════════════════════════════════════════════════════════
  * File descriptor table
@@ -48,6 +53,23 @@ static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
  * brk=0 → non ancora inizializzato.
  */
 static uint64_t task_brk[SCHED_MAX_TASKS];
+static exception_frame_t *active_syscall_frame;
+static uint8_t            active_syscall_replaced;
+
+#define EXEC_MAX_PATH       256U
+#define EXEC_MAX_ARGS       ELF_LOADER_MAX_ARGS
+#define EXEC_MAX_ENVP       ELF_LOADER_MAX_ENVP
+#define EXEC_STRPOOL_SIZE   2048U
+
+typedef struct {
+    char        path[EXEC_MAX_PATH];
+    char        strpool[EXEC_STRPOOL_SIZE];
+    const char *argv[EXEC_MAX_ARGS];
+    const char *envp[EXEC_MAX_ENVP];
+    uint64_t    argc;
+    uint64_t    envc;
+    size_t      used;
+} exec_copy_t;
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -100,6 +122,126 @@ static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
 
     e->type  = FD_TYPE_VFS;
     e->flags = flags;
+    return 0;
+}
+
+static int user_copy_bytes(uintptr_t uva, void *dst, size_t size)
+{
+    mm_space_t *space;
+    uint8_t    *out = (uint8_t *)dst;
+    size_t      copied = 0U;
+
+    if (size == 0U) return 0;
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EFAULT;
+
+    space = sched_task_space(current_task);
+    while (copied < size) {
+        uintptr_t cur = uva + copied;
+        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
+        size_t    chunk = PAGE_SIZE - page_off;
+        void     *src;
+
+        if (chunk > size - copied)
+            chunk = size - copied;
+
+        src = mmu_space_resolve_ptr(space, cur, chunk);
+        if (!src) return -EFAULT;
+        memcpy(out + copied, src, chunk);
+        copied += chunk;
+    }
+
+    return 0;
+}
+
+static int user_copy_cstr(uintptr_t uva, char *dst, size_t cap)
+{
+    if (!uva || !dst || cap == 0U)
+        return -EFAULT;
+
+    for (size_t i = 0U; i < cap; i++) {
+        int rc = user_copy_bytes(uva + i, &dst[i], 1U);
+        if (rc < 0) return rc;
+        if (dst[i] == '\0')
+            return 0;
+    }
+
+    dst[cap - 1U] = '\0';
+    return -ENAMETOOLONG;
+}
+
+static int exec_copy_push_string(exec_copy_t *copy, uintptr_t user_ptr,
+                                 const char **out)
+{
+    size_t start;
+    int    rc;
+
+    if (!copy || !out || copy->used >= sizeof(copy->strpool))
+        return -EFAULT;
+
+    start = copy->used;
+    rc = user_copy_cstr(user_ptr, &copy->strpool[start],
+                        sizeof(copy->strpool) - start);
+    if (rc < 0)
+        return rc;
+
+    while (copy->used < sizeof(copy->strpool) &&
+           copy->strpool[copy->used] != '\0')
+        copy->used++;
+    if (copy->used >= sizeof(copy->strpool))
+        return -ENAMETOOLONG;
+
+    copy->used++;
+    *out = &copy->strpool[start];
+    return 0;
+}
+
+static int exec_copy_from_user(exec_copy_t *copy,
+                               uintptr_t path_uva,
+                               uintptr_t argv_uva,
+                               uintptr_t envp_uva)
+{
+    int rc;
+
+    if (!copy) return -EFAULT;
+    memset(copy, 0, sizeof(*copy));
+
+    rc = user_copy_cstr(path_uva, copy->path, sizeof(copy->path));
+    if (rc < 0) return rc;
+
+    if (argv_uva != 0ULL) {
+        for (uint64_t i = 0ULL; i < EXEC_MAX_ARGS; i++) {
+            uint64_t ptr = 0ULL;
+
+            rc = user_copy_bytes(argv_uva + i * sizeof(uint64_t), &ptr, sizeof(ptr));
+            if (rc < 0) return rc;
+            if (ptr == 0ULL) break;
+
+            rc = exec_copy_push_string(copy, (uintptr_t)ptr, &copy->argv[copy->argc]);
+            if (rc < 0) return rc;
+            copy->argc++;
+        }
+    }
+
+    if (copy->argc == 0ULL) {
+        copy->argv[0] = copy->path;
+        copy->argc = 1ULL;
+    }
+
+    if (envp_uva != 0ULL) {
+        for (uint64_t i = 0ULL; i < EXEC_MAX_ENVP; i++) {
+            uint64_t ptr = 0ULL;
+
+            rc = user_copy_bytes(envp_uva + i * sizeof(uint64_t), &ptr, sizeof(ptr));
+            if (rc < 0) return rc;
+            if (ptr == 0ULL) break;
+
+            rc = exec_copy_push_string(copy, (uintptr_t)ptr, &copy->envp[copy->envc]);
+            if (rc < 0) return rc;
+            copy->envc++;
+        }
+    }
+
     return 0;
 }
 
@@ -166,9 +308,10 @@ static uint64_t sys_read(uint64_t args[6])
 static uint64_t sys_exit(uint64_t args[6])
 {
     (void)args;
-    if (current_task)
+    if (current_task) {
         current_task->state = TCB_STATE_ZOMBIE;
-    sched_block();
+        schedule();
+    }
     return 0;   /* unreachable */
 }
 
@@ -363,8 +506,63 @@ static uint64_t sys_brk(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_execve(uint64_t args[6])
 {
-    (void)args;
-    return ERR(ENOSYS);
+    exec_copy_t       *copy;
+    elf_image_t        image;
+    exception_frame_t *frame = active_syscall_frame;
+    mm_space_t        *old_mm;
+    int                rc;
+
+    if (!current_task || !sched_task_is_user(current_task) || !frame)
+        return ERR(ENOSYS);
+
+    copy = (exec_copy_t *)kmalloc((uint32_t)sizeof(exec_copy_t));
+    if (!copy)
+        return ERR(ENOMEM);
+
+    rc = exec_copy_from_user(copy,
+                             (uintptr_t)args[0],
+                             (uintptr_t)args[1],
+                             (uintptr_t)args[2]);
+    if (rc < 0) {
+        kfree(copy);
+        return ERR(-rc);
+    }
+
+    rc = elf64_load_from_path_exec(copy->path,
+                                   copy->argv, copy->argc,
+                                   copy->envp, copy->envc,
+                                   &image);
+    if (rc < 0) {
+        kfree(copy);
+        return ERR(EIO);
+    }
+
+    old_mm = sched_task_space(current_task);
+    if (sched_task_rebind_user(current_task, image.space,
+                               image.entry, image.user_sp,
+                               image.argc, image.argv,
+                               image.envp, image.auxv) < 0) {
+        elf64_unload_image(&image);
+        kfree(copy);
+        return ERR(EIO);
+    }
+
+    mmu_activate_space(image.space);
+    if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
+        mmu_space_destroy(old_mm);
+
+    task_brk[task_idx()] = 0ULL;
+    memset(frame->x, 0, sizeof(frame->x));
+    frame->x[0] = image.argc;
+    frame->x[1] = image.argv;
+    frame->x[2] = image.envp;
+    frame->x[3] = image.auxv;
+    frame->sp   = image.user_sp;
+    frame->pc   = image.entry;
+    frame->spsr = 0ULL;
+    active_syscall_replaced = 1U;
+    kfree(copy);
+    return 0;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -538,6 +736,7 @@ void syscall_init(void)
 void syscall_dispatch(exception_frame_t *frame)
 {
     uint64_t nr = frame->x[8];
+    uint64_t ret;
 
     if (nr >= SYSCALL_MAX) {
         frame->x[0] = ERR(ENOSYS);
@@ -549,5 +748,11 @@ void syscall_dispatch(exception_frame_t *frame)
         frame->x[3], frame->x[4], frame->x[5],
     };
 
-    frame->x[0] = syscall_table[nr].handler(args);
+    active_syscall_frame = frame;
+    active_syscall_replaced = 0U;
+    ret = syscall_table[nr].handler(args);
+    if (!active_syscall_replaced)
+        frame->x[0] = ret;
+    active_syscall_frame = NULL;
+    active_syscall_replaced = 0U;
 }

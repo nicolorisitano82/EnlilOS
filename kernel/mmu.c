@@ -18,7 +18,12 @@
  */
 
 #include "mmu.h"
+#include "pmm.h"
+#include "sched.h"
 #include "uart.h"
+
+extern void *memcpy(void *dst, const void *src, size_t n);
+extern void *memset(void *dst, int value, size_t n);
 
 /* ── Page table L1 ─────────────────────────────────────────────────────
  *
@@ -29,6 +34,33 @@
  * Nessun L0, nessun L2/L3 necessario per la mappa kernel.
  */
 static uint64_t l1_table[512] __attribute__((aligned(4096)));
+
+#define MMU_MAX_SPACES        SCHED_MAX_TASKS
+#define MMU_MAX_SPACE_TABLES  16U
+#define MMU_MAX_SPACE_EXTENTS 48U
+
+typedef struct {
+    uintptr_t va;
+    uint64_t  pa;
+    uint32_t  pages;
+    uint8_t   order;
+    uint8_t   _pad[3];
+} mm_extent_t;
+
+struct mm_space {
+    uint64_t    root_pa;
+    uint64_t   *root;
+    uint8_t     in_use;
+    uint8_t     is_kernel;
+    uint8_t     table_count;
+    uint8_t     extent_count;
+    uint64_t    table_pages[MMU_MAX_SPACE_TABLES];
+    mm_extent_t extents[MMU_MAX_SPACE_EXTENTS];
+};
+
+static struct mm_space kernel_space;
+static struct mm_space space_pool[MMU_MAX_SPACES];
+static mm_space_t     *current_space = &kernel_space;
 
 /* ── Barriere inline ────────────────────────────────────────────────── */
 
@@ -86,6 +118,131 @@ static void clean_dcache_range(uintptr_t start, uintptr_t end)
         addr += dcache_line;
     }
     dsb_sy();
+}
+
+static uint64_t table_desc(uint64_t pa)
+{
+    return (pa & PAGE_MASK) | PTE_VALID | PTE_TABLE;
+}
+
+static uint64_t user_leaf_flags(uint32_t prot)
+{
+    uint64_t flags = PTE_VALID | PTE_TABLE | PTE_AF | PTE_SH_INNER |
+                     PTE_ATTRINDX(MT_NORMAL_WB) | PTE_nG | PTE_PXN;
+
+    if (prot & MMU_PROT_USER_W)
+        flags |= PTE_AP_ALL_RW;
+    else
+        flags |= PTE_AP_ALL_RO;
+
+    if (!(prot & MMU_PROT_USER_X))
+        flags |= PTE_UXN;
+
+    return flags;
+}
+
+static uint32_t largest_order_fit(uint32_t remaining_pages)
+{
+    uint32_t order = 0U;
+
+    while ((order + 1U) < MAX_ORDER &&
+           (1U << (order + 1U)) <= remaining_pages)
+        order++;
+
+    return order;
+}
+
+static int space_track_table(mm_space_t *space, uint64_t pa)
+{
+    if (!space || space->table_count >= MMU_MAX_SPACE_TABLES)
+        return -1;
+
+    space->table_pages[space->table_count++] = pa;
+    return 0;
+}
+
+static int space_track_extent(mm_space_t *space, uintptr_t va, uint64_t pa,
+                              uint32_t pages, uint8_t order)
+{
+    mm_extent_t *ext;
+
+    if (!space || pages == 0U || space->extent_count >= MMU_MAX_SPACE_EXTENTS)
+        return -1;
+
+    ext = &space->extents[space->extent_count++];
+    ext->va    = va;
+    ext->pa    = pa;
+    ext->pages = pages;
+    ext->order = order;
+    return 0;
+}
+
+static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
+{
+    uint32_t   l1i, l2i;
+    uint64_t  *root;
+    uint64_t  *l2;
+    uint64_t  *l3;
+    uint64_t   pa;
+
+    if (!space || !out_l3) return -1;
+
+    l1i = (uint32_t)((va >> 30) & 0x1FFU);
+    l2i = (uint32_t)((va >> 21) & 0x1FFU);
+    root = space->root;
+
+    if ((root[l1i] & PTE_VALID) == 0U) {
+        pa = phys_alloc_page();
+        memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
+        if (space_track_table(space, pa) < 0) {
+            phys_free_page(pa);
+            return -1;
+        }
+        root[l1i] = table_desc(pa);
+        clean_dcache_range((uintptr_t)root, (uintptr_t)root + PAGE_SIZE);
+    }
+
+    l2 = (uint64_t *)(uintptr_t)(root[l1i] & PAGE_MASK);
+    if ((l2[l2i] & PTE_VALID) == 0U) {
+        pa = phys_alloc_page();
+        memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
+        if (space_track_table(space, pa) < 0) {
+            phys_free_page(pa);
+            return -1;
+        }
+        l2[l2i] = table_desc(pa);
+        clean_dcache_range((uintptr_t)l2, (uintptr_t)l2 + PAGE_SIZE);
+    }
+
+    l3 = (uint64_t *)(uintptr_t)(l2[l2i] & PAGE_MASK);
+    *out_l3 = l3;
+    return 0;
+}
+
+static int map_user_pages_raw(mm_space_t *space, uintptr_t va, uint64_t pa,
+                              uint32_t pages, uint32_t prot)
+{
+    uint64_t flags = user_leaf_flags(prot);
+
+    for (uint32_t i = 0U; i < pages; i++) {
+        uintptr_t cur_va = va + (uintptr_t)i * PAGE_SIZE;
+        uint64_t *l3;
+        uint32_t  l3i;
+
+        if (space_ensure_l3(space, cur_va, &l3) < 0)
+            return -1;
+
+        l3i = (uint32_t)((cur_va >> 12) & 0x1FFU);
+        if (l3[l3i] & PTE_VALID)
+            return -1;
+
+        l3[l3i] = ((pa + (uint64_t)i * PAGE_SIZE) & PAGE_MASK) | flags;
+        clean_dcache_range((uintptr_t)l3, (uintptr_t)l3 + PAGE_SIZE);
+    }
+
+    dsb_ish();
+    isb();
+    return 0;
 }
 
 /* ── Costruzione page table ─────────────────────────────────────────── */
@@ -178,6 +335,149 @@ static void mmu_enable(void)
     );
 }
 
+/* ── mm_space API ───────────────────────────────────────────────────── */
+
+mm_space_t *mmu_kernel_space(void)
+{
+    return &kernel_space;
+}
+
+mm_space_t *mmu_current_space(void)
+{
+    return current_space ? current_space : &kernel_space;
+}
+
+mm_space_t *mmu_space_create(void)
+{
+    for (uint32_t i = 0U; i < MMU_MAX_SPACES; i++) {
+        mm_space_t *space = &space_pool[i];
+        uint64_t    pa;
+
+        if (space->in_use)
+            continue;
+
+        pa = phys_alloc_page();
+        memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
+        memcpy((void *)(uintptr_t)pa, kernel_space.root, PAGE_SIZE);
+
+        space->root_pa     = pa;
+        space->root        = (uint64_t *)(uintptr_t)pa;
+        space->in_use      = 1U;
+        space->is_kernel   = 0U;
+        space->table_count = 0U;
+        space->extent_count = 0U;
+        clean_dcache_range((uintptr_t)space->root,
+                           (uintptr_t)space->root + PAGE_SIZE);
+        return space;
+    }
+    return NULL;
+}
+
+void mmu_activate_space(mm_space_t *space)
+{
+    uint64_t ttbr0;
+
+    if (!space)
+        space = &kernel_space;
+    if (current_space == space)
+        return;
+
+    ttbr0 = space->root_pa;
+    __asm__ volatile("msr ttbr0_el1, %0" :: "r"(ttbr0) : "memory");
+    __asm__ volatile("tlbi vmalle1" ::: "memory");
+    dsb_ish();
+    isb();
+    current_space = space;
+}
+
+void mmu_space_destroy(mm_space_t *space)
+{
+    if (!space || !space->in_use || space->is_kernel)
+        return;
+
+    if (current_space == space)
+        mmu_activate_space(&kernel_space);
+
+    for (uint32_t i = 0U; i < space->extent_count; i++)
+        phys_free_pages(space->extents[i].pa, space->extents[i].order);
+
+    for (uint32_t i = 0U; i < space->table_count; i++)
+        phys_free_page(space->table_pages[i]);
+
+    phys_free_page(space->root_pa);
+    memset(space, 0, sizeof(*space));
+}
+
+int mmu_map_user_region(mm_space_t *space, uintptr_t start,
+                        size_t size, uint32_t prot)
+{
+    uintptr_t cur_va;
+    uint32_t  remaining_pages;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+    if ((start & (PAGE_SIZE - 1ULL)) != 0ULL || (size & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return -1;
+    if (start < MMU_USER_BASE || start + size < start || start + size > MMU_USER_LIMIT)
+        return -1;
+
+    cur_va = start;
+    remaining_pages = (uint32_t)(size / PAGE_SIZE);
+
+    while (remaining_pages > 0U) {
+        uint32_t order = largest_order_fit(remaining_pages);
+        uint32_t pages = 1U << order;
+        uint64_t pa = phys_alloc_pages(order);
+        size_t   bytes = (size_t)pages * PAGE_SIZE;
+
+        memset((void *)(uintptr_t)pa, 0, bytes);
+        if (space_track_extent(space, cur_va, pa, pages, (uint8_t)order) < 0)
+            return -1;
+        if (map_user_pages_raw(space, cur_va, pa, pages, prot) < 0)
+            return -1;
+
+        cur_va += (uintptr_t)bytes;
+        remaining_pages -= pages;
+    }
+
+    return 0;
+}
+
+void *mmu_space_resolve_ptr(mm_space_t *space, uintptr_t va, size_t size)
+{
+    uintptr_t end = va + size;
+
+    if (!space || !space->in_use || end < va)
+        return NULL;
+
+    for (uint32_t i = 0U; i < space->extent_count; i++) {
+        mm_extent_t *ext = &space->extents[i];
+        uintptr_t    ext_start = ext->va;
+        uintptr_t    ext_end = ext_start + (uintptr_t)ext->pages * PAGE_SIZE;
+
+        if (va >= ext_start && end <= ext_end) {
+            uintptr_t off = va - ext_start;
+            return (void *)(uintptr_t)(ext->pa + off);
+        }
+    }
+
+    return NULL;
+}
+
+int mmu_prefault_space_range(mm_space_t *space, uintptr_t start, uintptr_t end)
+{
+    mm_space_t *saved;
+
+    if (!space || !space->in_use || end < start)
+        return -1;
+
+    saved = mmu_current_space();
+    mmu_activate_space(space);
+    mmu_prefault_range(start, end);
+    mmu_activate_space(saved);
+    return 0;
+}
+
 /* ── API pubblica ───────────────────────────────────────────────────── */
 
 void mmu_init(void)
@@ -191,6 +491,14 @@ void mmu_init(void)
     uart_puts("[EnlilOS] MMU: abilitazione MMU + D-cache + I-cache...\n");
 
     mmu_enable();
+
+    kernel_space.root_pa      = (uint64_t)(uintptr_t)l1_table;
+    kernel_space.root         = l1_table;
+    kernel_space.in_use       = 1U;
+    kernel_space.is_kernel    = 1U;
+    kernel_space.table_count  = 0U;
+    kernel_space.extent_count = 0U;
+    current_space             = &kernel_space;
 
     /* Se arriviamo qui la MMU è attiva e il codice gira cacheable */
     uart_puts("[EnlilOS] MMU attiva — cache abilitate\n");

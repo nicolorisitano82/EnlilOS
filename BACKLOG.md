@@ -768,8 +768,10 @@ alpha-blended, poi presenta il frame via display engine VirtIO-GPU.
 
 ---
 
-### ⬜ M6-01 · ELF64 Static Loader
+### ✅ M6-01 · ELF64 Static Loader
 **Priorità:** CRITICA
+
+**Stato:** COMPLETATA
 
 **RT design:** ELF loading è operazione di setup (non hot path). Tuttavia:
 - I segmenti PT_LOAD vengono **pre-faultati** dopo il caricamento (lettura pagina per pagina)
@@ -781,11 +783,58 @@ alpha-blended, poi presenta il frame via display engine VirtIO-GPU.
 - Stack utente 8MB pre-allocato a `0x7FFF000000`
 - ABI stack: `argc`, `argv[]`, `envp[]`, `auxv[]` (AT_PHDR, AT_ENTRY, AT_PAGESZ, AT_HWCAP)
 
+**Implementato ora:** loader `ELF64` statico per AArch64 con `mm_space`
+dedicato per task user-space, mapping dei `PT_LOAD` nel window alto user,
+stack ABI a `0x7FFF000000` preallocato (8MB), `auxv` minima
+(`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_PAGESZ`, `AT_HWCAP`),
+prefault di segmenti e stack, switch di `TTBR0` per task EL0, trampoline
+di ingresso a EL0 e demo ELF integrata nel build.
+La boot console espone `elfdemo` e `runelf PATH`, e la suite `selftest`
+valida il percorso end-to-end: load → spawn EL0 → `write()` da user-space
+→ `exit()`.
+
+Stato dettagliato:
+- [x] parsing ELF64 little-endian AArch64
+- [x] supporto `ET_EXEC`
+- [x] supporto base `ET_DYN` con load bias nel window user
+- [x] mapping `PT_LOAD` con permessi `R/W/X`
+- [x] stack utente 8MB preallocato
+- [x] stack ABI con `argc/argv/envp/auxv`
+- [x] prefault di segmenti e stack
+- [x] switching `TTBR0` per task user-space
+- [x] ingresso a `EL0`
+- [x] demo ELF integrata e self-test runtime
+
 ---
 
-### ⬜ M6-02 · execve() completo
+### ✅ M6-02 · execve() completo
 **Priorità:** ALTA
+
+**Stato:** COMPLETATA
+
 VFS open → verifica ELF → carica segmenti → drop a EL0.
+
+**Implementato ora:** `sys_execve()` reale per task user-space AArch64:
+copia sicura di `path` / `argv[]` / `envp[]` dal caller EL0, apertura del
+path via VFS, validazione ELF64 AArch64, caricamento della nuova immagine in
+uno `mm_space` fresco, rebuild dello stack ABI e rientro diretto nella nuova
+immagine senza tornare al caller precedente.
+Gli fd rimangono aperti (nessun `CLOEXEC` ancora), `brk` viene azzerato per il
+nuovo programma e il replace avviene in-place sul task corrente.
+
+Validazione:
+- rootfs bootstrap espone `DEMO.ELF`, `EXEC1.ELF`, `EXEC2.ELF`
+- boot console: `elfdemo`, `execdemo`, `runelf PATH`
+- self-test runtime: `execve` end-to-end con primo ELF che chiama
+  `execve("/EXEC2.ELF")` e secondo ELF che parte davvero a EL0
+
+Stato dettagliato:
+- [x] `sys_execve(path, argv, envp)`
+- [x] copia sicura argomenti dal caller user-space
+- [x] open/verify/load via VFS + ELF loader
+- [x] replace in-place del task corrente
+- [x] rientro diretto nella nuova immagine a EL0
+- [x] self-test end-to-end su QEMU
 
 ---
 

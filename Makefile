@@ -20,8 +20,11 @@ endif
 CC       = $(CROSS)gcc
 AS       = $(CC)
 LD       = $(shell $(CC) -print-prog-name=ld 2>/dev/null || printf '%s' "$(CROSS)ld")
-OBJCOPY  = $(shell $(CC) -print-prog-name=objcopy 2>/dev/null || printf '%s' "$(CROSS)objcopy")
-OBJDUMP  = $(shell $(CC) -print-prog-name=objdump 2>/dev/null || printf '%s' "$(CROSS)objdump")
+LD_PREFIX = $(patsubst %ld,%,$(LD))
+OBJCOPY  = $(shell p="$$($(CC) -print-prog-name=objcopy 2>/dev/null)"; \
+                   if [ -z "$$p" ] || [ "$$p" = "objcopy" ]; then printf '%s' "$(LD_PREFIX)objcopy"; else printf '%s' "$$p"; fi)
+OBJDUMP  = $(shell p="$$($(CC) -print-prog-name=objdump 2>/dev/null)"; \
+                   if [ -z "$$p" ] || [ "$$p" = "objdump" ]; then printf '%s' "$(LD_PREFIX)objdump"; else printf '%s' "$$p"; fi)
 
 # Override manuale:
 #   make CROSS=aarch64-none-elf-
@@ -38,6 +41,7 @@ ASM_SRCS = boot/boot.S \
            boot/vectors.S \
            kernel/sched_switch.S
 C_SRCS   = kernel/main.c \
+           kernel/elf_loader.c \
            kernel/microkernel.c \
            kernel/exception.c \
            kernel/mmu.c \
@@ -66,9 +70,14 @@ C_SRCS   = kernel/main.c \
            drivers/blk.c \
            drivers/framebuffer.c
 
+USER_SRCS      = user/demo.S user/execve_demo.S user/execve_target.S
+USER_OBJS      = $(USER_SRCS:.S=.o)
+USER_ELFS      = $(USER_SRCS:.S=.elf)
+USER_EMBEDOBJS = $(USER_SRCS:.S=.embed.o)
+
 # Oggetti
-OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o)
-SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o)
+OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(USER_EMBEDOBJS)
+SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o) $(USER_EMBEDOBJS)
 
 # Output
 KERNEL   = enlil.elf
@@ -95,6 +104,12 @@ $(KERNEL_BIN): $(KERNEL)
 
 $(SELFTEST_KERNEL): $(SELFTEST_OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^
+
+%.elf: %.o user/user.ld
+	$(LD) -T user/user.ld -nostdlib -o $@ $<
+
+%.embed.o: %.elf
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
 
 %.o: %.S
 	$(AS) $(ASFLAGS) -c $< -o $@
@@ -261,5 +276,6 @@ dump: $(KERNEL)
 	$(OBJDUMP) -d $< | head -100
 
 clean:
-	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL)
+	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL) \
+	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS)
 	@echo "Clean completato."
