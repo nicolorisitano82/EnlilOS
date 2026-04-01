@@ -1,0 +1,9 @@
+Mount profile bootstrap:
+/        -> initrd cpio (ro)
+/dev     -> devfs
+/data    -> ext4 rw-full su virtio-blk quando disponibile
+/sysroot -> ext4 rw-full su virtio-blk quando disponibile
+
+Entry points:
+/INIT.ELF -> primo ELF userspace del bootstrap
+/NSH.ELF  -> shell userspace interattiva

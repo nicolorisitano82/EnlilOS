@@ -11,7 +11,7 @@
  *   - O_TRUNC / O_APPEND / O_CREAT e sync esplicito
  *
  * Limiti deliberati di questa milestone:
- *   - nessun journal replay / writeback del journal
+ *   - journal bounded custom di EnlilOS, non compatibile JBD2 Linux
  *   - nessun supporto inline-data / journal device / meta_bg
  *   - niente htree update: directory indicizzate restano read-only
  *   - extent tree modificabile solo a profondita' 0 (extent root in inode)
@@ -41,6 +41,14 @@
 #define EXT4_DEF_FILE_MODE               (S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
 #define EXT4_DEF_DIR_MODE                (S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | \
                                           S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
+#define EXT4_INTERNAL_JOURNAL_NAME       ".enlil-journal"
+#define EXT4_JOURNAL_MAGIC               0x454A4E4CU
+#define EXT4_JOURNAL_VERSION             1U
+#define EXT4_JOURNAL_STATE_CLEAN         0U
+#define EXT4_JOURNAL_STATE_PENDING       1U
+#define EXT4_JOURNAL_HEADER_CRC_OFF      24U
+#define EXT4_JOURNAL_MAX_TX_BLOCKS       (EXT4_BLOCK_CACHE_SLOTS + EXT4_INODE_CACHE_SLOTS)
+#define EXT4_JOURNAL_FILE_BLOCKS         (1U + EXT4_JOURNAL_MAX_TX_BLOCKS)
 
 #define EXT4_FT_UNKNOWN                  0U
 #define EXT4_FT_REG_FILE                 1U
@@ -247,6 +255,37 @@ typedef struct {
     uint8_t      raw[512];
 } ext4_inode_cache_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t state;
+    uint32_t entry_count;
+    uint32_t block_size;
+    uint32_t sequence;
+    uint32_t header_crc;
+    uint32_t reserved;
+} ext4_journal_header_t;
+
+typedef struct __attribute__((packed)) {
+    uint64_t target_block;
+    uint32_t data_crc;
+    uint32_t reserved;
+} ext4_journal_entry_t;
+
+typedef struct {
+    uint32_t count;
+    ext4_journal_entry_t entries[EXT4_JOURNAL_MAX_TX_BLOCKS];
+    uint8_t              data[EXT4_JOURNAL_MAX_TX_BLOCKS][EXT4_MAX_BLOCK_SIZE];
+} ext4_journal_txn_t;
+
+typedef struct {
+    bool     ready;
+    bool     in_commit;
+    uint32_t ino;
+    uint32_t sequence;
+    uint64_t phys_blocks[EXT4_JOURNAL_FILE_BLOCKS];
+} ext4_journal_state_t;
+
 typedef struct {
     bool               mounted;
     bool               has_filetype;
@@ -272,11 +311,13 @@ typedef struct {
     char               status[160];
     uint8_t            sb_raw[EXT4_SUPER_SIZE];
     ext4_superblock_t  sb;
+    ext4_journal_state_t journal;
     ext4_block_cache_t blocks[EXT4_BLOCK_CACHE_SLOTS];
     ext4_inode_cache_t inodes[EXT4_INODE_CACHE_SLOTS];
 } ext4_state_t;
 
 static ext4_state_t g_ext4;
+static ext4_journal_txn_t g_ext4_txn;
 
 static void e_memcpy(void *dst, const void *src, size_t n)
 {
@@ -568,18 +609,39 @@ static void ext4_cache_invalidate(void)
     g_ext4.clock = 1U;
 }
 
-static int ext4_flush_block_slot(ext4_block_cache_t *slot)
+static int ext4_raw_block_read(uint64_t block_no, void *buf)
 {
-    if (!slot) return -EFAULT;
-    if (!slot->valid || !slot->dirty) return 0;
-
-    if (blk_write_sync(slot->block_no * g_ext4.sectors_per_block,
-                       slot->data, g_ext4.sectors_per_block) != BLK_OK)
+    if (blk_read_sync(block_no * g_ext4.sectors_per_block,
+                      buf, g_ext4.sectors_per_block) != BLK_OK)
         return -EIO;
-
-    slot->dirty = false;
     return 0;
 }
+
+static int ext4_raw_block_write(uint64_t block_no, const void *buf)
+{
+    if (blk_write_sync(block_no * g_ext4.sectors_per_block,
+                       buf, g_ext4.sectors_per_block) != BLK_OK)
+        return -EIO;
+    return 0;
+}
+
+static uint32_t ext4_journal_block_crc(const uint8_t *buf)
+{
+    return ext4_crc32c_raw(0xFFFFFFFFU, buf, g_ext4.block_size);
+}
+
+static int ext4_internal_journal_path(const char *relpath)
+{
+    const char *p = relpath;
+
+    if (!p) return 0;
+    while (*p == '/')
+        p++;
+    return e_streq(p, EXT4_INTERNAL_JOURNAL_NAME);
+}
+
+static int ext4_sync_raw(void);
+static int ext4_commit_pending(void);
 
 static int ext4_find_block_slot(uint64_t block_no)
 {
@@ -618,8 +680,10 @@ static int ext4_cache_load(uint64_t block_no, ext4_block_cache_t **out)
     }
 
     if (!victim) return -EIO;
-    if (ext4_flush_block_slot(victim) < 0)
-        return -EIO;
+    if (victim->valid && victim->dirty) {
+        if (ext4_commit_pending() < 0)
+            return -EIO;
+    }
 
     if (blk_read_sync(block_no * g_ext4.sectors_per_block,
                       victim->data, g_ext4.sectors_per_block) != BLK_OK)
@@ -659,8 +723,6 @@ static int ext4_cache_get_mut(uint64_t block_no, uint8_t **out)
     return 0;
 }
 
-static int ext4_flush_inode_slot(ext4_inode_cache_t *slot);
-
 static int ext4_load_inode(uint32_t ino, ext4_inode_t *out);
 
 static int ext4_map_lblock(const ext4_inode_t *inode, uint32_t lblock,
@@ -696,8 +758,10 @@ static int ext4_mark_inode_dirty(uint32_t ino, const ext4_inode_t *inode)
     }
 
     if (!victim) return -EIO;
-    if (ext4_flush_inode_slot(victim) < 0)
-        return -EIO;
+    if (victim->valid && victim->dirty) {
+        if (ext4_commit_pending() < 0)
+            return -EIO;
+    }
 
     victim->valid = true;
     victim->dirty = true;
@@ -817,6 +881,43 @@ static int ext4_read_group_desc_raw(uint32_t group, uint8_t *raw)
     return 0;
 }
 
+static int ext4_read_group_desc_uncached(uint32_t group, ext4_group_desc_t *out)
+{
+    uint8_t  block[EXT4_MAX_BLOCK_SIZE];
+    uint8_t  block2[EXT4_MAX_BLOCK_SIZE];
+    uint8_t  raw[64];
+    uint64_t gdt_block;
+    uint64_t offset;
+    uint32_t block_no;
+    uint32_t block_off;
+
+    if (!out) return -EFAULT;
+    if (group >= g_ext4.group_count) return -EINVAL;
+
+    gdt_block = (g_ext4.block_size == 1024U) ? 2ULL : 1ULL;
+    offset = gdt_block * g_ext4.block_size +
+             (uint64_t)group * g_ext4.desc_size;
+    block_no = (uint32_t)(offset / g_ext4.block_size);
+    block_off = (uint32_t)(offset % g_ext4.block_size);
+
+    if (ext4_raw_block_read(block_no, block) < 0)
+        return -EIO;
+    e_memset(raw, 0U, sizeof(raw));
+    if (block_off + g_ext4.desc_size <= g_ext4.block_size) {
+        e_memcpy(raw, block + block_off, g_ext4.desc_size);
+    } else {
+        uint32_t first = g_ext4.block_size - block_off;
+        if (ext4_raw_block_read(block_no + 1U, block2) < 0)
+            return -EIO;
+        e_memcpy(raw, block + block_off, first);
+        e_memcpy(raw + first, block2, g_ext4.desc_size - first);
+    }
+    e_memset(out, 0U, sizeof(*out));
+    e_memcpy(out, raw,
+             (g_ext4.desc_size < sizeof(*out)) ? g_ext4.desc_size : sizeof(*out));
+    return 0;
+}
+
 static void ext4_inode_raw_update_checksum(uint32_t ino, uint8_t *raw, ext4_inode_t *inode)
 {
     uint32_t crc;
@@ -930,7 +1031,7 @@ static int ext4_load_inode_uncached_raw(uint32_t ino, uint8_t *raw, ext4_inode_t
     group = (ino - 1U) / g_ext4.inodes_per_group;
     index = (ino - 1U) % g_ext4.inodes_per_group;
 
-    if (ext4_read_group_desc(group, &gd) < 0)
+    if (ext4_read_group_desc_uncached(group, &gd) < 0)
         return -EIO;
 
     table_block = (uint64_t)gd.bg_inode_table_lo |
@@ -946,38 +1047,6 @@ static int ext4_load_inode_uncached_raw(uint32_t ino, uint8_t *raw, ext4_inode_t
     e_memcpy(out, raw,
              (g_ext4.inode_size < sizeof(*out))
                  ? g_ext4.inode_size : sizeof(*out));
-    return 0;
-}
-
-static int ext4_flush_inode_slot(ext4_inode_cache_t *slot)
-{
-    ext4_group_desc_t gd;
-    uint64_t          table_block;
-    uint64_t          offset;
-    uint32_t          group;
-    uint32_t          index;
-    size_t            copy_size;
-
-    if (!slot) return -EFAULT;
-    if (!slot->valid || !slot->dirty) return 0;
-
-    group = (slot->ino - 1U) / g_ext4.inodes_per_group;
-    index = (slot->ino - 1U) % g_ext4.inodes_per_group;
-
-    if (ext4_read_group_desc(group, &gd) < 0)
-        return -EIO;
-
-    table_block = (uint64_t)gd.bg_inode_table_lo |
-                  ((uint64_t)gd.bg_inode_table_hi << 32);
-    offset = table_block * g_ext4.block_size +
-             (uint64_t)index * g_ext4.inode_size;
-
-    ext4_inode_raw_update_checksum(slot->ino, slot->raw, &slot->inode);
-    copy_size = (g_ext4.inode_size < sizeof(slot->raw))
-              ? g_ext4.inode_size : sizeof(slot->raw);
-    if (ext4_write_bytes_cached(offset, slot->raw, copy_size) < 0)
-        return -EIO;
-    slot->dirty = false;
     return 0;
 }
 
@@ -1009,8 +1078,10 @@ static int ext4_load_inode(uint32_t ino, ext4_inode_t *out)
     }
 
     if (!victim) return -EIO;
-    if (ext4_flush_inode_slot(victim) < 0)
-        return -EIO;
+    if (victim->valid && victim->dirty) {
+        if (ext4_commit_pending() < 0)
+            return -EIO;
+    }
     if (ext4_load_inode_uncached_raw(ino, victim->raw, &victim->inode) < 0)
         return -EIO;
 
@@ -1834,30 +1905,274 @@ static int ext4_truncate_inode(uint32_t ino, ext4_inode_t *inode, uint64_t new_s
     return ext4_mark_inode_dirty(ino, inode);
 }
 
-int ext4_sync(void)
+static int ext4_txn_find_block(const ext4_journal_txn_t *txn, uint64_t block_no)
 {
+    for (uint32_t i = 0U; i < txn->count; i++) {
+        if (txn->entries[i].target_block == block_no)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int ext4_txn_get_or_load(ext4_journal_txn_t *txn, uint64_t block_no, uint8_t **buf_out)
+{
+    int idx;
+
+    if (!txn || !buf_out) return -EFAULT;
+
+    idx = ext4_txn_find_block(txn, block_no);
+    if (idx >= 0) {
+        *buf_out = txn->data[idx];
+        return idx;
+    }
+
+    if (txn->count >= EXT4_JOURNAL_MAX_TX_BLOCKS)
+        return -ENOSPC;
+
     for (uint32_t i = 0U; i < EXT4_BLOCK_CACHE_SLOTS; i++) {
-        if (g_ext4.blocks[i].valid && g_ext4.blocks[i].dirty) {
-            if (ext4_flush_block_slot(&g_ext4.blocks[i]) < 0)
-                return -EIO;
+        if (g_ext4.blocks[i].valid && g_ext4.blocks[i].block_no == block_no) {
+            e_memcpy(txn->data[txn->count], g_ext4.blocks[i].data, g_ext4.block_size);
+            goto added;
         }
+    }
+
+    if (ext4_raw_block_read(block_no, txn->data[txn->count]) < 0)
+        return -EIO;
+
+added:
+    txn->entries[txn->count].target_block = block_no;
+    txn->entries[txn->count].data_crc = 0U;
+    txn->entries[txn->count].reserved = 0U;
+    *buf_out = txn->data[txn->count];
+    txn->count++;
+    return (int)(txn->count - 1U);
+}
+
+static int ext4_txn_apply_inode_raw(ext4_journal_txn_t *txn, uint64_t offset,
+                                    const uint8_t *raw, size_t raw_len)
+{
+    size_t done = 0U;
+
+    while (done < raw_len) {
+        uint64_t block_no = offset / g_ext4.block_size;
+        uint32_t block_off = (uint32_t)(offset % g_ext4.block_size);
+        size_t   chunk = g_ext4.block_size - block_off;
+        uint8_t *dst;
+        int      rc;
+
+        if (chunk > raw_len - done)
+            chunk = raw_len - done;
+
+        rc = ext4_txn_get_or_load(txn, block_no, &dst);
+        if (rc < 0) return rc;
+        e_memcpy(dst + block_off, raw + done, chunk);
+
+        offset += chunk;
+        done += chunk;
+    }
+
+    return 0;
+}
+
+static int ext4_txn_add_dirty_inode(ext4_journal_txn_t *txn, ext4_inode_cache_t *slot)
+{
+    ext4_group_desc_t gd;
+    uint64_t          table_block;
+    uint64_t          offset;
+    uint32_t          group;
+    uint32_t          index;
+    size_t            raw_len;
+
+    if (!txn || !slot) return -EFAULT;
+    if (!slot->valid || !slot->dirty) return 0;
+
+    group = (slot->ino - 1U) / g_ext4.inodes_per_group;
+    index = (slot->ino - 1U) % g_ext4.inodes_per_group;
+
+    if (ext4_read_group_desc(group, &gd) < 0)
+        return -EIO;
+
+    table_block = (uint64_t)gd.bg_inode_table_lo |
+                  ((uint64_t)gd.bg_inode_table_hi << 32);
+    offset = table_block * g_ext4.block_size +
+             (uint64_t)index * g_ext4.inode_size;
+    raw_len = (g_ext4.inode_size < sizeof(slot->raw))
+            ? g_ext4.inode_size : sizeof(slot->raw);
+
+    ext4_inode_raw_update_checksum(slot->ino, slot->raw, &slot->inode);
+    return ext4_txn_apply_inode_raw(txn, offset, slot->raw, raw_len);
+}
+
+static int ext4_txn_build(ext4_journal_txn_t *txn)
+{
+    if (!txn) return -EFAULT;
+    e_memset(txn, 0U, sizeof(*txn));
+
+    for (uint32_t i = 0U; i < EXT4_BLOCK_CACHE_SLOTS; i++) {
+        int idx;
+
+        if (!g_ext4.blocks[i].valid || !g_ext4.blocks[i].dirty)
+            continue;
+
+        idx = ext4_txn_find_block(txn, g_ext4.blocks[i].block_no);
+        if (idx < 0) {
+            uint8_t *dst;
+            idx = ext4_txn_get_or_load(txn, g_ext4.blocks[i].block_no, &dst);
+            if (idx < 0) return idx;
+        }
+        e_memcpy(txn->data[idx], g_ext4.blocks[i].data, g_ext4.block_size);
     }
 
     for (uint32_t i = 0U; i < EXT4_INODE_CACHE_SLOTS; i++) {
-        if (g_ext4.inodes[i].valid && g_ext4.inodes[i].dirty) {
-            if (ext4_flush_inode_slot(&g_ext4.inodes[i]) < 0)
-                return -EIO;
-        }
+        int rc = ext4_txn_add_dirty_inode(txn, &g_ext4.inodes[i]);
+        if (rc < 0) return rc;
     }
 
+    return 0;
+}
+
+static void ext4_txn_clear_dirty_flags(void)
+{
     for (uint32_t i = 0U; i < EXT4_BLOCK_CACHE_SLOTS; i++) {
-        if (g_ext4.blocks[i].valid && g_ext4.blocks[i].dirty) {
-            if (ext4_flush_block_slot(&g_ext4.blocks[i]) < 0)
-                return -EIO;
+        if (g_ext4.blocks[i].valid)
+            g_ext4.blocks[i].dirty = false;
+    }
+    for (uint32_t i = 0U; i < EXT4_INODE_CACHE_SLOTS; i++) {
+        if (g_ext4.inodes[i].valid)
+            g_ext4.inodes[i].dirty = false;
+    }
+}
+
+static int ext4_txn_apply_to_disk(const ext4_journal_txn_t *txn)
+{
+    if (!txn) return -EFAULT;
+
+    for (uint32_t i = 0U; i < txn->count; i++) {
+        if (ext4_raw_block_write(txn->entries[i].target_block, txn->data[i]) < 0)
+            return -EIO;
+        for (uint32_t j = 0U; j < EXT4_BLOCK_CACHE_SLOTS; j++) {
+            if (g_ext4.blocks[j].valid &&
+                g_ext4.blocks[j].block_no == txn->entries[i].target_block) {
+                e_memcpy(g_ext4.blocks[j].data, txn->data[i], g_ext4.block_size);
+                g_ext4.blocks[j].dirty = false;
+            }
         }
     }
 
     return (blk_flush_sync() == BLK_OK) ? 0 : -EIO;
+}
+
+static void ext4_journal_pack_header(uint8_t *block_buf, const ext4_journal_txn_t *txn,
+                                     uint32_t state)
+{
+    ext4_journal_header_t *hdr = (ext4_journal_header_t *)(void *)block_buf;
+
+    e_memset(block_buf, 0U, g_ext4.block_size);
+    hdr->magic = EXT4_JOURNAL_MAGIC;
+    hdr->version = EXT4_JOURNAL_VERSION;
+    hdr->state = state;
+    hdr->entry_count = txn->count;
+    hdr->block_size = g_ext4.block_size;
+    hdr->sequence = ++g_ext4.journal.sequence;
+    hdr->header_crc = 0U;
+
+    if (txn->count != 0U) {
+        e_memcpy(block_buf + sizeof(*hdr), txn->entries,
+                 txn->count * sizeof(ext4_journal_entry_t));
+    }
+    hdr->header_crc = ext4_crc32c_raw(0xFFFFFFFFU, block_buf, g_ext4.block_size);
+}
+
+static int ext4_journal_clear_disk(void)
+{
+    uint8_t block_buf[EXT4_MAX_BLOCK_SIZE];
+
+    if (!g_ext4.journal.ready)
+        return 0;
+
+    e_memset(block_buf, 0U, g_ext4.block_size);
+    if (ext4_raw_block_write(g_ext4.journal.phys_blocks[0], block_buf) < 0)
+        return -EIO;
+    return (blk_flush_sync() == BLK_OK) ? 0 : -EIO;
+}
+
+static int ext4_journal_write_txn(ext4_journal_txn_t *txn)
+{
+    uint8_t block_buf[EXT4_MAX_BLOCK_SIZE];
+
+    if (!txn) return -EFAULT;
+    if (!g_ext4.journal.ready) return -EIO;
+    if (txn->count > EXT4_JOURNAL_MAX_TX_BLOCKS)
+        return -ENOSPC;
+
+    for (uint32_t i = 0U; i < txn->count; i++) {
+        txn->entries[i].data_crc = ext4_journal_block_crc(txn->data[i]);
+        if (ext4_raw_block_write(g_ext4.journal.phys_blocks[i + 1U], txn->data[i]) < 0)
+            return -EIO;
+    }
+
+    ext4_journal_pack_header(block_buf, txn, EXT4_JOURNAL_STATE_PENDING);
+    if (ext4_raw_block_write(g_ext4.journal.phys_blocks[0], block_buf) < 0)
+        return -EIO;
+    return (blk_flush_sync() == BLK_OK) ? 0 : -EIO;
+}
+
+static int ext4_sync_raw(void)
+{
+    int rc;
+
+    if (!g_ext4.mounted)
+        return -EIO;
+    if (!ext4_has_dirty_internal())
+        return (blk_flush_sync() == BLK_OK) ? 0 : -EIO;
+
+    rc = ext4_txn_build(&g_ext4_txn);
+    if (rc < 0) return rc;
+    rc = ext4_txn_apply_to_disk(&g_ext4_txn);
+    if (rc < 0) return rc;
+    ext4_txn_clear_dirty_flags();
+    return 0;
+}
+
+static int ext4_commit_pending(void)
+{
+    int rc;
+
+    if (!g_ext4.mounted)
+        return -EIO;
+    if (!ext4_has_dirty_internal())
+        return (blk_flush_sync() == BLK_OK) ? 0 : -EIO;
+    if (g_ext4.journal.in_commit)
+        return -EIO;
+
+    rc = ext4_txn_build(&g_ext4_txn);
+    if (rc < 0) return rc;
+
+    g_ext4.journal.in_commit = true;
+    if (g_ext4.journal.ready) {
+        rc = ext4_journal_write_txn(&g_ext4_txn);
+        if (rc < 0) goto out;
+    }
+
+    rc = ext4_txn_apply_to_disk(&g_ext4_txn);
+    if (rc < 0) goto out;
+
+    if (g_ext4.journal.ready) {
+        rc = ext4_journal_clear_disk();
+        if (rc < 0) goto out;
+    }
+
+    ext4_txn_clear_dirty_flags();
+    rc = 0;
+
+out:
+    g_ext4.journal.in_commit = false;
+    return rc;
+}
+
+int ext4_sync(void)
+{
+    return ext4_commit_pending();
 }
 
 static uint8_t ext4_inode_file_type(const ext4_inode_t *inode)
@@ -2571,6 +2886,131 @@ static int ext4_rename_path(const char *old_relpath, const char *new_relpath)
     return ext4_mark_inode_dirty(old_parent_ino, &old_parent_inode);
 }
 
+static int ext4_journal_locate_blocks(uint32_t ino, ext4_inode_t *inode)
+{
+    uint64_t need_size = (uint64_t)EXT4_JOURNAL_FILE_BLOCKS * g_ext4.block_size;
+    int      changed = 0;
+
+    if (!inode) return -EFAULT;
+    if ((inode->i_mode & S_IFMT) != S_IFREG)
+        return -EINVAL;
+
+    if (ext4_inode_size(inode) < need_size) {
+        int rc = ext4_truncate_inode(ino, inode, need_size);
+        if (rc < 0) return rc;
+        changed = 1;
+    }
+
+    for (uint32_t lblock = 0U; lblock < EXT4_JOURNAL_FILE_BLOCKS; lblock++) {
+        uint64_t pblock = 0ULL;
+        int      rc = ext4_map_lblock(inode, lblock, &pblock);
+        if (rc < 0) return rc;
+        if (pblock == 0ULL) {
+            rc = ext4_ensure_lblock_allocated(ino, inode, lblock, &pblock);
+            if (rc < 0) return rc;
+            changed = 1;
+        }
+        if (pblock == 0ULL)
+            return -EIO;
+        g_ext4.journal.phys_blocks[lblock] = pblock;
+    }
+
+    if (changed) {
+        if (ext4_mark_inode_dirty(ino, inode) < 0)
+            return -EIO;
+        if (ext4_sync_raw() < 0)
+            return -EIO;
+    }
+
+    g_ext4.journal.ino = ino;
+    return 0;
+}
+
+static int ext4_journal_recover_if_needed(void)
+{
+    uint8_t               header_block[EXT4_MAX_BLOCK_SIZE];
+    ext4_journal_header_t hdr;
+    uint8_t               tmp[EXT4_MAX_BLOCK_SIZE];
+
+    if (!g_ext4.journal.ready)
+        return 0;
+    if (ext4_raw_block_read(g_ext4.journal.phys_blocks[0], header_block) < 0)
+        return -EIO;
+
+    e_memcpy(&hdr, header_block, sizeof(hdr));
+    if (hdr.magic == 0U && hdr.state == EXT4_JOURNAL_STATE_CLEAN)
+        return 0;
+    if (hdr.magic != EXT4_JOURNAL_MAGIC ||
+        hdr.version != EXT4_JOURNAL_VERSION ||
+        hdr.block_size != g_ext4.block_size ||
+        hdr.entry_count > EXT4_JOURNAL_MAX_TX_BLOCKS) {
+        ext4_set_error("journal custom corrotto");
+        return -EIO;
+    }
+
+    e_memcpy(tmp, header_block, g_ext4.block_size);
+    *(uint32_t *)(void *)(tmp + EXT4_JOURNAL_HEADER_CRC_OFF) = 0U;
+    if (ext4_crc32c_raw(0xFFFFFFFFU, tmp, g_ext4.block_size) != hdr.header_crc) {
+        ext4_set_error("checksum journal custom non valida");
+        return -EIO;
+    }
+
+    if (hdr.state != EXT4_JOURNAL_STATE_PENDING || hdr.entry_count == 0U)
+        return 0;
+
+    for (uint32_t i = 0U; i < hdr.entry_count; i++) {
+        const ext4_journal_entry_t *entry;
+        uint8_t                     data_block[EXT4_MAX_BLOCK_SIZE];
+
+        entry = (const ext4_journal_entry_t *)(const void *)
+                (header_block + sizeof(ext4_journal_header_t) +
+                 i * sizeof(ext4_journal_entry_t));
+
+        if (ext4_raw_block_read(g_ext4.journal.phys_blocks[i + 1U], data_block) < 0)
+            return -EIO;
+        if (ext4_journal_block_crc(data_block) != entry->data_crc) {
+            ext4_set_error("dati journal custom corrotti");
+            return -EIO;
+        }
+        if (ext4_raw_block_write(entry->target_block, data_block) < 0)
+            return -EIO;
+    }
+
+    if (blk_flush_sync() != BLK_OK)
+        return -EIO;
+    if (ext4_journal_clear_disk() < 0)
+        return -EIO;
+
+    ext4_cache_invalidate();
+    uart_puts("[EXT4] recovery: journal custom replay OK\n");
+    return 0;
+}
+
+static int ext4_journal_init(void)
+{
+    ext4_inode_t inode;
+    uint32_t     ino;
+    int          rc;
+
+    rc = ext4_lookup_path(EXT4_INTERNAL_JOURNAL_NAME, &ino, &inode);
+    if (rc == -ENOENT) {
+        rc = ext4_create_file(EXT4_INTERNAL_JOURNAL_NAME,
+                              O_WRONLY | O_CREAT, NULL, NULL);
+        if (rc < 0)
+            return rc;
+        rc = ext4_lookup_path(EXT4_INTERNAL_JOURNAL_NAME, &ino, &inode);
+    }
+    if (rc < 0)
+        return rc;
+
+    rc = ext4_journal_locate_blocks(ino, &inode);
+    if (rc < 0)
+        return rc;
+
+    g_ext4.journal.ready = true;
+    return ext4_journal_recover_if_needed();
+}
+
 static int ext4_open_vfs(const vfs_mount_t *mount, const char *relpath,
                          uint32_t flags, vfs_file_t *out)
 {
@@ -2581,6 +3021,8 @@ static int ext4_open_vfs(const vfs_mount_t *mount, const char *relpath,
 
     if (!out) return -EFAULT;
     if (!g_ext4.mounted) return -EIO;
+    if (ext4_internal_journal_path(relpath))
+        return -ENOENT;
 
     rc = ext4_lookup_path(relpath, &ino, &inode);
     if (rc < 0) {
@@ -2713,6 +3155,9 @@ static int ext4_readdir_vfs(vfs_file_t *file, vfs_dirent_t *out)
         for (uint16_t i = 0U; i < name_len && i + 1U < sizeof(out->name); i++)
             out->name[i] = de->name[i];
         out->name[(name_len < sizeof(out->name)) ? name_len : (sizeof(out->name) - 1U)] = '\0';
+        if (file->node_id == EXT4_ROOT_INO &&
+            e_streq(out->name, EXT4_INTERNAL_JOURNAL_NAME))
+            continue;
 
         mode = g_ext4.has_filetype ? ext4_mode_from_ftype(de->file_type) : 0U;
         if (mode == 0U) {
@@ -2762,12 +3207,16 @@ static int ext4_close_vfs(vfs_file_t *file)
 static int ext4_mkdir_vfs(const vfs_mount_t *mount, const char *relpath, uint32_t mode)
 {
     (void)mount;
+    if (ext4_internal_journal_path(relpath))
+        return -EROFS;
     return ext4_create_dir(relpath, mode);
 }
 
 static int ext4_unlink_vfs(const vfs_mount_t *mount, const char *relpath)
 {
     (void)mount;
+    if (ext4_internal_journal_path(relpath))
+        return -EROFS;
     return ext4_remove_path(relpath);
 }
 
@@ -2776,6 +3225,9 @@ static int ext4_rename_vfs(const vfs_mount_t *old_mount, const char *old_relpath
 {
     (void)old_mount;
     (void)new_mount;
+    if (ext4_internal_journal_path(old_relpath) ||
+        ext4_internal_journal_path(new_relpath))
+        return -EROFS;
     return ext4_rename_path(old_relpath, new_relpath);
 }
 
@@ -2792,6 +3244,8 @@ static int ext4_truncate_vfs(const vfs_mount_t *mount, const char *relpath, uint
     int          rc;
 
     (void)mount;
+    if (ext4_internal_journal_path(relpath))
+        return -EROFS;
     rc = ext4_lookup_path(relpath, &ino, &inode);
     if (rc < 0) return rc;
     if (ext4_inode_is_dir(&inode)) return -EISDIR;
@@ -2937,6 +3391,13 @@ int ext4_mount(void)
         ext4_set_error("root inode ext4 non valida");
         return -EIO;
     }
+    rc = ext4_journal_init();
+    if (rc < 0) {
+        g_ext4.mounted = false;
+        if (g_ext4.status[0] == '\0')
+            ext4_set_error("journal custom init fallita");
+        return rc;
+    }
 
     status_reset();
     status_append("mount rw-full OK: label=");
@@ -2947,6 +3408,7 @@ int ext4_mount(void)
     status_append_u32(g_ext4.group_count);
     status_append(" blocks=");
     status_append_u64(g_ext4.block_count);
+    status_append(" journal=bounded");
     ext4_log_status("[EXT4] ");
     return 0;
 }
@@ -2982,6 +3444,62 @@ int ext4_service_writeback(uint64_t min_age_ms)
         return 0;
 
     return ext4_sync();
+}
+
+static int ext4_selftest_force_recovery_cycle(void)
+{
+    int rc;
+
+    if (!g_ext4.mounted || !g_ext4.journal.ready || !ext4_has_dirty_internal())
+        return -EINVAL;
+
+    rc = ext4_txn_build(&g_ext4_txn);
+    if (rc < 0) return rc;
+    rc = ext4_journal_write_txn(&g_ext4_txn);
+    if (rc < 0) return rc;
+
+    ext4_reset_state();
+    return ext4_mount();
+}
+
+int ext4_selftest_recovery(void)
+{
+    static const char test_path[] = "SELFTEST.DIR/JRECOVERY.TXT";
+    static const char expect[] = "journal-replay-ok";
+    ext4_inode_t      inode;
+    uint32_t          ino;
+    char              buf[32];
+    size_t            written = 0U;
+    int               rc;
+
+    rc = ext4_lookup_path(test_path, &ino, &inode);
+    if (rc == -ENOENT) {
+        rc = ext4_create_file(test_path, O_WRONLY | O_CREAT | O_TRUNC, NULL, NULL);
+        if (rc < 0) return rc;
+        if (ext4_sync() < 0) return -EIO;
+        rc = ext4_lookup_path(test_path, &ino, &inode);
+    }
+    if (rc < 0) return rc;
+
+    rc = ext4_truncate_inode(ino, &inode, 0ULL);
+    if (rc < 0) return rc;
+    rc = ext4_write_inode_data(ino, &inode, 0ULL, expect, sizeof(expect) - 1U, &written);
+    if (rc < 0) return rc;
+    if (written != sizeof(expect) - 1U)
+        return -EIO;
+
+    rc = ext4_selftest_force_recovery_cycle();
+    if (rc < 0) return rc;
+
+    rc = ext4_lookup_path(test_path, &ino, &inode);
+    if (rc < 0) return rc;
+    e_memset(buf, 0U, sizeof(buf));
+    rc = ext4_read_inode_data(&inode, 0ULL, buf, sizeof(expect) - 1U);
+    if (rc < 0) return rc;
+    if (!e_nameeq(buf, sizeof(expect) - 1U, expect, sizeof(expect) - 1U))
+        return -EIO;
+
+    return 0;
 }
 
 const char *ext4_status(void)

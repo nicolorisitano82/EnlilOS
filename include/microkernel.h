@@ -42,14 +42,30 @@ typedef struct {
 /* === IPC (Inter-Process Communication) === */
 
 #define IPC_MSG_MAX_SIZE    256
+#define IPC_SMALL_MSG_MAX   64
+#define IPC_MSG_FLAG_INLINE (1U << 0)
 
 typedef struct {
     uint32_t    sender_tid;
     uint32_t    receiver_tid;
     uint32_t    msg_type;
     uint32_t    msg_len;
-    uint8_t     payload[IPC_MSG_MAX_SIZE];
+    uint32_t    flags;
+    uint32_t    _reserved;
+    union {
+        uint8_t  payload[IPC_MSG_MAX_SIZE];
+        uint64_t mr[IPC_MSG_MAX_SIZE / sizeof(uint64_t)];
+    };
 } ipc_message_t;
+
+typedef struct {
+    uint64_t budget_cycles;
+    uint64_t last_call_cycles;
+    uint64_t worst_call_cycles;
+    uint32_t total_calls;
+    uint32_t budget_misses;
+    uint32_t inline_calls;
+} port_stats_t;
 
 /* Tipi di messaggio IPC */
 #define IPC_MSG_PING        1
@@ -71,6 +87,19 @@ typedef struct {
     uint32_t    owner_tid;
     bool        active;
     char        name[TASK_NAME_LEN];
+    uint64_t    latency_budget_cycles;
+    uint64_t    last_call_cycles;
+    uint64_t    worst_call_cycles;
+    uint32_t    total_calls;
+    uint32_t    budget_misses;
+    uint32_t    inline_calls;
+    uint32_t    waiting_tid;
+    uint32_t    active_client_tid;
+    uint64_t    active_start_cycles;
+    bool        pending_valid;
+    bool        reply_valid;
+    ipc_message_t pending_msg;
+    ipc_message_t reply_msg;
 } port_t;
 
 /* === Funzioni del Microkernel === */
@@ -83,10 +112,18 @@ task_t     *mk_task_get(uint32_t tid);
 int         mk_ipc_send(uint32_t sender, uint32_t receiver, uint32_t type,
                          const void *data, uint32_t len);
 int         mk_ipc_receive(uint32_t tid, ipc_message_t *msg);
+int         mk_ipc_call(uint32_t port_id, uint32_t type,
+                        const void *data, uint32_t len,
+                        ipc_message_t *reply_out);
+int         mk_ipc_wait(uint32_t port_id, ipc_message_t *msg);
+int         mk_ipc_reply(uint32_t port_id, uint32_t type,
+                         const void *data, uint32_t len);
 
 uint32_t    mk_port_create(uint32_t owner_tid, const char *name);
 int         mk_port_destroy(uint32_t port_id);
 port_t     *mk_port_lookup(const char *name);
+int         mk_port_set_budget(uint32_t port_id, uint64_t budget_cycles);
+int         mk_port_get_stats(uint32_t port_id, port_stats_t *out);
 
 void        mk_log(const char *prefix, const char *msg);
 

@@ -19,6 +19,7 @@ const char     *ext4_label(void);
 int             ext4_sync(void);
 int             ext4_has_dirty(void);
 int             ext4_service_writeback(uint64_t min_age_ms);
+int             ext4_selftest_recovery(void);
 const vfs_ops_t *ext4_vfs_ops(void);
 
 #endif /* ENLILOS_EXT4_H */

@@ -41,6 +41,7 @@ ASM_SRCS = boot/boot.S \
            boot/vectors.S \
            kernel/sched_switch.S
 C_SRCS   = kernel/main.c \
+           kernel/initrd.c \
            kernel/elf_loader.c \
            kernel/microkernel.c \
            kernel/exception.c \
@@ -51,6 +52,7 @@ C_SRCS   = kernel/main.c \
            kernel/timer.c \
            kernel/sched.c \
            kernel/tty.c \
+           kernel/term80.c \
            kernel/string.c \
            kernel/selftest.c \
            kernel/ext4.c \
@@ -70,10 +72,11 @@ C_SRCS   = kernel/main.c \
            drivers/blk.c \
            drivers/framebuffer.c
 
-USER_STATIC_SRCS      = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_OBJS      = $(USER_STATIC_SRCS:.S=.o)
-USER_STATIC_ELFS      = $(USER_STATIC_SRCS:.S=.elf)
-USER_STATIC_EMBEDOBJS = $(USER_STATIC_SRCS:.S=.embed.o)
+USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
+USER_STATIC_C_SRCS    = user/nsh.c
+USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
+USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
+USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
 USER_DYNAPP_SRCS      = user/dynamic_demo.c
 USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
 USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
@@ -85,6 +88,8 @@ USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
 USER_OBJS             = $(USER_STATIC_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
 USER_ELFS             = $(USER_STATIC_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
 USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
+INITRD_CPIO           = boot/initrd.cpio
+INITRD_EMBEDOBJ       = boot/initrd.embed.o
 
 USER_CFLAGS      = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
                    -fno-builtin -mcpu=cortex-a72 -Iinclude
@@ -92,8 +97,8 @@ USER_PIC_CFLAGS  = $(USER_CFLAGS) -fPIC
 USER_PIE_CFLAGS  = $(USER_CFLAGS) -fPIE
 
 # Oggetti
-OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(USER_EMBEDOBJS)
-SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o) $(USER_EMBEDOBJS)
+OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
+SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
 
 # Output
 KERNEL   = enlil.elf
@@ -124,6 +129,9 @@ $(SELFTEST_KERNEL): $(SELFTEST_OBJS)
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
+user/%.o: user/%.c
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
 user/%.pic.o: user/%.c
 	$(CC) $(USER_PIC_CFLAGS) -c $< -o $@
 
@@ -136,6 +144,25 @@ user/%.so: user/%.pic.o user/user_shared.ld
 user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
+
+$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) $(USER_SHARED_LIBS)
+	python3 tools/mkinitrd.py $@ \
+		README.TXT=initrd/README.TXT \
+		BOOT.TXT=initrd/BOOT.TXT \
+		dir:dev \
+		dir:data \
+		dir:sysroot \
+		INIT.ELF=user/nsh.elf \
+		DEMO.ELF=user/demo.elf \
+		EXEC1.ELF=user/execve_demo.elf \
+		EXEC2.ELF=user/execve_target.elf \
+		DYNDEMO.ELF=user/dynamic_demo.elf \
+		libdyn.so=user/libdyn.so \
+		LD-ENLIL.SO=user/ld_enlil.so \
+		NSH.ELF=user/nsh.elf
+
+$(INITRD_EMBEDOBJ): $(INITRD_CPIO)
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
 
 %.embed.o: %.elf
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
@@ -309,5 +336,5 @@ dump: $(KERNEL)
 
 clean:
 	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL) \
-	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS)
+	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO)
 	@echo "Clean completato."

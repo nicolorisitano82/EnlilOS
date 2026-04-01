@@ -5,7 +5,7 @@
  *   - syscall_table[256]: dispatch O(1)
  *   - fd_table[SCHED_MAX_TASKS][MAX_FD]: file descriptor per task
  *   - task_brk[SCHED_MAX_TASKS]: program break per task
- *   - 13 syscall base + ENOSYS fallback
+ *   - syscall base + estensioni user-space per M7-02
  *
  * RT: nessuna allocazione nel dispatch path. WCET = O(1).
  */
@@ -13,6 +13,7 @@
 #include "syscall.h"
 #include "keyboard.h"
 #include "elf_loader.h"
+#include "kheap.h"
 #include "mmu.h"
 #include "sched.h"
 #include "timer.h"
@@ -168,6 +169,35 @@ static int user_copy_cstr(uintptr_t uva, char *dst, size_t cap)
 
     dst[cap - 1U] = '\0';
     return -ENAMETOOLONG;
+}
+
+static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
+{
+    mm_space_t    *space;
+    const uint8_t *in = (const uint8_t *)src;
+    size_t         copied = 0U;
+
+    if (size == 0U) return 0;
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EFAULT;
+
+    space = sched_task_space(current_task);
+    while (copied < size) {
+        uintptr_t cur = uva + copied;
+        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
+        size_t    chunk = PAGE_SIZE - page_off;
+        void     *dst;
+
+        if (chunk > size - copied)
+            chunk = size - copied;
+
+        dst = mmu_space_resolve_ptr(space, cur, chunk);
+        if (!dst) return -EFAULT;
+        memcpy(dst, in + copied, chunk);
+        copied += chunk;
+    }
+
+    return 0;
 }
 
 static int exec_copy_push_string(exec_copy_t *copy, uintptr_t user_ptr,
@@ -644,6 +674,127 @@ static uint64_t sys_clock_gettime(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * Syscall 14 — getdents
+ *
+ * args: fd, sys_dirent_t *buf, max_entries
+ * Copia fino a max_entries entry della directory aperta.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_getdents(uint64_t args[6])
+{
+    int           fd = (int)args[0];
+    uintptr_t     buf_uva = (uintptr_t)args[1];
+    uint32_t      max_entries = (uint32_t)args[2];
+    fd_entry_t   *e = fd_get(fd);
+    uint32_t      copied = 0U;
+
+    if (!e) return ERR(EBADF);
+    if (!buf_uva) return ERR(EFAULT);
+    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
+    if (max_entries == 0U) return 0;
+    if (max_entries > 64U) max_entries = 64U;
+
+    while (copied < max_entries) {
+        vfs_dirent_t  ent;
+        sys_dirent_t  out;
+        int           rc = vfs_readdir(&e->file, &ent);
+
+        if (rc == -ENOENT)
+            break;
+        if (rc < 0)
+            return ERR(-rc);
+
+        memset(&out, 0, sizeof(out));
+        memcpy(out.name, ent.name, sizeof(out.name));
+        out.mode = ent.mode;
+        rc = user_store_bytes(buf_uva + copied * sizeof(out), &out, sizeof(out));
+        if (rc < 0)
+            return ERR(-rc);
+        copied++;
+    }
+
+    return copied;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 15 — task_snapshot
+ *
+ * args: task_snapshot_t *buf, max_entries
+ * Espone lo snapshot dei task per 'top' / monitor user-space.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_task_snapshot(uint64_t args[6])
+{
+    uintptr_t          buf_uva = (uintptr_t)args[0];
+    uint32_t           max_entries = (uint32_t)args[1];
+    sched_task_info_t *info;
+    uint32_t           count;
+    int                rc;
+
+    if (!buf_uva) return ERR(EFAULT);
+    if (max_entries == 0U) return 0;
+    if (max_entries > SCHED_MAX_TASKS) max_entries = SCHED_MAX_TASKS;
+
+    info = (sched_task_info_t *)kmalloc(max_entries * sizeof(*info));
+    if (!info) return ERR(ENOMEM);
+
+    count = sched_task_snapshot(info, max_entries);
+    for (uint32_t i = 0U; i < count; i++) {
+        task_snapshot_t snap;
+
+        memset(&snap, 0, sizeof(snap));
+        snap.pid         = info[i].pid;
+        snap.priority    = info[i].priority;
+        snap.state       = info[i].state;
+        snap.flags       = info[i].flags;
+        snap.runtime_ns  = info[i].runtime_ns;
+        snap.budget_ns   = info[i].budget_ns;
+        snap.period_ms   = info[i].period_ms;
+        snap.deadline_ms = info[i].deadline_ms;
+        memcpy(snap.name, info[i].name, sizeof(snap.name));
+
+        rc = user_store_bytes(buf_uva + i * sizeof(snap), &snap, sizeof(snap));
+        if (rc < 0) {
+            kfree(info);
+            return ERR(-rc);
+        }
+    }
+
+    kfree(info);
+    return count;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 16 — spawn
+ *
+ * args: path, pid_out, priority
+ * Lancia un ELF statico/dinamico senza sostituire il chiamante.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_spawn(uint64_t args[6])
+{
+    char      path[EXEC_MAX_PATH];
+    uintptr_t path_uva = (uintptr_t)args[0];
+    uintptr_t pid_uva  = (uintptr_t)args[1];
+    uint8_t   prio     = (args[2] <= 255ULL) ? (uint8_t)args[2] : PRIO_NORMAL;
+    uint32_t  pid = 0U;
+    int       rc;
+
+    if (!path_uva || !pid_uva)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr(path_uva, path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = elf64_spawn_path(path, path, prio, &pid);
+    if (rc < 0)
+        return ERR(EIO);
+
+    rc = user_store_bytes(pid_uva, &pid, sizeof(pid));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_enosys(uint64_t args[6])
@@ -682,7 +833,7 @@ void syscall_init(void)
         syscall_table[i].name    = "enosys";
     }
 
-    /* 5. Registra le 13 syscall base */
+    /* 5. Registra le syscall base + estensioni per la shell user-space */
     syscall_table[SYS_WRITE] = (syscall_entry_t){
         sys_write, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "write"
     };
@@ -722,8 +873,17 @@ void syscall_init(void)
     syscall_table[SYS_CLOCK_GETTIME] = (syscall_entry_t){
         sys_clock_gettime, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "clock_gettime"
     };
+    syscall_table[SYS_GETDENTS] = (syscall_entry_t){
+        sys_getdents, 0, "getdents"
+    };
+    syscall_table[SYS_TASK_SNAPSHOT] = (syscall_entry_t){
+        sys_task_snapshot, 0, "task_snapshot"
+    };
+    syscall_table[SYS_SPAWN] = (syscall_entry_t){
+        sys_spawn, 0, "spawn"
+    };
 
-    uart_puts("[SYSCALL] 13 syscall base registrate\n");
+    uart_puts("[SYSCALL] 16 syscall base/UX registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

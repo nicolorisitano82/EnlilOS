@@ -1,137 +1,222 @@
 # EnlilOS — Real-Time Microkernel
 
-Microkernel real-time per AArch64 (ARMv8-A), target QEMU `virt` con CPU Cortex-A72.
+Microkernel real-time per AArch64 (ARMv8-A), sviluppato e testato soprattutto su QEMU `virt` con CPU `cortex-a72`.
 
-Ispirato a GNU Hurd: task in kernel-space, IPC message-passing, server dedicati per ogni sottosistema hardware.
+Il progetto combina vincoli di affidabilita' e latenza prevedibile con funzionalita' da sistema operativo general-purpose: scheduler a priorita' fisse, IPC sincrono, rootfs `initrd` embedded, `ext4` su `virtio-blk`, loader ELF64 per task EL0, shell utente e backend grafici `ramfb` / `virtio-gpu`.
 
 ---
 
-## Milestone completate
+## Stato attuale
 
-| ID | Milestone |
-|----|-----------|
-| M1-01 | Exception Vector Table — 16 handler, frame 288B, dump ESR_EL1 |
-| M1-02 | MMU e Virtual Memory — block L1 1GB, WB cache, TLB prefault |
-| M1-03 | Physical Memory Allocator — buddy 11 ordini + slab 7 classi |
-| M1-04 | Kernel Heap — named typed caches (`task_cache`, `port_cache`, `ipc_cache`) |
-| M2-01 | GIC-400 — tabella IRQ[256] O(1), priorità hardware |
-| M2-02 | ARM Generic Timer — tick 1ms (1000 Hz), `timer_now_ns()` O(1) |
-| M2-03 | Scheduler FPP — 256 priorità, ready bitmap, context switch in assembly |
-| M3-01 | Syscall Dispatcher — tabella[256] O(1), ABI Linux AArch64 |
-| M3-02 | Syscall Base — 13 syscall POSIX (write, read, exit, mmap, brk, waitpid…) |
-| M3-03 | ANE Syscall Interface — 10 syscall Apple Neural Engine + SW fallback QEMU |
-| M3-04 | GPU Syscall Interface — 14 syscall VirtIO-GPU / Apple AGX + SW fallback |
-| M4-01 | PL050 PS/2 Keyboard — interrupt-driven, ring buffer SPSC 256B |
-| M4-02 | VirtIO Input Keyboard — virtio-mmio, IRQ-driven |
-| M4-03 | Terminal Line Discipline — echo, modalità canonica, backspace, CTRL+C |
-| M4-04 | Font UTF-8 — decoder RFC 3629, font Latin-1 Supplement, API `fb_draw_*_utf8` |
-| M4-05 | VirtIO Mouse — absolute/relative pointer, cursor guest, eventi click/wheel |
-| M5-01 | VirtIO Block Device — virtio-blk, split vring, I/O sincrono bounded |
+Le milestone completate oggi coprono:
+
+- **M1-M4**: boot AArch64, exception handling, MMU, PMM buddy+slab, heap kernel, GIC-400, timer, scheduler FPP, syscall base, input tastiera/mouse, TTY line discipline e font UTF-8.
+- **M5**: `virtio-blk`, VFS bootstrap, `ext4` read/write con journal bounded e recovery al mount, rootfs `/` come `initrd` `CPIO newc` embedded, mount `/data` e `/sysroot`.
+- **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
+- **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
+- **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
+
+Il backlog principale `BACKLOG.md` e' chiuso: il selftest QEMU corrente passa con
+`SUMMARY total=8 pass=8 fail=0`.
 
 ---
 
 ## Architettura
 
+```text
++---------------------------------------------------------------+
+|                           User Space                          |
+|   ELF64 statici/dinamici, NSH, demo execve, demo shared-lib   |
++---------------------------+-----------------------------------+
+|      IPC sync / ports     |  spawn/execve / VFS / GPU / TTY   |
++---------------------------+-----------------------------------+
+|                    EnlilOS Microkernel                        |
+|                                                               |
+| Scheduler FPP | Syscall table | MMU | PMM | Kheap | Timer     |
+| GIC-400       | IPC sync      | VFS | ext4 | GPU | input      |
+|                                                               |
+| Device model: PL011, VirtIO input, VirtIO-blk, VirtIO-GPU     |
++---------------------------------------------------------------+
+|                    QEMU virt / AArch64                        |
+| cortex-a72 | 512MB RAM | GIC-400 | ramfb | virtio-mmio        |
++---------------------------------------------------------------+
 ```
-┌───────────────────────────────────────────────────────────┐
-│                        User Space                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-│  │blk-server│  │vfs-server│  │gpu-server│  │ane-server│ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘ │
-│       │   IPC (message passing)    │              │       │
-├───────┴────────────────────────────┴──────────────┴───────┤
-│                    EnlilOS Microkernel                    │
-│                                                           │
-│  Scheduler FPP     GIC-400        ARM Generic Timer       │
-│  256 priorità      IRQ[256] O(1)  tick 1ms, 1000Hz        │
-│                                                           │
-│  Syscall[256]      MMU AArch64    PMM Buddy+Slab          │
-│  ABI Linux         identity map   O(1) hot path           │
-│                                                           │
-│  VirtIO MMIO bus (keyboard · mouse · GPU · blk)          │
-│  ANE / Apple AGX (con SW fallback QEMU)                  │
-├───────────────────────────────────────────────────────────┤
-│               Hardware — QEMU virt AArch64                │
-│  Cortex-A72  │  512MB RAM  │  PL011 UART  │  GIC-400     │
-│  ramfb       │  VirtIO-GPU │  VirtIO-blk  │  PS/2 kbd    │
-└───────────────────────────────────────────────────────────┘
-```
+
+Nota pratica: il progetto oggi e' ancora in una fase di bootstrap ibrida. Alcuni server sono modellati in stile microkernel, ma parte della logica gira ancora in-kernel per accelerare il bring-up e mantenere il debugging semplice.
 
 ---
 
-## Build e avvio
+## Root filesystem e mount
+
+Al boot, la mount table osservabile oggi e':
+
+- `/` -> `initrd-cpio` read-only embedded nel kernel
+- `/dev` -> `devfs`
+- `/data` -> `ext4` su `virtio-blk` quando il disco e' presente
+- `/sysroot` -> `ext4` su `virtio-blk` quando il disco e' presente
+
+L'`initrd` contiene almeno:
+
+- `README.TXT`
+- `BOOT.TXT`
+- `INIT.ELF`
+- `NSH.ELF`
+- `DEMO.ELF`
+- `EXEC1.ELF`
+- `EXEC2.ELF`
+- `DYNDEMO.ELF`
+- `libdyn.so`
+- `LD-ENLIL.SO`
+
+Questa scelta permette un bootstrap completamente in RAM e accessi O(1) ai file iniziali, utile per configurazione iniziale, recovery e bootstrap dei primi task user-space.
+
+---
+
+## Build e dipendenze
 
 ### Requisiti
 
 ```bash
 # macOS
 brew install aarch64-elf-gcc qemu
+
+# opzionale ma consigliato per run-blk / ext4
+brew install e2fsprogs
+```
+
+Se `mkfs.ext4` non e' nel `PATH`, su macOS Homebrew si trova tipicamente in:
+
+```bash
+$(brew --prefix e2fsprogs)/sbin/mkfs.ext4
 ```
 
 ### Compilazione
 
 ```bash
-make          # produce enlil.elf + enlil.bin
+make
 ```
 
-### Target QEMU disponibili
+Output principali:
+
+- `enlil.elf`
+- `enlil.bin`
+- `boot/initrd.cpio`
+
+Il `Makefile` supporta anche prefissi espliciti:
+
+```bash
+make CROSS=/opt/homebrew/Cellar/aarch64-elf-gcc/15.2.0/bin/aarch64-elf-
+```
+
+---
+
+## Target QEMU
 
 | Comando | Descrizione |
 |---------|-------------|
-| `make run` | Solo UART seriale (no grafica) |
-| `make run-fb` | UART + framebuffer ramfb |
-| `make run-gpu` | UART + VirtIO-GPU + tastiera + mouse guest |
-| `make run-blk` | Come `run-gpu` + VirtIO Block Device (`disk.img`) |
-| `make debug` | GDB stub su porta 1234 |
+| `make run` | solo seriale PL011 |
+| `make run-fb` | seriale + `ramfb` |
+| `make run-gpu` | seriale + `virtio-gpu` + tastiera + mouse |
+| `make run-blk` | come `run-gpu` + `virtio-blk` con `disk.img` |
+| `make test` | avvio del kernel selftest sotto QEMU |
+| `make debug` | QEMU in attesa di GDB sulla porta 1234 |
+
+Target utili per il disco:
+
+| Comando | Descrizione |
+|---------|-------------|
+| `make disk.img` | crea `disk.img` da 64MB |
+| `make disk-ready` | verifica che `disk.img` sia davvero `ext4` |
+| `make disk-reset` | ricrea l'immagine disco |
+| `make disk-fsck` | esegue `e2fsck` se disponibile |
+
+---
+
+## Console di boot e shell
+
+La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili:
+
+- `help`
+- `pwd`
+- `cd /data`
+- `ls`
+- `cat /BOOT.TXT`
+- `write`, `append`, `truncate`, `sync`, `fsync`
+- `mkdir`, `rm`, `mv`
+- `elfdemo`, `execdemo`, `dyndemo`, `runelf PATH`
+- `nsh`
+- `selftest`
+
+`NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
+
+- `ls`
+- `cat`
+- `echo`
+- `exec`
+- `clear`
+- `top`
+- `cd`
+- `pwd`
+- `help`
+- `exit`
+
+---
+
+## Test
+
+Esiste una suite di self-test kernel-side che verifica i sottosistemi piu' recenti, tra cui:
+
+- `vfs-rootfs`
+- `vfs-devfs`
+- `ext4-core`
+- `elf-loader`
+- `execve`
+- `elf-dynamic`
+- `ipc-sync`
+- `gpu-stack`
+
+La build dedicata e':
 
 ```bash
-# Crea immagine disco raw 64MB per run-blk
-make disk.img
+make test-build
+make test
 ```
+
+Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, IPC e stack grafico.
 
 ---
 
 ## Struttura del progetto
 
-```
+```text
 EnlilOS/
-├── boot/
-│   ├── boot.S              # Entry point AArch64, stack EL1, BSS zero
-│   └── vectors.S           # Exception vector table (16 handler)
-├── kernel/
-│   ├── main.c              # kernel_main(): init sequenza + boot console
-│   ├── microkernel.c       # IPC, task, porte (stile Mach/Hurd)
-│   ├── exception.c         # Handler eccezioni + dispatcher syscall/IRQ
-│   ├── mmu.c               # MMU AArch64, identity map, cache ops
-│   ├── pmm.c               # Buddy allocator + slab allocator
-│   ├── kheap.c             # Named typed caches (kmem_cache_t)
-│   ├── gic.c               # GIC-400 driver, tabella IRQ O(1)
-│   ├── timer.c             # ARM Generic Timer, tick 1ms
-│   ├── sched.c             # Scheduler FPP 256 priorità
-│   ├── sched_switch.S      # Context switch in assembly (x19-x30)
-│   ├── syscall.c           # Dispatcher + 13 syscall base
-│   ├── ane_syscall.c       # Syscall ANE (100-109)
-│   ├── gpu_syscall.c       # Syscall GPU (120-133)
-│   ├── utf8.c              # Decoder UTF-8 RFC 3629
-│   ├── tty.c               # Line discipline (echo, canonical, CTRL+C)
-│   └── vfs.c               # VFS layer (mount table, fd table)
+├── boot/                  # entry point, vectors, initrd embedded
 ├── drivers/
-│   ├── uart.c              # PL011 UART
-│   ├── keyboard.c          # VirtIO Input keyboard + PS/2 fallback
-│   ├── mouse.c             # VirtIO Input mouse (abs/rel, cursor)
-│   ├── blk.c               # VirtIO Block Device (I/O sincrono bounded)
-│   ├── framebuffer.c       # ramfb + font bitmap + API UTF-8
-│   ├── ane/
-│   │   ├── ane_hw.c        # Backend ANE reale (Apple Silicon)
-│   │   └── ane_sw.c        # SW fallback CPU (QEMU)
-│   └── gpu/
-│       ├── gpu_agx.c       # Backend Apple AGX
-│       ├── gpu_sw.c        # SW fallback rasterizzazione CPU
-│       └── gpu_virtio.c    # Backend VirtIO-GPU (QEMU)
-├── include/                # Header pubblici di tutti i moduli
-├── linker.ld               # Linker script (load @ 0x40080000)
-├── Makefile
-└── BACKLOG.md              # Roadmap dettagliata con design RT
+│   ├── uart.c            # PL011
+│   ├── keyboard.c        # VirtIO keyboard + fallback UART
+│   ├── mouse.c           # VirtIO mouse
+│   ├── blk.c             # VirtIO block
+│   ├── framebuffer.c     # ramfb + font bitmap
+│   ├── gpu/              # virtio-gpu, AGX, SW backend
+│   └── ane/              # Apple Neural Engine / fallback CPU
+├── include/              # header pubblici
+├── initrd/               # contenuti statici dell'initrd embedded
+├── kernel/
+│   ├── main.c            # boot sequence + boot console
+│   ├── initrd.c          # parser CPIO read-only
+│   ├── vfs.c             # mount table + dispatch VFS
+│   ├── ext4.c            # ext4 read/write core
+│   ├── elf_loader.c      # ELF64 static/dynamic loader
+│   ├── microkernel.c     # IPC / ports / task model
+│   ├── sched.c           # scheduler FPP
+│   ├── tty.c             # line discipline
+│   ├── term80.c          # terminale testuale 80x25
+│   └── selftest.c        # suite integrata
+├── tools/
+│   └── mkinitrd.py       # builder host-side dell'archivio CPIO
+├── user/                 # ELF userspace statici e dinamici
+├── BACKLOG.md            # roadmap principale
+└── BACKLOG2.md           # roadmap estesa / extra milestone
 ```
 
 ---
@@ -140,19 +225,21 @@ EnlilOS/
 
 | Vincolo | Regola |
 |---------|--------|
-| Latenza deterministica | Nessun ciclo WCET illimitato nei path critici |
-| No demand paging | Tutta la memoria kernel pre-allocata al boot |
-| No kmalloc in IRQ | Allocazione dinamica vietata negli handler |
-| Priorità preemptiva | Un task ad alta priorità interrompe sempre |
-| Priority Inheritance | Nessuna inversione su mutex e IPC |
-| Static > dynamic | Pool statici per tutto ciò che è in hot path |
-| I/O non diretto da RT | Task hard-RT comunicano col server blk via IPC con timeout |
+| Latenza prevedibile | evitare path senza bound chiaro nel kernel |
+| No allocazioni in IRQ | hot path e interrupt usano pool o strutture statiche |
+| Priority-driven | task ad alta priorita' preemptano sempre quelli piu' bassi |
+| IPC bounded | rendez-vous con budget e metriche per-porta |
+| Bootstrap in RAM | `initrd` embedded per accesso immediato a file e binari base |
+| I/O isolato | task hard-RT non dipendono da I/O bloccante diretto |
 
 ---
 
-## Prossime milestone
+## Stato roadmap
 
-- **M5-02** — VFS Layer (server user-space, mount table, fd)
-- **M5-03** — ext4 read path (superblock, extent tree, inode)
-- **M5-04** — ext4 write path + journal
-- **M5-05** — initrd CPIO bootstrap
+Se guardi il backlog principale, il nucleo del sistema e' gia' oltre il bring-up:
+
+- storage e rootfs bootstrap sono presenti
+- userspace EL0 con loader dinamico e `execve()` e' presente
+- shell `NSH` e IPC sincrono sono presenti
+
+Il path core descritto in [BACKLOG.md](/Users/nicolo/nros/BACKLOG.md) e' completato; il lavoro successivo continua nella roadmap estesa in [BACKLOG2.md](/Users/nicolo/nros/BACKLOG2.md).

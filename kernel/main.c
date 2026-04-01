@@ -26,6 +26,7 @@
 #include "elf_loader.h"
 #include "ext4.h"
 #include "selftest.h"
+#include "term80.h"
 #include "vfs.h"
 
 /* Banner ASCII art per la console seriale */
@@ -72,6 +73,7 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 #define BOOTCLI_HISTORY_MAX   18U
 #define BOOTCLI_LINE_MAX      78U
 #define BOOTCLI_INPUT_MAX     72U
+#define BOOTCLI_PATH_MAX      128U
 #define BOOTCLI_MOUSE_EVENT_MAX 4U
 #define BOOTCLI_MOUSE_LINE_MAX  52U
 
@@ -79,6 +81,7 @@ static char      bootcli_lines[BOOTCLI_HISTORY_MAX][BOOTCLI_LINE_MAX + 1];
 static uint32_t  bootcli_line_count;
 static char      bootcli_input[BOOTCLI_INPUT_MAX + 1];
 static uint32_t  bootcli_input_len;
+static char      bootcli_cwd[BOOTCLI_PATH_MAX + 1];
 static char      bootcli_mouse_lines[BOOTCLI_MOUSE_EVENT_MAX][BOOTCLI_MOUSE_LINE_MAX + 1];
 static uint32_t  bootcli_mouse_line_count;
 static int32_t   bootcli_mouse_x;
@@ -88,7 +91,12 @@ static int32_t   bootcli_mouse_wheel_total;
 static uint8_t   bootcli_mouse_ready;
 static gpu_caps_t bootcli_caps;
 static uint8_t   bootcli_graphics_mode;
+static uint8_t   bootcli_mode;
+static uint32_t  bootcli_shell_pid;
 static volatile uint32_t bootcli_heartbeat;
+
+#define BOOTCLI_MODE_UI    0U
+#define BOOTCLI_MODE_TERM  1U
 
 static uint32_t bootcli_strlen(const char *s)
 {
@@ -216,6 +224,118 @@ static int bootcli_split_two_paths(const char *src, const char *prefix,
     if (rhs_len == 0U) return 0;
     while (*p == ' ') p++;
     return (*p == '\0');
+}
+
+static void bootcli_path_pop(char *path)
+{
+    uint32_t len = bootcli_strlen(path);
+
+    if (len <= 1U) {
+        path[0] = '/';
+        path[1] = '\0';
+        return;
+    }
+
+    while (len > 1U && path[len - 1U] == '/') {
+        path[--len] = '\0';
+    }
+    while (len > 1U && path[len - 1U] != '/') {
+        path[--len] = '\0';
+    }
+    if (len > 1U)
+        path[len - 1U] = '\0';
+    if (path[0] == '\0') {
+        path[0] = '/';
+        path[1] = '\0';
+    }
+}
+
+static int bootcli_resolve_path(const char *input, char *out, uint32_t cap)
+{
+    char     tmp[BOOTCLI_PATH_MAX + 1];
+    uint32_t tmp_len = 0U;
+    uint32_t out_len = 0U;
+    uint32_t i = 0U;
+
+    if (!input || !out || cap < 2U)
+        return 0;
+
+    if (input[0] == '/') {
+        while (input[tmp_len] != '\0' && tmp_len + 1U < (uint32_t)sizeof(tmp)) {
+            tmp[tmp_len] = input[tmp_len];
+            tmp_len++;
+        }
+        if (input[tmp_len] != '\0')
+            return 0;
+    } else {
+        const char *base = bootcli_cwd[0] ? bootcli_cwd : "/";
+
+        while (base[tmp_len] != '\0' && tmp_len + 1U < (uint32_t)sizeof(tmp)) {
+            tmp[tmp_len] = base[tmp_len];
+            tmp_len++;
+        }
+        if (base[tmp_len] != '\0')
+            return 0;
+        if (tmp_len == 0U) {
+            tmp[tmp_len++] = '/';
+        } else if (tmp[tmp_len - 1U] != '/') {
+            if (tmp_len + 1U >= (uint32_t)sizeof(tmp))
+                return 0;
+            tmp[tmp_len++] = '/';
+        }
+        for (uint32_t j = 0U; input[j] != '\0'; j++) {
+            if (tmp_len + 1U >= (uint32_t)sizeof(tmp))
+                return 0;
+            tmp[tmp_len++] = input[j];
+        }
+    }
+    tmp[tmp_len] = '\0';
+
+    out[0] = '/';
+    out[1] = '\0';
+    out_len = 1U;
+
+    while (tmp[i] != '\0') {
+        uint32_t start;
+        uint32_t seg_len = 0U;
+
+        while (tmp[i] == '/')
+            i++;
+        if (tmp[i] == '\0')
+            break;
+
+        start = i;
+        while (tmp[i] != '\0' && tmp[i] != '/') {
+            seg_len++;
+            i++;
+        }
+
+        if (seg_len == 1U && tmp[start] == '.')
+            continue;
+        if (seg_len == 2U && tmp[start] == '.' && tmp[start + 1U] == '.') {
+            bootcli_path_pop(out);
+            out_len = bootcli_strlen(out);
+            continue;
+        }
+
+        if (out_len > 1U) {
+            if (out_len + 1U >= cap)
+                return 0;
+            out[out_len++] = '/';
+            out[out_len] = '\0';
+        }
+        if (out_len + seg_len >= cap)
+            return 0;
+        for (uint32_t j = 0U; j < seg_len; j++)
+            out[out_len++] = tmp[start + j];
+        out[out_len] = '\0';
+    }
+
+    if (out[0] == '\0') {
+        out[0] = '/';
+        out[1] = '\0';
+    }
+    return 1;
 }
 
 static int32_t bootcli_clamp_i32(int32_t v, int32_t lo, int32_t hi)
@@ -415,9 +535,10 @@ static void bootcli_push_current_input(void)
 {
     char line[BOOTCLI_LINE_MAX + 1];
 
-    line[0] = '>';
-    line[1] = ' ';
-    line[2] = '\0';
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), "[");
+    bootcli_buf_append(line, sizeof(line), bootcli_cwd);
+    bootcli_buf_append(line, sizeof(line), "] > ");
     bootcli_buf_append(line, sizeof(line), bootcli_input);
     bootcli_push_line(line);
 }
@@ -481,6 +602,51 @@ static void bootcli_cmd_fs(void)
     bootcli_buf_append(line, sizeof(line), "FS: ");
     bootcli_buf_append(line, sizeof(line), ext4_status());
     bootcli_buf_append(line, sizeof(line), ext4_has_dirty() ? " | dirty=yes" : " | dirty=no");
+    bootcli_push_line(line);
+}
+
+static void bootcli_cmd_pwd(void)
+{
+    bootcli_push_line(bootcli_cwd);
+}
+
+static void bootcli_cmd_cd(const char *path)
+{
+    vfs_file_t file;
+    stat_t     st;
+    char       resolved[BOOTCLI_PATH_MAX + 1];
+    char       line[BOOTCLI_LINE_MAX + 1];
+    int        rc;
+
+    if (!path || path[0] == '\0')
+        path = "/";
+
+    if (!bootcli_resolve_path(path, resolved, sizeof(resolved))) {
+        bootcli_push_line("cd: path troppo lungo o non valido.");
+        return;
+    }
+
+    rc = vfs_open(resolved, O_RDONLY, &file);
+    if (rc < 0) {
+        bootcli_push_error("cd open", rc);
+        return;
+    }
+
+    rc = vfs_stat(&file, &st);
+    (void)vfs_close(&file);
+    if (rc < 0) {
+        bootcli_push_error("cd stat", rc);
+        return;
+    }
+    if ((st.st_mode & S_IFMT) != S_IFDIR) {
+        bootcli_push_line("cd: il path non e' una directory.");
+        return;
+    }
+
+    bootcli_copy_trunc(bootcli_cwd, resolved, sizeof(bootcli_cwd));
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), "cwd -> ");
+    bootcli_buf_append(line, sizeof(line), bootcli_cwd);
     bootcli_push_line(line);
 }
 
@@ -704,8 +870,126 @@ static void bootcli_cmd_fsync(const char *path)
     bootcli_push_line("fsync OK.");
 }
 
+static void bootcli_render_term80(void)
+{
+    const uint32_t bg_color     = 0x00070b10;
+    const uint32_t panel_color  = 0x00101822;
+    const uint32_t border_color = 0x0041e2c2;
+    const uint32_t title_color  = 0x00eef5ff;
+    const uint32_t muted_color  = 0x0095a8bd;
+    const uint32_t term_x       = 80U;
+    const uint32_t term_y       = 100U;
+    const uint32_t term_w       = 640U;
+    const uint32_t term_h       = 400U;
+    char rows[TERM80_ROWS][TERM80_COLS + 1U];
+    char status[96];
+    uint32_t cursor_row = 0U;
+    uint32_t cursor_col = 0U;
+    uint64_t cursor_phase = timer_now_ms() / 400ULL;
+
+    if (bootcli_graphics_mode)
+        (void)gpu_begin_2d_frame(bg_color);
+    else
+        fb_clear(bg_color);
+
+    bootcli_fill_rect(term_x - 16U, term_y - 40U, term_w + 32U, term_h + 80U, panel_color);
+    if (bootcli_graphics_mode) {
+        bootcli_fill_rect(term_x - 16U, term_y - 40U, term_w + 32U, 2U, border_color);
+        bootcli_fill_rect(term_x - 16U, term_y - 40U, 2U, term_h + 80U, border_color);
+        bootcli_fill_rect(term_x - 16U, term_y + term_h + 38U, term_w + 32U, 2U, border_color);
+        bootcli_fill_rect(term_x + term_w + 14U, term_y - 40U, 2U, term_h + 80U, border_color);
+    } else {
+        draw_border(term_x - 16U, term_y - 40U, term_w + 31U, term_h + 79U, 0U, border_color);
+    }
+
+    bootcli_draw_text(term_x, term_y - 28U,
+                      "ENLILOS NSH 80x25",
+                      title_color, panel_color);
+
+    status[0] = '\0';
+    bootcli_buf_append(status, sizeof(status), "pid ");
+    bootcli_buf_append_u32(status, sizeof(status), bootcli_shell_pid);
+    bootcli_buf_append(status, sizeof(status), " | titolo ");
+    bootcli_buf_append(status, sizeof(status), term80_title());
+    bootcli_buf_append(status, sizeof(status), " | output seriale + framebuffer");
+    bootcli_draw_text(term_x, term_y - 10U, status, muted_color, panel_color);
+
+    for (uint32_t row = 0U; row < TERM80_ROWS; row++)
+        term80_copy_row(row, rows[row], sizeof(rows[row]));
+
+    for (uint32_t row = 0U; row < TERM80_ROWS; row++)
+        bootcli_draw_text(term_x, term_y + row * 16U, rows[row], title_color, bg_color);
+
+    term80_get_cursor(&cursor_row, &cursor_col);
+    if ((cursor_phase & 1ULL) == 0ULL &&
+        cursor_row < TERM80_ROWS && cursor_col < TERM80_COLS) {
+        uint32_t cursor_x = term_x + cursor_col * 8U;
+        uint32_t cursor_y = term_y + cursor_row * 16U + 14U;
+
+        bootcli_fill_rect(cursor_x, cursor_y, 8U, 2U, 0x00ffd166);
+    }
+
+    bootcli_draw_text(term_x, term_y + term_h + 12U,
+                      "Comandi nsh: ls cat echo exec clear top cd pwd help exit",
+                      muted_color, panel_color);
+
+    gpu_present_fullscreen();
+}
+
+static void bootcli_launch_nsh(int announce)
+{
+    uint32_t pid = 0U;
+
+    if (bootcli_mode == BOOTCLI_MODE_TERM) {
+        if (announce)
+            bootcli_push_line("nsh gia' attiva.");
+        return;
+    }
+
+    if (elf64_spawn_path("/NSH.ELF", "/NSH.ELF", PRIO_HIGH, &pid) < 0) {
+        if (announce)
+            bootcli_push_line(elf64_last_error());
+        return;
+    }
+
+    term80_activate(pid, "nsh");
+    bootcli_shell_pid = pid;
+    bootcli_mode = BOOTCLI_MODE_TERM;
+
+    if (announce) {
+        char line[BOOTCLI_LINE_MAX + 1];
+        line[0] = '\0';
+        bootcli_buf_append(line, sizeof(line), "nsh avviata a EL0, pid=");
+        bootcli_buf_append_u32(line, sizeof(line), pid);
+        bootcli_push_line(line);
+    }
+}
+
+static int bootcli_poll_shell(void)
+{
+    sched_tcb_t *shell;
+
+    if (bootcli_mode != BOOTCLI_MODE_TERM || bootcli_shell_pid == 0U)
+        return 0;
+
+    shell = sched_task_find(bootcli_shell_pid);
+    if (shell && shell->state != TCB_STATE_ZOMBIE)
+        return term80_take_dirty();
+
+    term80_deactivate();
+    bootcli_mode = BOOTCLI_MODE_UI;
+    bootcli_shell_pid = 0U;
+    bootcli_push_line("nsh terminata. Ritorno alla boot console.");
+    return 1;
+}
+
 static void bootcli_render(void)
 {
+    if (bootcli_mode == BOOTCLI_MODE_TERM) {
+        bootcli_render_term80();
+        return;
+    }
+
     const uint32_t bg_color     = 0x000c1118;
     const uint32_t panel_color  = 0x00141d29;
     const uint32_t header_color = 0x001d2937;
@@ -763,10 +1047,10 @@ static void bootcli_render(void)
                           "Modo: FRAMEBUFFER DI BOOT",
                       accent_color, panel_color);
     bootcli_draw_text(48U, 92U,
-                      "Comandi: help clear gpu selftest fs ls cat write append mkdir",
+                      "Comandi: help clear pwd cd gpu selftest fs ls cat write",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 112U,
-                      "truncate rm mv fsync sync mouse keyboard",
+                      "append mkdir truncate rm mv fsync sync nsh mouse keyboard",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -819,9 +1103,10 @@ static void bootcli_render(void)
 
     bootcli_fill_rect(40U, prompt_y - 6U, 720U, 2U, border_color);
 
-    prompt_line[0] = '>';
-    prompt_line[1] = ' ';
-    prompt_line[2] = '\0';
+    prompt_line[0] = '\0';
+    bootcli_buf_append(prompt_line, sizeof(prompt_line), "[");
+    bootcli_buf_append(prompt_line, sizeof(prompt_line), bootcli_cwd);
+    bootcli_buf_append(prompt_line, sizeof(prompt_line), "] > ");
     bootcli_buf_append(prompt_line, sizeof(prompt_line), bootcli_input);
     if ((cursor_phase & 1ULL) == 0ULL)
         bootcli_buf_append(prompt_line, sizeof(prompt_line), "_");
@@ -830,6 +1115,8 @@ static void bootcli_render(void)
     footer[0] = '\0';
     bootcli_buf_append(footer, sizeof(footer), "Scheduler OK | Heartbeat ");
     bootcli_buf_append_u32(footer, sizeof(footer), bootcli_heartbeat);
+    bootcli_buf_append(footer, sizeof(footer), " | cwd ");
+    bootcli_buf_append(footer, sizeof(footer), bootcli_cwd);
     if (bootcli_graphics_mode)
         bootcli_buf_append(footer, sizeof(footer), " | Scanout VirtIO attivo");
     else
@@ -857,10 +1144,12 @@ static void bootcli_execute_command(void)
     if (bootcli_streq(bootcli_input, "help")) {
         bootcli_push_line("help      mostra i comandi disponibili");
         bootcli_push_line("clear     pulisce la console di boot");
+        bootcli_push_line("pwd       mostra la directory corrente");
+        bootcli_push_line("cd PATH   cambia directory corrente");
         bootcli_push_line("gpu       mostra il backend grafico attivo");
         bootcli_push_line("selftest  esegue la suite kernel dei self-test");
         bootcli_push_line("fs        mostra lo stato del mount ext4");
-        bootcli_push_line("ls PATH   lista una directory VFS (default: /data)");
+        bootcli_push_line("ls [PATH] lista una directory VFS (default: cwd)");
         bootcli_push_line("cat PATH  mostra il contenuto di un file");
         bootcli_push_line("write P T tronca e scrive in un file ext4 esistente");
         bootcli_push_line("append P T aggiunge testo a un file ext4 esistente");
@@ -870,6 +1159,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("fsync P   flush esplicito del singolo file");
         bootcli_push_line("truncate P N imposta la size di un file ext4 esistente");
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
+        bootcli_push_line("nsh       lancia la shell ELF statica 80x25");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
         bootcli_push_line("dyndemo   lancia un PIE con PT_INTERP + DT_NEEDED");
@@ -880,6 +1170,12 @@ static void bootcli_execute_command(void)
     } else if (bootcli_streq(bootcli_input, "clear")) {
         bootcli_line_count = 0U;
         bootcli_push_line("Console pulita.");
+    } else if (bootcli_streq(bootcli_input, "pwd")) {
+        bootcli_cmd_pwd();
+    } else if (bootcli_streq(bootcli_input, "cd")) {
+        bootcli_cmd_cd("/");
+    } else if (bootcli_startswith(bootcli_input, "cd ")) {
+        bootcli_cmd_cd(bootcli_input + 3);
     } else if (bootcli_streq(bootcli_input, "gpu")) {
         line[0] = '\0';
         bootcli_buf_append(line, sizeof(line), "GPU: ");
@@ -902,72 +1198,113 @@ static void bootcli_execute_command(void)
     } else if (bootcli_streq(bootcli_input, "fs")) {
         bootcli_cmd_fs();
     } else if (bootcli_streq(bootcli_input, "ls")) {
-        bootcli_cmd_ls("/data");
+        bootcli_cmd_ls(bootcli_cwd);
     } else if (bootcli_startswith(bootcli_input, "ls ")) {
-        bootcli_cmd_ls(bootcli_input + 3);
+        char resolved[BOOTCLI_PATH_MAX + 1];
+
+        if (!bootcli_resolve_path(bootcli_input + 3, resolved, sizeof(resolved)))
+            bootcli_push_line("ls: path troppo lungo o non valido.");
+        else
+            bootcli_cmd_ls(resolved);
     } else if (bootcli_startswith(bootcli_input, "cat ")) {
-        bootcli_cmd_cat(bootcli_input + 4);
+        char resolved[BOOTCLI_PATH_MAX + 1];
+
+        if (!bootcli_resolve_path(bootcli_input + 4, resolved, sizeof(resolved)))
+            bootcli_push_line("cat: path troppo lungo o non valido.");
+        else
+            bootcli_cmd_cat(resolved);
     } else if (bootcli_startswith(bootcli_input, "write ")) {
         const char *text;
         char        path[BOOTCLI_INPUT_MAX + 1];
+        char        resolved[BOOTCLI_PATH_MAX + 1];
 
         if (!bootcli_split_path_text(bootcli_input, "write", path, sizeof(path), &text)) {
             bootcli_push_line("Uso: write PATH TESTO");
+        } else if (!bootcli_resolve_path(path, resolved, sizeof(resolved))) {
+            bootcli_push_line("write: path troppo lungo o non valido.");
         } else {
-            bootcli_cmd_write_common(path, text, O_WRONLY | O_CREAT | O_TRUNC);
+            bootcli_cmd_write_common(resolved, text, O_WRONLY | O_CREAT | O_TRUNC);
         }
     } else if (bootcli_startswith(bootcli_input, "append ")) {
         const char *text;
         char        path[BOOTCLI_INPUT_MAX + 1];
+        char        resolved[BOOTCLI_PATH_MAX + 1];
 
         if (!bootcli_split_path_text(bootcli_input, "append", path, sizeof(path), &text)) {
             bootcli_push_line("Uso: append PATH TESTO");
+        } else if (!bootcli_resolve_path(path, resolved, sizeof(resolved))) {
+            bootcli_push_line("append: path troppo lungo o non valido.");
         } else {
-            bootcli_cmd_write_common(path, text, O_WRONLY | O_CREAT | O_APPEND);
+            bootcli_cmd_write_common(resolved, text, O_WRONLY | O_CREAT | O_APPEND);
         }
     } else if (bootcli_startswith(bootcli_input, "mkdir ")) {
-        int rc = vfs_mkdir(bootcli_input + 6, 0755U);
-        if (rc < 0)
-            bootcli_push_error("mkdir", rc);
-        else
-            bootcli_push_line("mkdir OK.");
+        char resolved[BOOTCLI_PATH_MAX + 1];
+
+        if (!bootcli_resolve_path(bootcli_input + 6, resolved, sizeof(resolved))) {
+            bootcli_push_line("mkdir: path troppo lungo o non valido.");
+        } else {
+            int rc = vfs_mkdir(resolved, 0755U);
+            if (rc < 0)
+                bootcli_push_error("mkdir", rc);
+            else
+                bootcli_push_line("mkdir OK.");
+        }
     } else if (bootcli_startswith(bootcli_input, "rm ")) {
-        int rc = vfs_unlink(bootcli_input + 3);
-        if (rc < 0)
-            bootcli_push_error("rm", rc);
-        else
-            bootcli_push_line("rm OK.");
+        char resolved[BOOTCLI_PATH_MAX + 1];
+
+        if (!bootcli_resolve_path(bootcli_input + 3, resolved, sizeof(resolved))) {
+            bootcli_push_line("rm: path troppo lungo o non valido.");
+        } else {
+            int rc = vfs_unlink(resolved);
+            if (rc < 0)
+                bootcli_push_error("rm", rc);
+            else
+                bootcli_push_line("rm OK.");
+        }
     } else if (bootcli_startswith(bootcli_input, "mv ")) {
         char old_path[BOOTCLI_INPUT_MAX + 1];
         char new_path[BOOTCLI_INPUT_MAX + 1];
+        char old_resolved[BOOTCLI_PATH_MAX + 1];
+        char new_resolved[BOOTCLI_PATH_MAX + 1];
 
         if (!bootcli_split_two_paths(bootcli_input, "mv", old_path, sizeof(old_path),
                                      new_path, sizeof(new_path))) {
             bootcli_push_line("Uso: mv OLD_PATH NEW_PATH");
+        } else if (!bootcli_resolve_path(old_path, old_resolved, sizeof(old_resolved)) ||
+                   !bootcli_resolve_path(new_path, new_resolved, sizeof(new_resolved))) {
+            bootcli_push_line("mv: path troppo lungo o non valido.");
         } else {
-            int rc = vfs_rename(old_path, new_path);
+            int rc = vfs_rename(old_resolved, new_resolved);
             if (rc < 0)
                 bootcli_push_error("mv", rc);
             else
                 bootcli_push_line("mv OK.");
         }
     } else if (bootcli_startswith(bootcli_input, "fsync ")) {
-        bootcli_cmd_fsync(bootcli_input + 6);
+        char resolved[BOOTCLI_PATH_MAX + 1];
+
+        if (!bootcli_resolve_path(bootcli_input + 6, resolved, sizeof(resolved)))
+            bootcli_push_line("fsync: path troppo lungo o non valido.");
+        else
+            bootcli_cmd_fsync(resolved);
     } else if (bootcli_startswith(bootcli_input, "truncate ")) {
         char     path[BOOTCLI_INPUT_MAX + 1];
+        char     resolved[BOOTCLI_PATH_MAX + 1];
         uint64_t size;
         int      rc;
 
         if (!bootcli_split_path_value(bootcli_input, "truncate", path, sizeof(path), &size)) {
             bootcli_push_line("Uso: truncate PATH SIZE");
+        } else if (!bootcli_resolve_path(path, resolved, sizeof(resolved))) {
+            bootcli_push_line("truncate: path troppo lungo o non valido.");
         } else {
-            rc = vfs_truncate(path, size);
+            rc = vfs_truncate(resolved, size);
             if (rc < 0) {
                 bootcli_push_error("truncate", rc);
             } else {
                 line[0] = '\0';
                 bootcli_buf_append(line, sizeof(line), "truncate OK: ");
-                bootcli_buf_append(line, sizeof(line), path);
+                bootcli_buf_append(line, sizeof(line), resolved);
                 bootcli_buf_append(line, sizeof(line), " size=");
                 bootcli_buf_append_u32(line, sizeof(line), (uint32_t)size);
                 bootcli_push_line(line);
@@ -979,6 +1316,8 @@ static void bootcli_execute_command(void)
             bootcli_push_error("sync", rc);
         else
             bootcli_push_line("sync OK: cache ext4 e mount VFS flushati.");
+    } else if (bootcli_streq(bootcli_input, "nsh")) {
+        bootcli_launch_nsh(1);
     } else if (bootcli_streq(bootcli_input, "elfdemo")) {
         uint32_t pid = 0U;
         if (elf64_spawn_demo(PRIO_KERNEL, &pid) < 0) {
@@ -1010,8 +1349,11 @@ static void bootcli_execute_command(void)
             bootcli_push_line(line);
         }
     } else if (bootcli_startswith(bootcli_input, "runelf ")) {
+        char resolved[BOOTCLI_PATH_MAX + 1];
         uint32_t pid = 0U;
-        if (elf64_spawn_path(bootcli_input + 7, bootcli_input + 7,
+        if (!bootcli_resolve_path(bootcli_input + 7, resolved, sizeof(resolved))) {
+            bootcli_push_line("runelf: path troppo lungo o non valido.");
+        } else if (elf64_spawn_path(resolved, resolved,
                              PRIO_KERNEL, &pid) < 0) {
             bootcli_push_line(elf64_last_error());
         } else {
@@ -1043,6 +1385,9 @@ static int bootcli_poll_input(void)
 {
     int dirty = 0;
     int c;
+
+    if (bootcli_mode == BOOTCLI_MODE_TERM)
+        return 0;
 
     while ((c = keyboard_getc()) >= 0) {
         uint8_t ch = (uint8_t)c;
@@ -1134,6 +1479,9 @@ static int bootcli_poll_mouse(void)
     int dirty = 0;
     mouse_event_t ev;
 
+    if (bootcli_mode == BOOTCLI_MODE_TERM)
+        return 0;
+
     while (mouse_get_event(&ev)) {
         uint32_t old_buttons = bootcli_mouse_buttons;
 
@@ -1158,15 +1506,20 @@ static int bootcli_poll_mouse(void)
 
 static void bootcli_init(void)
 {
+    term80_init();
     bootcli_line_count = 0U;
     bootcli_input_len = 0U;
     bootcli_input[0] = '\0';
+    bootcli_cwd[0] = '/';
+    bootcli_cwd[1] = '\0';
     bootcli_mouse_line_count = 0U;
     bootcli_mouse_x = FB_WIDTH / 2;
     bootcli_mouse_y = FB_HEIGHT / 2;
     bootcli_mouse_buttons = 0U;
     bootcli_mouse_wheel_total = 0;
     bootcli_mouse_ready = (uint8_t)mouse_is_ready();
+    bootcli_mode = BOOTCLI_MODE_UI;
+    bootcli_shell_pid = 0U;
 
     gpu_get_caps(&bootcli_caps);
     bootcli_graphics_mode = (bootcli_caps.vendor == GPU_VENDOR_VIRTIO) ? 1U : 0U;
@@ -1177,9 +1530,10 @@ static void bootcli_init(void)
     else
         bootcli_push_line("Modalita framebuffer locale attiva.");
     bootcli_push_line("Digita 'help' e premi Invio per testare la tastiera.");
-    bootcli_push_line("Prova anche: fs, ls /data, cat /BOOT.TXT.");
+    bootcli_push_line("Prova anche: pwd, cd /data, ls, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
+    bootcli_push_line("M7-02: usa 'nsh' per aprire la shell ELF statica 80x25.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)
@@ -1391,6 +1745,7 @@ void kernel_main(void)
     uart_puts("\n[EnlilOS] ===================================\n");
     uart_puts("[EnlilOS] Boot completato con successo!\n");
     uart_puts("[EnlilOS] Console interattiva pronta\n");
+    uart_puts("[EnlilOS] Comando nuovo: 'nsh' avvia la shell ELF 80x25\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");
 
@@ -1398,11 +1753,12 @@ void kernel_main(void)
     uint64_t last_cursor_phase = ~0ULL;
     uint32_t last_heartbeat = bootcli_heartbeat;
     while (1) {
-        int dirty = bootcli_poll_input();
+        int dirty = bootcli_poll_shell();
+        dirty |= bootcli_poll_input();
         dirty |= bootcli_poll_mouse();
         uint64_t cursor_phase = timer_now_ms() / 400ULL;
 
-        if (cursor_phase != last_cursor_phase) {
+        if (bootcli_mode == BOOTCLI_MODE_UI && cursor_phase != last_cursor_phase) {
             last_cursor_phase = cursor_phase;
             dirty = 1;
         }

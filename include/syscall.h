@@ -31,6 +31,9 @@
 #define SYS_FORK            11
 #define SYS_WAITPID         12
 #define SYS_CLOCK_GETTIME   13
+#define SYS_GETDENTS        14
+#define SYS_TASK_SNAPSHOT   15
+#define SYS_SPAWN           16
 
 /* Range ANE (M3-03): 100–119 */
 #define SYS_ANE_FIRST       100
@@ -126,6 +129,33 @@ typedef struct {
     uint64_t st_size;
     uint64_t st_blocks;
 } stat_t;
+
+/* ── struct dirent minimale ────────────────────────────────────────── */
+
+typedef struct {
+    char     name[32];
+    uint32_t mode;
+} sys_dirent_t;
+
+/* ── snapshot task per top/monitoring ─────────────────────────────── */
+
+#define TASK_SNAPSHOT_RUNNING   0U
+#define TASK_SNAPSHOT_READY     1U
+#define TASK_SNAPSHOT_BLOCKED   2U
+#define TASK_SNAPSHOT_ZOMBIE    3U
+
+typedef struct {
+    uint32_t pid;
+    uint8_t  priority;
+    uint8_t  state;
+    uint8_t  flags;
+    uint8_t  _reserved0;
+    uint64_t runtime_ns;
+    uint64_t budget_ns;
+    uint64_t period_ms;
+    uint64_t deadline_ms;
+    char     name[32];
+} task_snapshot_t;
 
 /* ── Flag syscall ───────────────────────────────────────────────────── */
 

@@ -141,13 +141,13 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 
 ---
 
-### ✅ M3-02 · Syscall Base (13 syscall)
+### ✅ M3-02 · Syscall Base / UX (16 syscall)
 **Stato:** COMPLETATA
 
 | Nr | Nome | RT-safe | Implementazione |
 |----|------|---------|-----------------|
-| 1 | `write` | Sì | fd=1/2 → UART; fd_table per tipo; `/dev/null` → discard |
-| 2 | `read` | Sì (non-blocking) | fd=0 → EAGAIN (keyboard M4-01); `/dev/null` → EOF |
+| 1 | `write` | Sì | path VFS per `/dev/std*`; backend console/devfs bounded; `/dev/null` → discard |
+| 2 | `read` | Sì sui device console | path VFS per `tty`/console con line discipline canonica; `/dev/null` → EOF |
 | 3 | `exit` | Sì | TCB_STATE_ZOMBIE + sched_block(); non ritorna |
 | 4 | `open` | No | Risoluzione path via VFS (`/`, `/dev`, `/data`, `/sysroot`) |
 | 5 | `close` | Sì | Libera slot fd; protegge fd 0/1/2 |
@@ -155,16 +155,20 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 | 7 | `mmap` | No | MAP_ANONYMOUS: phys_alloc_pages(order) + zero-fill; PA==VA (identity map) |
 | 8 | `munmap` | No | phys_free_pages(addr, order) |
 | 9 | `brk` | Sì | Per-task break pointer, area HEAP_BASE + idx×4MB; lazy-init; O(1) |
-| 10 | `execve` | — | ENOSYS (richiede ELF loader M6-02) |
+| 10 | `execve` | No | Replace in-place del task EL0 via loader ELF64 AArch64 |
 | 11 | `fork` | — | ENOSYS (richiede COW MMU M6+) |
 | 12 | `waitpid` | Sì (timed) | WNOHANG=polling; timeout_ms>0=bounded wait; sched_yield nel loop |
 | 13 | `clock_gettime` | Sì — O(1) | Scrive `{tv_sec, tv_nsec}` nel puntatore timespec; CNTPCT_EL0 |
+| 14 | `getdents` | No | Enumerazione directory via VFS per shell/user-space |
+| 15 | `task_snapshot` | Sì bounded | Snapshot task per `top`/monitoring |
+| 16 | `spawn` | No | Spawn di un ELF64 da VFS a EL0 |
 
 **Strutture aggiuntive:**
-- `fd_table[32][16]`: file descriptor per task, indicizzato su `pid % 32`; fd 0/1/2 preinizializzati CONSOLE
+- `fd_table[32][64]`: file descriptor per task, indicizzato su `pid % 32`; fd 0/1/2 preinizializzati su `/dev/std*`
 - `task_brk[32]`: program break per task; HEAP_BASE=0x60000000, 4MB/task
 - `sched_task_find(pid)`: ricerca O(N) nel task_pool — usata da waitpid
 - `timespec_t { int64_t tv_sec; int64_t tv_nsec }`: scrivibile da clock_gettime
+- boot console e userspace ora usano anche `runelf`, `dyndemo`, `getdents`, `task_snapshot`, `spawn`
 
 ---
 
@@ -550,38 +554,41 @@ diretto: il filesystem vive dietro un server VFS/blk con IPC e timeout.
 ### ✅ M5-02 · VFS Layer
 **Priorità:** CRITICA
 
-**RT design:** VFS gira interamente come server user-space (stile Hurd).
-Il kernel non sa nulla di filesystem. I task comunicano via IPC.
+**RT design:** il target architetturale resta un VFS a server separati (stile Hurd),
+ma il bootstrap attuale gira ancora in-kernel per semplificare bring-up e debugging.
+L'interfaccia resta gia' modellata come boundary tra client e backend filesystem.
 
 - `vfs_ops_t`: `open`, `read`, `write`, `readdir`, `stat`, `close`
 - Mount table: path → driver (array statico, nessuna allocazione runtime)
 - File descriptor table per processo: array fisso di MAX_FD=64
 - Mount profile iniziale:
-  `/` → `initrd` read-only
-  `/sysroot` oppure `/data` → `ext4` su `virtio-blk`
+  `/` → `initrd-cpio` embedded read-only
+  `/dev` → `devfs`
+  `/data` e `/sysroot` → `ext4` su `virtio-blk` oppure `ext4-error`
 
 **Implementato ora:** bootstrap VFS in-kernel con mount table statica,
-`devfs`, rootfs read-only di bootstrap, mount `/data` e `/sysroot`
-preparati quando `virtio-blk` e' pronto, e syscall `open/read/write/close/fstat`
-instradate interamente su `vfs_ops_t`.
+`devfs`, initrd rootfs read-only embedded, mount `/data` e `/sysroot`
+attivati quando `virtio-blk` e' pronto, e syscall
+`open/read/write/close/fstat/getdents` instradate su `vfs_ops_t`.
 
 ---
 
 ### ✅ M5-03 · ext4 — Mount & Read Path
 **Priorità:** ALTA
 
-Integrazione di `ext4` nel server VFS user-space:
+Backend `ext4` nel VFS bootstrap:
 - Parsing superblock, block group descriptors, inode table, extent tree
-- Mount read-only iniziale per ridurre il rischio e chiudere il bootstrap
+- Primo profilo read-only per ridurre il rischio e chiudere il bootstrap
 - `open`, `read`, `readdir`, `stat` mappati sul server VFS
 - Buffer cache e inode cache statiche/bounded nel server filesystem
 - Supporto immagine host tramite `mkfs.ext4`, `e2fsck`, `debugfs`
 
-**Implementato ora:** backend `ext4` read-only su `virtio-blk`, con mount
-singleton per `/data` e `/sysroot`, cache statica di blocchi/inode, lookup
-path, lettura file, `readdir`, `stat`, extent tree e fallback legacy
-direct/single-indirect. In assenza di un'immagine ext4 valida, il VFS monta
-un nodo informativo `ext4-error` con il motivo del fallimento.
+**Implementato ora:** backend `ext4` mount + read path su `virtio-blk`, con
+cache statica di blocchi/inode, lookup path, lettura file, `readdir`, `stat`,
+extent tree e fallback legacy direct/single-indirect. Questo nucleo read-only
+e' la base che M5-04 estende al profilo `rw-full`. In assenza di un'immagine
+ext4 valida, il VFS monta un nodo informativo `ext4-error` con il motivo del
+fallimento.
 
 Tool immagine host iniziali:
 - `mkfs.ext4 disk.img`
@@ -628,31 +635,43 @@ Stato dettagliato:
 
 ---
 
-### ⬜ M5-04b · ext4 — Journal & Crash Consistency
+### ✅ M5-04b · ext4 — Journal & Crash Consistency
 **Priorità:** MEDIA
 
-**Stato:** APERTA
+**Stato:** COMPLETATA (`journal=bounded`)
 
-- Journal replay al mount e supporto writeback del journal (`jbd2`-like o
-  profilo compatibile limitato)
+- Journal replay al mount e supporto writeback del journal
+  (profilo custom bounded per EnlilOS, non JBD2 Linux)
 - Politica di recovery dopo reset improvviso e verifica integrita' al boot
 - Test crash-consistency usando power-cut simulato sull'immagine raw
 - Valutazione profilo `data=journal` per deployment ad alta affidabilita'
 
+**Implementato ora:** journal interno `.enlil-journal` con transazioni bounded
+su cache blocchi/inode, write-ahead del payload, header con checksum, replay
+automatico al mount, pulizia del journal a commit completato e recovery path
+verificato dal `selftest` con ciclo di crash simulato e remount. Il mount log
+espone ora `journal=bounded`.
+
 Stato dettagliato:
-- [ ] journal replay al mount
-- [ ] writeback del journal
-- [ ] recovery path con mount sporco
-- [ ] test con power-cut simulato
-- [ ] documentazione policy dev/prod con vincoli di latenza
+- [x] journal replay al mount
+- [x] writeback del journal
+- [x] recovery path con mount sporco
+- [x] test con power-cut simulato
+- [x] documentazione policy dev/prod con vincoli di latenza
 
 ---
 
-### ⬜ M5-05 · initrd / Ramdisk Bootstrap
+### ✅ M5-05 · initrd / Ramdisk Bootstrap
 **Priorità:** ALTA (prima di ext4 r/w)
 
 Formato CPIO: montato come `/` al boot, contiene il primo ELF da eseguire.
 Tutto in RAM → latenza di accesso O(1), adatto a task RT che leggono config al boot.
+
+Implementazione:
+- archivio `CPIO newc` embedded nel kernel build
+- parser read-only in-kernel e mount `/ -> initrd-cpio (ro)`
+- file bootstrap `README.TXT`, `BOOT.TXT`, `INIT.ELF`, `NSH.ELF` e ELF demo integrati
+- self-test rootfs aggiornato per validare `BOOT.TXT` e `INIT.ELF`
 
 ---
 
@@ -870,10 +889,10 @@ Stato dettagliato:
 
 ## MILESTONE 7 — RT IPC
 
-### ⬜ M7-01 · IPC Sincrono a Latenza Fissa
+### ✅ M7-01 · IPC Sincrono a Latenza Fissa
 **Priorità:** ALTA — cuore del microkernel RT
 
-L'IPC attuale è asincrono con ring buffer. Per RT serve IPC sincrono con:
+Implementato con:
 - **Rendez-vous** (stile L4): il mittente blocca finché il ricevitore accetta
 - **Priority donation:** il task bloccato in attesa di risposta da un server
   "dona" la sua priorità al server per la durata della chiamata
@@ -882,44 +901,61 @@ L'IPC attuale è asincrono con ring buffer. Per RT serve IPC sincrono con:
   entro N cicli (misurabile, configurabile per ogni canale)
 - **Zero-copy per messaggi piccoli** (≤64 byte via registri, no buffer intermedio)
 
+Stato dettagliato:
+- [x] API `mk_ipc_call()` / `mk_ipc_wait()` / `mk_ipc_reply()`
+- [x] Porta sincrona request/reply con budget configurabile per canale
+- [x] Donation di priorità al server owner durante la call
+- [x] Small message inline (`mr[]`, ≤64 byte)
+- [x] Statistiche per-porta: `last`, `worst`, `total`, `budget_misses`, `inline_calls`
+- [x] Delivery robusta senza scritture dirette nello stack del task remoto
+- [x] `ipc-sync` validato su QEMU nel run completo `SUMMARY total=8 pass=8 fail=0`
+
 ---
 
-### ⬜ M7-02 · Console e Shell Minimale (`nsh`)
+### ✅ M7-02 · Console e Shell Minimale (`nsh`)
 **Priorità:** MEDIA
 
 Text mode 80×25 su framebuffer. Shell ELF statico con comandi: `ls`, `cat`, `echo`,
 `exec`, `clear`, `top` (mostra task attivi e loro utilizzo CPU/deadline).
 
+Stato dettagliato:
+- [x] Console testo 80×25 renderizzata su framebuffer locale o backend GPU
+- [x] `term80` con scroll, clear, dirty tracking e title bar per la sessione shell
+- [x] Shell ELF statica `/NSH.ELF` integrata nella rootfs bootstrap
+- [x] Comandi richiesti: `ls`, `cat`, `echo`, `exec`, `clear`, `top`
+- [x] Comandi extra utili: `cd`, `pwd`, `help`, `exit`
+- [x] Risoluzione path relativi rispetto al `cwd`
+- [x] Syscall user-space dedicate: `getdents`, `task_snapshot`, `spawn`
+- [x] Wiring boot console: comando `nsh` per lanciare la shell EL0 e ritorno automatico alla UI
+- [x] Echo input/output su `/dev/std*` visibile anche nella console 80×25
+- [x] Suite `selftest` composta da 8 casi (`vfs-rootfs`, `vfs-devfs`, `ext4-core`, `elf-loader`, `execve`, `elf-dynamic`, `ipc-sync`, `gpu-stack`)
+- [x] Run completo QEMU validato con `SUMMARY total=8 pass=8 fail=0`
+
 ---
 
 ## Dipendenze
 
-```
-M1-01 ✅ → M1-02 ✅
-M1-02 → M1-03 ✅ → M1-04 ✅
-M1-03 → M2-01 ✅ → M2-02 → M2-03
-M2-03 → M3-01 → M3-02
-M3-02 → M4-01
-M3-01 → M3-04 (GPU syscall)
-M3-01 → M3-03 (ANE syscall)
-M3-02 → M3-04 (mmap per GPU buffer)
-M3-04 → M5b-01 (server grafico usa GPU syscall internamente)
-M3-03 → M5b-01 (pattern MMIO/DMA condiviso)
-M3-02 → M5-01 → M5-02 → M5-03/M5-04
-         M5-05 ──────────────────────┐
-M5-01 → M5b-01 → M5b-02 → M5b-03   │
-                 M5b-04 ─────────────┤
-M3-02 → M6-01 ←─────────────────────┘
-M6-01 → M6-02 → M7-02
-M2-03 → M7-01
+``` 
+M1-01 ✅ → M1-02 ✅ → M1-03 ✅ → M1-04 ✅
+M1-03 ✅ → M2-01 ✅ → M2-02 ✅ → M2-03 ✅
+M2-03 ✅ → M3-01 ✅ → M3-02 ✅
+M3-02 ✅ → M4-01 ✅ → M4-02 ✅ → M4-03 ✅ → M4-04 ✅ / M4-05 ✅
+M3-01 ✅ → M3-03 ✅
+M3-01 ✅ → M3-04 ✅
+M3-02 ✅ → M5-01 ✅ → M5-02 ✅ → M5-03 ✅ → M5-04 ✅ → M5-04b ✅
+                     └──────────────→ M5-05 ✅
+M5-01 ✅ → M5b-01 ✅ → M5b-02 ✅ → M5b-03 ✅ → M5b-04 ✅
+M3-02 ✅ → M6-01 ✅ → M6-02 ✅ → M6-03 ✅
+M2-03 ✅ → M7-01 ✅ → M7-02 ✅
 ```
 
-## Prossimi tre step consigliati
+## Chiusura backlog
 
-1. **M5-01** VirtIO Block — storage base per VFS — 3-4 ore
-2. **M5b-02** Scanout & Display Engine — page-flip vsync-aware — 2-3 ore
-3. **M4-02** VirtIO Input — tastiera moderna (richiede pattern vring già fatto) — 2 ore
+Tutte le milestone di `BACKLOG.md` sono ora implementate.
 
-Dopo M4-01 le syscall read/write sono fully functional con tastiera reale.
-Dopo M3-04 un task RT può scrivere direttamente in un command buffer GPU con latenza ~50µs.
-Dopo M5b-01 tutta la grafica transita dalla GPU — zero accessi CPU al framebuffer.
+Stato di validazione:
+- `make test` su QEMU `virt` passa con `SUMMARY total=8 pass=8 fail=0`
+- il profilo storage bootstrap copre `/ -> initrd-cpio (ro)` e `/data -> ext4` con journal bounded
+- il nucleo boot, storage, grafica, userspace e IPC del backlog principale e' chiuso
+
+I lavori successivi proseguono nei backlog successivi (`BACKLOG2.md`, `BACKLOG3.md`).

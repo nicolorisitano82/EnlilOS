@@ -2,6 +2,9 @@
 *.o
 *.elf
 *.bin
+*.cpio
+disk.img
+user/*.so
 
 # macOS
 .DS_Store

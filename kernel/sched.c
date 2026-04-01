@@ -24,6 +24,7 @@
 static sched_tcb_t    task_pool[SCHED_MAX_TASKS];
 static uint32_t  task_count;
 static uint32_t  next_pid;
+static uint8_t   donated_priority[SCHED_MAX_TASKS];
 
 /* Stack statici per idle (nessuna alloc da buddy necessaria al boot) */
 static uint8_t   idle_stack[TASK_STACK_SIZE] __attribute__((aligned(16)));
@@ -74,6 +75,15 @@ static inline sched_task_ctx_t *ctx_of(const sched_tcb_t *t)
     return &task_ctx[task_slot(t)];
 }
 
+static inline uint8_t eff_prio_of(const sched_tcb_t *t)
+{
+    uint8_t donated;
+
+    if (!t) return PRIO_IDLE;
+    donated = donated_priority[task_slot(t)];
+    return (donated < t->priority) ? donated : t->priority;
+}
+
 /* ── Helpers UART ─────────────────────────────────────────────────── */
 
 static void pr_dec(uint64_t v)
@@ -89,6 +99,20 @@ static void pr_hex64(uint64_t v)
     static const char h[] = "0123456789ABCDEF";
     uart_puts("0x");
     for (int s = 60; s >= 0; s -= 4) uart_putc(h[(v >> s) & 0xF]);
+}
+
+static void sched_strlcpy(char *dst, const char *src, uint32_t cap)
+{
+    uint32_t i = 0U;
+
+    if (!dst || cap == 0U)
+        return;
+
+    while (src && src[i] != '\0' && i + 1U < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
 }
 
 /* ── Ready bitmap: O(1) ──────────────────────────────────────────── */
@@ -125,7 +149,7 @@ static int bitmap_find_first(void)
 /* Aggiunge task 't' in coda alla run queue della sua priorità */
 static void rq_push(sched_tcb_t *t)
 {
-    uint8_t p = t->priority;
+    uint8_t p = eff_prio_of(t);
     t->next = NULL;
     if (rq_head[p] == NULL) {
         rq_head[p] = rq_tail[p] = t;
@@ -148,6 +172,33 @@ static sched_tcb_t *rq_pop(uint8_t p)
     }
     t->next = NULL;
     return t;
+}
+
+static int rq_remove(sched_tcb_t *t, uint8_t p)
+{
+    sched_tcb_t *prev = NULL;
+    sched_tcb_t *cur = rq_head[p];
+
+    while (cur) {
+        if (cur == t) {
+            if (prev)
+                prev->next = cur->next;
+            else
+                rq_head[p] = cur->next;
+
+            if (rq_tail[p] == cur)
+                rq_tail[p] = prev;
+            if (rq_head[p] == NULL)
+                bitmap_clear(p);
+
+            cur->next = NULL;
+            return 0;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    return -1;
 }
 
 /* ── IRQ save/restore per critical sections ─────────────────────── */
@@ -201,6 +252,7 @@ static sched_tcb_t *task_alloc(void)
     task_ctx[slot].envp            = 0ULL;
     task_ctx[slot].auxv            = 0ULL;
     task_ctx[slot].is_user         = 0U;
+    donated_priority[slot]         = 0xFFU;
     return t;
 }
 
@@ -346,7 +398,7 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
         uint64_t flags = irq_save();
         rq_push(t);
         /* Preemption immediata se il nuovo task ha priorità maggiore */
-        if (current_task && priority < current_task->priority)
+        if (current_task && eff_prio_of(t) < eff_prio_of(current_task))
             need_resched = 1;
         irq_restore(flags);
     }
@@ -405,7 +457,7 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     {
         uint64_t flags = irq_save();
         rq_push(t);
-        if (current_task && priority < current_task->priority)
+        if (current_task && eff_prio_of(t) < eff_prio_of(current_task))
             need_resched = 1;
         irq_restore(flags);
     }
@@ -423,21 +475,8 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     return t;
 }
 
-/* ══════════════════════════════════════════════════════════════════
- * schedule — cuore dello scheduler FPP
- *
- * Seleziona il task READY a priorità massima ed esegue il switch.
- * WCET: O(1) — 4 CLZ + lookup + sched_context_switch (16 istruzioni)
- * ══════════════════════════════════════════════════════════════════ */
-void schedule(void)
+static void schedule_locked(uint64_t flags)
 {
-    uint64_t flags = irq_save();
-
-    /* ── Trova il task a priorità massima ─────────────────────────
-     * bitmap_find_first() restituisce il numero di bit più basso = priorità
-     * più alta. Se -1: nessun task READY (non dovrebbe succedere: idle è sempre
-     * READY). In quel caso non switchiamo.
-     */
     int next_prio = bitmap_find_first();
     if (next_prio < 0 || next_prio > 255) {
         irq_restore(flags);
@@ -452,24 +491,17 @@ void schedule(void)
 
     sched_tcb_t *prev = current_task;
 
-    /* ── Nessun switch necessario ─────────────────────────────────*/
     if (next == prev) {
-        /* Reinserisci nella coda (lo avevamo estratto) */
         rq_push(next);
         irq_restore(flags);
         return;
     }
 
-    /* ── Aggiorna stati ───────────────────────────────────────────*/
-
-    /* prev: se era RUNNING → torna READY (a meno che sia BLOCKED/ZOMBIE) */
     if (prev->state == TCB_STATE_RUNNING) {
         prev->state = TCB_STATE_READY;
         rq_push(prev);
     }
-    /* Se prev è BLOCKED o ZOMBIE: non torna in run_queue */
 
-    /* Ricarica quantum se esaurito */
     if (prev->ticks_left == 0)
         prev->ticks_left = SCHED_TICK_QUANTUM;
 
@@ -479,13 +511,20 @@ void schedule(void)
     current_task = next;
     mmu_activate_space(sched_task_space(next));
 
-    /* ── Context switch ───────────────────────────────────────────
-     * Da qui in poi esecuzione è sospesa (prev) o ripresa (da una
-     * precedente sospensione). IRQ rimangono disabilitati durante lo switch.
-     */
-    irq_restore(flags);       /* abilita IRQ prima del switch */
+    irq_restore(flags);
     sched_context_switch(prev, next);
-    /* ← quando prev è rischedulato, ritorna qui */
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * schedule — cuore dello scheduler FPP
+ *
+ * Seleziona il task READY a priorità massima ed esegue il switch.
+ * WCET: O(1) — 4 CLZ + lookup + sched_context_switch (16 istruzioni)
+ * ══════════════════════════════════════════════════════════════════ */
+void schedule(void)
+{
+    uint64_t flags = irq_save();
+    schedule_locked(flags);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -496,8 +535,7 @@ void sched_yield(void)
     uint64_t flags = irq_save();
     if (current_task)
         current_task->ticks_left = 0;   /* forza re-insert in coda */
-    irq_restore(flags);
-    schedule();
+    schedule_locked(flags);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -508,8 +546,7 @@ void sched_block(void)
     uint64_t flags = irq_save();
     if (current_task)
         current_task->state = TCB_STATE_BLOCKED;
-    irq_restore(flags);
-    schedule();
+    schedule_locked(flags);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -523,7 +560,7 @@ void sched_unblock(sched_tcb_t *t)
         t->state = TCB_STATE_READY;
         t->ticks_left = SCHED_TICK_QUANTUM;
         rq_push(t);
-        if (current_task && t->priority < current_task->priority)
+        if (current_task && eff_prio_of(t) < eff_prio_of(current_task))
             need_resched = 1;
     }
     irq_restore(flags);
@@ -580,6 +617,96 @@ int sched_task_is_user(const sched_tcb_t *t)
     return (ctx && ctx->is_user) ? 1 : 0;
 }
 
+uint8_t sched_task_effective_priority(const sched_tcb_t *t)
+{
+    return eff_prio_of(t);
+}
+
+int sched_task_donate_priority(sched_tcb_t *t, uint8_t donated_prio)
+{
+    uint64_t flags;
+    uint8_t  old_eff;
+    uint8_t  new_eff;
+    uint32_t slot;
+
+    if (!t) return -1;
+
+    flags = irq_save();
+    slot = task_slot(t);
+    old_eff = eff_prio_of(t);
+
+    if (donated_priority[slot] == 0xFFU || donated_prio < donated_priority[slot])
+        donated_priority[slot] = donated_prio;
+
+    new_eff = eff_prio_of(t);
+    if (new_eff != old_eff && t->state == TCB_STATE_READY) {
+        (void)rq_remove(t, old_eff);
+        rq_push(t);
+    }
+    if (current_task && t != current_task && new_eff < eff_prio_of(current_task))
+        need_resched = 1;
+
+    irq_restore(flags);
+    return 0;
+}
+
+void sched_task_clear_donation(sched_tcb_t *t)
+{
+    uint64_t flags;
+    uint8_t  old_eff;
+    uint8_t  new_eff;
+    int      highest;
+
+    if (!t) return;
+
+    flags = irq_save();
+    old_eff = eff_prio_of(t);
+    donated_priority[task_slot(t)] = 0xFFU;
+    new_eff = eff_prio_of(t);
+
+    if (new_eff != old_eff && t->state == TCB_STATE_READY) {
+        (void)rq_remove(t, old_eff);
+        rq_push(t);
+    }
+
+    if (t == current_task) {
+        highest = bitmap_find_first();
+        if (highest >= 0 && highest < (int)new_eff)
+            need_resched = 1;
+    } else if (current_task && new_eff < eff_prio_of(current_task)) {
+        need_resched = 1;
+    }
+
+    irq_restore(flags);
+}
+
+uint32_t sched_task_snapshot(sched_task_info_t *out, uint32_t max_entries)
+{
+    uint32_t count = 0U;
+
+    if (!out || max_entries == 0U)
+        return 0U;
+
+    for (uint32_t i = 0U; i < task_count && count < max_entries; i++) {
+        sched_tcb_t      *t = &task_pool[i];
+        sched_task_info_t *dst = &out[count++];
+
+        dst->pid         = t->pid;
+        dst->priority    = eff_prio_of(t);
+        dst->state       = t->state;
+        dst->flags       = t->flags;
+        dst->_reserved0  = 0U;
+        dst->runtime_ns  = t->runtime_ns;
+        dst->budget_ns   = t->budget_ns;
+        dst->period_ms   = t->period_ms;
+        dst->deadline_ms = t->deadline_ms;
+        sched_strlcpy(dst->name, t->name ? t->name : "(unnamed)",
+                      (uint32_t)sizeof(dst->name));
+    }
+
+    return count;
+}
+
 mm_space_t *sched_task_space(const sched_tcb_t *t)
 {
     sched_task_ctx_t *ctx = ctx_of(t);
@@ -625,9 +752,15 @@ void sched_task_bootstrap(uint64_t entry_reg)
         ((sched_fn)(uintptr_t)entry_reg)();
     }
 
+    sched_task_exit();
+}
+
+void sched_task_exit(void)
+{
     if (current_task)
         current_task->state = TCB_STATE_ZOMBIE;
-    sched_block();
+
+    schedule();
     while (1) __asm__ volatile("wfe");
 }
 

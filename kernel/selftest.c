@@ -12,6 +12,7 @@
 #include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
+#include "microkernel.h"
 #include "sched.h"
 #include "syscall.h"
 #include "timer.h"
@@ -104,6 +105,7 @@ static int selftest_case_rootfs(void)
     vfs_file_t dir;
     vfs_file_t file;
     vfs_dirent_t ent;
+    stat_t st;
     char buf[192];
     ssize_t n;
     int rc;
@@ -134,6 +136,26 @@ static int selftest_case_rootfs(void)
              "BOOT.TXT non contiene il profilo mount");
     ST_CHECK(case_name, st_contains(buf, "/dev     -> devfs"),
              "BOOT.TXT non contiene /dev");
+    ST_CHECK(case_name, st_contains(buf, "initrd cpio"),
+             "BOOT.TXT non conferma l'initrd CPIO");
+
+    rc = vfs_open("/INIT.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /INIT.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /INIT.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/INIT.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/INIT.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/NSH.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /NSH.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /NSH.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/NSH.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/NSH.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -221,6 +243,7 @@ static int selftest_case_ext4(void)
     rc = vfs_sync();
     ST_CHECK(case_name, rc == 0, "vfs_sync fallita");
 
+    (void)vfs_unlink("/data/SELFTEST.DIR/JRECOVERY.TXT");
     (void)vfs_unlink("/data/SELFTEST.DIR/RENAMED.TXT");
     (void)vfs_unlink("/data/SELFTEST.DIR/HELLO.TXT");
     (void)vfs_unlink("/data/SELFTEST.DIR");
@@ -259,6 +282,13 @@ static int selftest_case_ext4(void)
 
     rc = vfs_unlink("/data/SELFTEST.DIR/RENAMED.TXT");
     ST_CHECK(case_name, rc == 0, "unlink RENAMED.TXT fallita");
+
+    rc = ext4_selftest_recovery();
+    ST_CHECK(case_name, rc == 0, "journal recovery selftest fallito");
+
+    rc = vfs_unlink("/data/SELFTEST.DIR/JRECOVERY.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink JRECOVERY.TXT fallita");
+
     rc = vfs_unlink("/data/SELFTEST.DIR");
     ST_CHECK(case_name, rc == 0, "unlink SELFTEST.DIR fallita");
 
@@ -342,6 +372,143 @@ static int selftest_case_dynelf(void)
     return -1;
 }
 
+static volatile uint32_t ipc_test_port_id;
+static volatile uint32_t ipc_test_server_waiting;
+static volatile uint32_t ipc_test_server_ok;
+static volatile uint32_t ipc_test_client_ok;
+static volatile uint32_t ipc_test_hog_release;
+static volatile uint32_t ipc_test_server_effprio;
+static volatile uint64_t ipc_test_reply_value;
+
+static void selftest_ipc_server_task(void)
+{
+    ipc_message_t req;
+    uint64_t      reply = 0xBEEFFACE11223344ULL;
+
+    ipc_test_server_waiting = 1U;
+    if (mk_ipc_wait((uint32_t)ipc_test_port_id, &req) == 0 &&
+        req.msg_type == IPC_MSG_PING &&
+        req.msg_len == sizeof(uint64_t) &&
+        (req.flags & IPC_MSG_FLAG_INLINE) != 0U &&
+        req.mr[0] == 0x1122334455667788ULL) {
+        ipc_test_server_effprio = sched_task_effective_priority(current_task);
+        if (mk_ipc_reply((uint32_t)ipc_test_port_id, IPC_MSG_PONG,
+                         &reply, sizeof(reply)) == 0) {
+            ipc_test_server_ok = 1U;
+        }
+    }
+}
+
+static void selftest_ipc_hog_task(void)
+{
+    while (!ipc_test_hog_release)
+        __asm__ volatile("" ::: "memory");
+}
+
+static void selftest_ipc_client_task(void)
+{
+    ipc_message_t reply;
+    uint64_t      ping = 0x1122334455667788ULL;
+
+    if (mk_ipc_call((uint32_t)ipc_test_port_id, IPC_MSG_PING,
+                    &ping, sizeof(ping), &reply) == 0 &&
+        reply.msg_type == IPC_MSG_PONG &&
+        reply.msg_len == sizeof(uint64_t) &&
+        (reply.flags & IPC_MSG_FLAG_INLINE) != 0U &&
+        reply.mr[0] == 0xBEEFFACE11223344ULL) {
+        ipc_test_reply_value = reply.mr[0];
+        ipc_test_client_ok = 1U;
+    }
+
+    ipc_test_hog_release = 1U;
+}
+
+static int selftest_case_ipc_sync(void)
+{
+    static const char case_name[] = "ipc-sync";
+    sched_tcb_t *server;
+    sched_tcb_t *hog;
+    sched_tcb_t *client;
+    port_stats_t stats;
+    uint64_t deadline;
+    int rc;
+
+    ipc_test_port_id = 0U;
+    ipc_test_server_waiting = 0U;
+    ipc_test_server_ok = 0U;
+    ipc_test_client_ok = 0U;
+    ipc_test_hog_release = 0U;
+    ipc_test_server_effprio = 0xFFU;
+    ipc_test_reply_value = 0ULL;
+
+    server = sched_task_create("ipc-server", selftest_ipc_server_task, PRIO_KERNEL);
+    ST_CHECK(case_name, server != NULL, "creazione task server fallita");
+
+    ipc_test_port_id = mk_port_create(server->pid, "ipc-selftest");
+    ST_CHECK(case_name, ipc_test_port_id != 0U, "mk_port_create fallita");
+    rc = mk_port_set_budget((uint32_t)ipc_test_port_id, timer_cntfrq() / 125ULL);
+    ST_CHECK(case_name, rc == 0, "mk_port_set_budget fallita");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        sched_tcb_t *server_now = sched_task_find(server->pid);
+
+        ST_CHECK(case_name, server_now != NULL, "server task scomparso");
+        if (ipc_test_server_waiting && server_now->state == TCB_STATE_BLOCKED)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, ipc_test_server_waiting != 0U,
+             "server non e' entrato in wait");
+
+    server->priority = PRIO_LOW;
+
+    hog = sched_task_create("ipc-hog", selftest_ipc_hog_task, PRIO_NORMAL);
+    ST_CHECK(case_name, hog != NULL, "creazione hog task fallita");
+    client = sched_task_create("ipc-client", selftest_ipc_client_task, PRIO_KERNEL);
+    ST_CHECK(case_name, client != NULL, "creazione client task fallita");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        if (ipc_test_server_ok && ipc_test_client_ok && ipc_test_hog_release) {
+            sched_tcb_t *client_now = sched_task_find(client->pid);
+            sched_tcb_t *server_now = sched_task_find(server->pid);
+            sched_tcb_t *hog_now = sched_task_find(hog->pid);
+
+            ST_CHECK(case_name, client_now != NULL, "client task scomparso");
+            ST_CHECK(case_name, server_now != NULL, "server task scomparso");
+            ST_CHECK(case_name, hog_now != NULL, "hog task scomparso");
+            if (client_now->state == TCB_STATE_ZOMBIE &&
+                server_now->state == TCB_STATE_ZOMBIE &&
+                hog_now->state == TCB_STATE_ZOMBIE) {
+                break;
+            }
+        }
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ipc_test_hog_release = 1U;
+
+    ST_CHECK(case_name, ipc_test_server_ok != 0U, "server non ha risposto");
+    ST_CHECK(case_name, ipc_test_client_ok != 0U, "client non ha ricevuto reply");
+    ST_CHECK(case_name, ipc_test_reply_value == 0xBEEFFACE11223344ULL,
+             "payload reply inatteso");
+    ST_CHECK(case_name, ipc_test_server_effprio == PRIO_KERNEL,
+             "priority donation non applicata al server");
+
+    rc = mk_port_get_stats((uint32_t)ipc_test_port_id, &stats);
+    ST_CHECK(case_name, rc == 0, "mk_port_get_stats fallita");
+    ST_CHECK(case_name, stats.total_calls == 1U, "conteggio call inatteso");
+    ST_CHECK(case_name, stats.inline_calls == 1U, "small-message inline non rilevato");
+    ST_CHECK(case_name, stats.last_call_cycles > 0ULL, "latenza call nulla");
+    ST_CHECK(case_name, stats.budget_misses == 0U, "budget di latenza superato");
+
+    rc = mk_port_destroy((uint32_t)ipc_test_port_id);
+    ST_CHECK(case_name, rc == 0, "mk_port_destroy fallita");
+    return 0;
+}
+
 int selftest_run_all(void)
 {
     static const selftest_case_t cases[] = {
@@ -351,6 +518,7 @@ int selftest_run_all(void)
         { "elf-loader", selftest_case_elf    },
         { "execve",     selftest_case_execve },
         { "elf-dynamic", selftest_case_dynelf },
+        { "ipc-sync",   selftest_case_ipc_sync },
         { "gpu-stack",  gpu_selftest_run     },
     };
     uint32_t total = 0U;

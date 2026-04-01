@@ -2,30 +2,19 @@
  * EnlilOS Microkernel - Virtual File System Bootstrap (M5-02)
  *
  * Mount table statica:
- *   /        -> initrd-ro bootstrap stub
+ *   /        -> initrd CPIO embedded (ro)
  *   /dev     -> devfs
- *   /data    -> ext4 read-only (se mount riuscito)
- *   /sysroot -> ext4 read-only (se mount riuscito)
- *
- * M5-03 sostituisce il vecchio placeholder ext4 con un parser read-only
- * sopra virtio-blk, mantenendo la stessa ABI lato syscall/VFS.
+ *   /data    -> ext4 rw-full (se mount riuscito)
+ *   /sysroot -> ext4 rw-full (se mount riuscito)
  */
 
 #include "vfs.h"
 #include "blk.h"
 #include "ext4.h"
+#include "initrd.h"
+#include "term80.h"
 #include "tty.h"
 #include "uart.h"
-
-#define ROOT_NODE_DIR       1U
-#define ROOT_NODE_README    2U
-#define ROOT_NODE_BOOT      3U
-#define ROOT_NODE_DEMO_ELF  4U
-#define ROOT_NODE_EXEC1_ELF 5U
-#define ROOT_NODE_EXEC2_ELF 6U
-#define ROOT_NODE_DYN_ELF   7U
-#define ROOT_NODE_LIBDYN    8U
-#define ROOT_NODE_LD_ENLIL  9U
 
 #define DEV_NODE_DIR        1U
 #define DEV_NODE_CONSOLE    2U
@@ -38,25 +27,6 @@
 #define PLACE_NODE_DIR      1U
 #define PLACE_NODE_README   2U
 
-static const char vfs_root_readme[] =
-    "EnlilOS bootstrap rootfs.\n"
-    "Questo mount `/` e' read-only e prepara il passaggio a un initrd vero.\n"
-    "I device node vivono sotto `/dev`.\n";
-
-extern const uint8_t _binary_user_demo_elf_start[];
-extern const uint8_t _binary_user_demo_elf_end[];
-extern const uint8_t _binary_user_execve_demo_elf_start[];
-extern const uint8_t _binary_user_execve_demo_elf_end[];
-extern const uint8_t _binary_user_execve_target_elf_start[];
-extern const uint8_t _binary_user_execve_target_elf_end[];
-extern const uint8_t _binary_user_dynamic_demo_elf_start[];
-extern const uint8_t _binary_user_dynamic_demo_elf_end[];
-extern const uint8_t _binary_user_libdyn_so_start[];
-extern const uint8_t _binary_user_libdyn_so_end[];
-extern const uint8_t _binary_user_ld_enlil_so_start[];
-extern const uint8_t _binary_user_ld_enlil_so_end[];
-
-static char vfs_root_boot_txt[256];
 static vfs_mount_t vfs_mounts[VFS_MAX_MOUNTS];
 static size_t      vfs_mount_count;
 static bool        vfs_initialized;
@@ -91,13 +61,6 @@ static void vfs_strlcpy(char *dst, const char *src, size_t max)
         i++;
     }
     dst[i] = '\0';
-}
-
-static char *buf_puts(char *dst, const char *src)
-{
-    while (*src) *dst++ = *src++;
-    *dst = '\0';
-    return dst;
 }
 
 static void stat_fill(stat_t *st, uint32_t mode, uint64_t size,
@@ -138,15 +101,6 @@ static void file_bind_mem(vfs_file_t *file, const vfs_mount_t *mount,
     file->size_hint = vfs_strlen(content);
 }
 
-static void file_bind_blob(vfs_file_t *file, const vfs_mount_t *mount,
-                           uint32_t node_id, uint32_t flags,
-                           const void *content, size_t size)
-{
-    file_reset(file, mount, node_id, flags);
-    file->cookie    = (uintptr_t)content;
-    file->size_hint = size;
-}
-
 static ssize_t memfile_read(vfs_file_t *file, void *buf, size_t count)
 {
     const char *src;
@@ -185,171 +139,6 @@ static int dirent_fill(vfs_dirent_t *out, const char *name, uint32_t mode)
     out->mode = mode;
     return 0;
 }
-
-static int mount_is_active(const char *path)
-{
-    for (size_t i = 0; i < vfs_mount_count; i++) {
-        if (vfs_mounts[i].active && vfs_streq(vfs_mounts[i].path, path))
-            return 1;
-    }
-    return 0;
-}
-
-/* ── initrd bootstrap rootfs ─────────────────────────────────────── */
-
-static int rootfs_open(const vfs_mount_t *mount, const char *relpath,
-                       uint32_t flags, vfs_file_t *out)
-{
-    const char *name = relpath;
-
-    if (!out) return -EFAULT;
-    if (name[0] == '/') name++;
-
-    if (name[0] == '\0') {
-        file_reset(out, mount, ROOT_NODE_DIR, flags);
-        return 0;
-    }
-    if (wants_write(flags))
-        return -EROFS;
-
-    if (vfs_streq(name, "README.TXT")) {
-        file_bind_mem(out, mount, ROOT_NODE_README, flags, vfs_root_readme);
-        return 0;
-    }
-    if (vfs_streq(name, "BOOT.TXT")) {
-        file_bind_mem(out, mount, ROOT_NODE_BOOT, flags, vfs_root_boot_txt);
-        return 0;
-    }
-    if (vfs_streq(name, "DEMO.ELF")) {
-        file_bind_blob(out, mount, ROOT_NODE_DEMO_ELF, flags,
-                       _binary_user_demo_elf_start,
-                       (size_t)(_binary_user_demo_elf_end - _binary_user_demo_elf_start));
-        return 0;
-    }
-    if (vfs_streq(name, "EXEC1.ELF")) {
-        file_bind_blob(out, mount, ROOT_NODE_EXEC1_ELF, flags,
-                       _binary_user_execve_demo_elf_start,
-                       (size_t)(_binary_user_execve_demo_elf_end -
-                                _binary_user_execve_demo_elf_start));
-        return 0;
-    }
-    if (vfs_streq(name, "EXEC2.ELF")) {
-        file_bind_blob(out, mount, ROOT_NODE_EXEC2_ELF, flags,
-                       _binary_user_execve_target_elf_start,
-                       (size_t)(_binary_user_execve_target_elf_end -
-                                _binary_user_execve_target_elf_start));
-        return 0;
-    }
-    if (vfs_streq(name, "DYNDEMO.ELF")) {
-        file_bind_blob(out, mount, ROOT_NODE_DYN_ELF, flags,
-                       _binary_user_dynamic_demo_elf_start,
-                       (size_t)(_binary_user_dynamic_demo_elf_end -
-                                _binary_user_dynamic_demo_elf_start));
-        return 0;
-    }
-    if (vfs_streq(name, "libdyn.so")) {
-        file_bind_blob(out, mount, ROOT_NODE_LIBDYN, flags,
-                       _binary_user_libdyn_so_start,
-                       (size_t)(_binary_user_libdyn_so_end -
-                                _binary_user_libdyn_so_start));
-        return 0;
-    }
-    if (vfs_streq(name, "LD-ENLIL.SO")) {
-        file_bind_blob(out, mount, ROOT_NODE_LD_ENLIL, flags,
-                       _binary_user_ld_enlil_so_start,
-                       (size_t)(_binary_user_ld_enlil_so_end -
-                                _binary_user_ld_enlil_so_start));
-        return 0;
-    }
-
-    return -ENOENT;
-}
-
-static ssize_t rootfs_read(vfs_file_t *file, void *buf, size_t count)
-{
-    if (file->node_id == ROOT_NODE_DIR)
-        return -EISDIR;
-    return memfile_read(file, buf, count);
-}
-
-static ssize_t rootfs_write(vfs_file_t *file, const void *buf, size_t count)
-{
-    (void)file;
-    (void)buf;
-    (void)count;
-    return -EROFS;
-}
-
-static int rootfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
-{
-    while (1) {
-        uint32_t idx = file->dir_index++;
-
-        switch (idx) {
-        case 0:
-            return dirent_fill(out, "README.TXT",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 1:
-            return dirent_fill(out, "BOOT.TXT",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 2:
-            return dirent_fill(out, "dev",
-                               S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
-        case 3:
-            return dirent_fill(out, "DEMO.ELF",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 4:
-            return dirent_fill(out, "EXEC1.ELF",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 5:
-            return dirent_fill(out, "EXEC2.ELF",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 6:
-            return dirent_fill(out, "DYNDEMO.ELF",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 7:
-            return dirent_fill(out, "libdyn.so",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 8:
-            return dirent_fill(out, "LD-ENLIL.SO",
-                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
-        case 9:
-            if (mount_is_active("/data"))
-                return dirent_fill(out, "data",
-                                   S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
-            break;
-        case 10:
-            if (mount_is_active("/sysroot"))
-                return dirent_fill(out, "sysroot",
-                                   S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
-            break;
-        default:
-            return -ENOENT;
-        }
-    }
-}
-
-static int rootfs_stat(vfs_file_t *file, stat_t *out)
-{
-    if (file->node_id == ROOT_NODE_DIR)
-        return file_stat_dir(out);
-    return file_stat_mem(file, out);
-}
-
-static int rootfs_close(vfs_file_t *file)
-{
-    (void)file;
-    return 0;
-}
-
-static const vfs_ops_t rootfs_ops = {
-    .open    = rootfs_open,
-    .read    = rootfs_read,
-    .write   = rootfs_write,
-    .readdir = rootfs_readdir,
-    .stat    = rootfs_stat,
-    .close   = rootfs_close,
-};
 
 /* ── devfs ───────────────────────────────────────────────────────── */
 
@@ -415,6 +204,7 @@ static ssize_t devfs_write(vfs_file_t *file, const void *buf, size_t count)
         return (ssize_t)count;
 
     if (count > 4096U) count = 4096U;
+    term80_write(bytes, (uint32_t)count);
     for (size_t i = 0; i < count; i++)
         uart_putc(bytes[i]);
 
@@ -621,42 +411,26 @@ static void log_mounts(void)
     }
 }
 
-static void build_dynamic_texts(void)
-{
-    char    *p;
-
-    p = vfs_root_boot_txt;
-    p = buf_puts(p, "Mount profile bootstrap:\n");
-    p = buf_puts(p, "/        -> initrd-ro stub\n");
-    p = buf_puts(p, "/dev     -> devfs\n");
-    if (blk_is_ready()) {
-        if (ext4_is_mounted()) {
-            p = buf_puts(p, "/data    -> ext4 rw-core su virtio-blk\n");
-            p = buf_puts(p, "/sysroot -> ext4 rw-core su virtio-blk\n");
-        } else {
-            p = buf_puts(p, "/data    -> ext4 mount fallito\n");
-            p = buf_puts(p, "/sysroot -> ext4 mount fallito\n");
-        }
-    } else {
-        p = buf_puts(p, "/data    -> offline (virtio-blk assente)\n");
-        p = buf_puts(p, "/sysroot -> offline (virtio-blk assente)\n");
-    }
-}
-
 static void build_mount_table(void)
 {
     int ext4_rc = -1;
+    int initrd_rc;
 
     if (blk_is_ready())
         ext4_rc = ext4_mount();
     else
         ext4_unmount();
 
-    build_dynamic_texts();
+    initrd_rc = initrd_init();
 
     vfs_mount_count = 0;
-    mount_register("/", "bootstrap-root", "initrd-ro",
-                   true, &rootfs_ops, 0U);
+    if (initrd_rc == 0 && initrd_is_ready()) {
+        mount_register("/", "bootstrap-root", "initrd-cpio",
+                       true, initrd_vfs_ops(), 0U);
+    } else {
+        mount_register("/", "bootstrap-root", "initrd-error",
+                       true, &placefs_ops, (uintptr_t)initrd_status());
+    }
     mount_register("/dev", "device-nodes", "devfs",
                    false, &devfs_ops, 0U);
 

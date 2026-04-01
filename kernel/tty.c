@@ -18,6 +18,7 @@
 #include "keyboard.h"
 #include "sched.h"
 #include "syscall.h"
+#include "term80.h"
 #include "uart.h"
 
 #define TTY_EDIT_MAX    256U
@@ -73,15 +74,18 @@ static int tty_ready_pop(uint8_t *out)
 static void tty_echo_char(uint8_t c)
 {
     if (c == '\n') {
+        term80_putc('\n');
         uart_putc('\r');
         uart_putc('\n');
         return;
     }
+    term80_putc((char)c);
     uart_putc((char)c);
 }
 
 static void tty_echo_backspace(void)
 {
+    term80_putc('\b');
     uart_putc('\b');
     uart_putc(' ');
     uart_putc('\b');

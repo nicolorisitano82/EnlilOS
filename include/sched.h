@@ -74,6 +74,19 @@
 typedef void (*sched_fn)(void);
 typedef struct mm_space mm_space_t;
 
+typedef struct {
+    uint32_t pid;
+    uint8_t  priority;
+    uint8_t  state;
+    uint8_t  flags;
+    uint8_t  _reserved0;
+    uint64_t runtime_ns;
+    uint64_t budget_ns;
+    uint64_t period_ms;
+    uint64_t deadline_ms;
+    char     name[32];
+} sched_task_info_t;
+
 /* ════════════════════════════════════════════════════════════════════
  * sched_tcb_t — Task Control Block, 64 byte esatti (fit in task_cache)
  *
@@ -173,6 +186,10 @@ sched_tcb_t *sched_task_find(uint32_t pid);
 
 int         sched_task_is_user(const sched_tcb_t *t);
 mm_space_t *sched_task_space(const sched_tcb_t *t);
+uint8_t     sched_task_effective_priority(const sched_tcb_t *t);
+int         sched_task_donate_priority(sched_tcb_t *t, uint8_t donated_prio);
+void        sched_task_clear_donation(sched_tcb_t *t);
+uint32_t    sched_task_snapshot(sched_task_info_t *out, uint32_t max_entries);
 int         sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
                                    uintptr_t entry, uintptr_t user_sp,
                                    uintptr_t argc, uintptr_t argv,
@@ -183,6 +200,7 @@ void sched_task_bootstrap(uint64_t entry_reg);
 void sched_enter_user(uint64_t argc, uint64_t argv,
                       uint64_t envp, uint64_t auxv,
                       uint64_t user_sp, uint64_t entry);
+void sched_task_exit(void);
 
 /* Trampoline assembly — non chiamare direttamente */
 extern void task_entry_trampoline(void);
