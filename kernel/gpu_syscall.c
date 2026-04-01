@@ -22,7 +22,6 @@
 #include "syscall.h"
 #include "sched.h"
 #include "timer.h"
-#include "pmm.h"
 #include "uart.h"
 
 /* ════════════════════════════════════════════════════════════════════
@@ -35,13 +34,65 @@ gpu_cmdbuf_entry_t gpu_cmdbuf_pool[GPU_MAX_CMDBUFS];
 gpu_fence_entry_t  gpu_fence_pool [GPU_MAX_FENCES];
 uint64_t           gpu_next_fence_id = 1;
 
+#define GPU_MM_INVALID_SLOT     0xFFFFU
+#define GPU_MM_POOL_SCANOUT     1U
+#define GPU_MM_POOL_GENERAL     2U
+#define GPU_MM_POOL_CMD         3U
+
+#define GPU_MM_SCANOUT_SLOTS    4U
+#define GPU_MM_GENERAL_SLOTS    8U
+#define GPU_MM_CMD_SLOTS        8U
+
+#define GPU_MM_SCANOUT_BYTES    (FB_WIDTH * FB_HEIGHT * 4U)
+#define GPU_MM_GENERAL_BYTES    (512U * 1024U)
+#define GPU_MM_CMD_BYTES        (64U * 1024U)
+
+static uint8_t gpu_mm_scanout[GPU_MM_SCANOUT_SLOTS][GPU_MM_SCANOUT_BYTES]
+    __attribute__((aligned(4096)));
+static uint8_t gpu_mm_general[GPU_MM_GENERAL_SLOTS][GPU_MM_GENERAL_BYTES]
+    __attribute__((aligned(4096)));
+static uint8_t gpu_mm_cmd[GPU_MM_CMD_SLOTS][GPU_MM_CMD_BYTES]
+    __attribute__((aligned(4096)));
+
+static uint16_t gpu_mm_scanout_next[GPU_MM_SCANOUT_SLOTS];
+static uint16_t gpu_mm_general_next[GPU_MM_GENERAL_SLOTS];
+static uint16_t gpu_mm_cmd_next[GPU_MM_CMD_SLOTS];
+
+static uint16_t gpu_mm_handle_head = GPU_MM_INVALID_SLOT;
+static uint16_t gpu_mm_scanout_head = GPU_MM_INVALID_SLOT;
+static uint16_t gpu_mm_general_head = GPU_MM_INVALID_SLOT;
+static uint16_t gpu_mm_cmd_head = GPU_MM_INVALID_SLOT;
+
+static void gpu_mm_init(void);
+static int gpu_buf_flush_entry(gpu_buf_entry_t *e);
+static void gpu_flush_dirty_buffers(void);
+
+static void gpu_fence_update(gpu_fence_entry_t *f)
+{
+    if (!f || !f->in_use) return;
+    if (f->state != GPU_FENCE_PENDING) return;
+    if (f->done_ns == 0U) return;
+
+    if (timer_now_ns() >= f->done_ns)
+        f->state = GPU_FENCE_SIGNALED;
+}
+
 /* ── Allocatori di slot (1-based per buf/queue; cerca ID per fence) ── */
 
 static uint32_t buf_slot_alloc(void)
 {
-    for (int i = 0; i < GPU_MAX_BUFS; i++)
-        if (!gpu_buf_pool[i].in_use) return (uint32_t)(i + 1);
-    return 0;
+    uint16_t slot = gpu_mm_handle_head;
+    if (slot == GPU_MM_INVALID_SLOT)
+        return 0;
+    gpu_mm_handle_head = gpu_buf_pool[slot].next_free;
+    gpu_buf_pool[slot].next_free = GPU_MM_INVALID_SLOT;
+    return (uint32_t)(slot + 1U);
+}
+static void buf_slot_free(uint32_t h)
+{
+    uint16_t slot = (uint16_t)(h - 1U);
+    gpu_buf_pool[slot].next_free = gpu_mm_handle_head;
+    gpu_mm_handle_head = slot;
 }
 static uint32_t queue_slot_alloc(void)
 {
@@ -108,32 +159,71 @@ static uint64_t sys_gpu_buf_alloc(uint64_t args[6])
 {
     uint32_t size = (uint32_t)args[0];
     uint32_t type = (uint32_t)args[1];
+    uint16_t *pool_head;
+    uint16_t *pool_next;
+    uint16_t pool_slot;
+    uint32_t pool_kind;
+    uint32_t capacity;
+    uintptr_t base;
+    uint32_t h;
 
-    if (size == 0 || size > 256u * 1024u * 1024u) return GPU_INVALID_BUF;
+    if (size == 0U) return GPU_INVALID_BUF;
 
-    uint32_t h = buf_slot_alloc();
+    if (type & GPU_BUF_SCANOUT) {
+        pool_kind = GPU_MM_POOL_SCANOUT;
+        capacity  = GPU_MM_SCANOUT_BYTES;
+        pool_head = &gpu_mm_scanout_head;
+        pool_next = gpu_mm_scanout_next;
+    } else if ((type & (GPU_BUF_UNIFORM | GPU_BUF_SHADER)) != 0U &&
+               size <= GPU_MM_CMD_BYTES) {
+        pool_kind = GPU_MM_POOL_CMD;
+        capacity  = GPU_MM_CMD_BYTES;
+        pool_head = &gpu_mm_cmd_head;
+        pool_next = gpu_mm_cmd_next;
+    } else if (size <= GPU_MM_GENERAL_BYTES) {
+        pool_kind = GPU_MM_POOL_GENERAL;
+        capacity  = GPU_MM_GENERAL_BYTES;
+        pool_head = &gpu_mm_general_head;
+        pool_next = gpu_mm_general_next;
+    } else if (size <= GPU_MM_CMD_BYTES) {
+        pool_kind = GPU_MM_POOL_CMD;
+        capacity  = GPU_MM_CMD_BYTES;
+        pool_head = &gpu_mm_cmd_head;
+        pool_next = gpu_mm_cmd_next;
+    } else {
+        return GPU_INVALID_BUF;
+    }
+
+    h = buf_slot_alloc();
     if (h == 0) return GPU_INVALID_BUF;
+    pool_slot = *pool_head;
+    if (pool_slot == GPU_MM_INVALID_SLOT) {
+        buf_slot_free(h);
+        return GPU_INVALID_BUF;
+    }
+    *pool_head = pool_next[pool_slot];
 
-    /* Buddy order */
-    uint64_t pages = ((uint64_t)size + 4095u) / 4096u;
-    uint32_t order = 0;
-    uint64_t p = pages;
-    while (p > 1) { p >>= 1; order++; }
-    if ((1ull << order) < pages) order++;
-    if (order > 10) order = 10;
+    if (pool_kind == GPU_MM_POOL_SCANOUT)
+        base = (uintptr_t)&gpu_mm_scanout[pool_slot][0];
+    else if (pool_kind == GPU_MM_POOL_CMD)
+        base = (uintptr_t)&gpu_mm_cmd[pool_slot][0];
+    else
+        base = (uintptr_t)&gpu_mm_general[pool_slot][0];
 
-    uint64_t pa = phys_alloc_pages(order);
-    if (pa == 0) return GPU_INVALID_BUF;
+    for (uint32_t i = 0U; i < capacity; i++)
+        ((volatile uint8_t *)base)[i] = 0U;
 
-    /* Zero-fill */
-    uint8_t *ptr = (uint8_t *)(uintptr_t)pa;
-    for (uint64_t i = 0; i < (1ull << order) * 4096u; i++) ptr[i] = 0;
-
-    gpu_buf_pool[h-1].phys   = pa;
-    gpu_buf_pool[h-1].size   = (uint32_t)((1ull << order) * 4096u);
-    gpu_buf_pool[h-1].type   = type;
-    gpu_buf_pool[h-1].mapped = false;
-    gpu_buf_pool[h-1].in_use = true;
+    gpu_buf_pool[h-1].phys      = (uint64_t)base;
+    gpu_buf_pool[h-1].iova      = (uint64_t)base;
+    gpu_buf_pool[h-1].size      = size;
+    gpu_buf_pool[h-1].capacity  = capacity;
+    gpu_buf_pool[h-1].type      = type;
+    gpu_buf_pool[h-1].pool_kind = (uint16_t)pool_kind;
+    gpu_buf_pool[h-1].pool_slot = pool_slot;
+    gpu_buf_pool[h-1].mapped    = false;
+    gpu_buf_pool[h-1].cpu_dirty = true;
+    gpu_buf_pool[h-1].pinned    = ((type & GPU_BUF_PINNED) != 0U);
+    gpu_buf_pool[h-1].in_use    = true;
     return (uint64_t)h;
 }
 
@@ -144,18 +234,41 @@ static uint64_t sys_gpu_buf_alloc(uint64_t args[6])
 static uint64_t sys_gpu_buf_free(uint64_t args[6])
 {
     uint32_t h = (uint32_t)args[0];
+    gpu_buf_entry_t *e;
+    uint16_t *pool_head;
+    uint16_t *pool_next;
     if (!buf_valid(h)) return ERR(EINVAL);
 
-    gpu_buf_entry_t *e = &gpu_buf_pool[h-1];
-    uint64_t pages = ((uint64_t)e->size + 4095u) / 4096u;
-    uint32_t order = 0;
-    uint64_t p = pages;
-    while (p > 1) { p >>= 1; order++; }
-    if ((1ull << order) < pages) order++;
-    if (order > 10) order = 10;
+    e = &gpu_buf_pool[h-1];
+    if (e->pinned) return ERR(EBUSY);
 
-    phys_free_pages(e->phys, order);
+    if (e->pool_kind == GPU_MM_POOL_SCANOUT) {
+        pool_head = &gpu_mm_scanout_head;
+        pool_next = gpu_mm_scanout_next;
+    } else if (e->pool_kind == GPU_MM_POOL_CMD) {
+        pool_head = &gpu_mm_cmd_head;
+        pool_next = gpu_mm_cmd_next;
+    } else if (e->pool_kind == GPU_MM_POOL_GENERAL) {
+        pool_head = &gpu_mm_general_head;
+        pool_next = gpu_mm_general_next;
+    } else {
+        return ERR(EINVAL);
+    }
+
+    pool_next[e->pool_slot] = *pool_head;
+    *pool_head = e->pool_slot;
+    e->phys = 0U;
+    e->iova = 0U;
+    e->size = 0U;
+    e->capacity = 0U;
+    e->type = 0U;
+    e->pool_kind = 0U;
+    e->pool_slot = GPU_MM_INVALID_SLOT;
+    e->mapped = false;
+    e->cpu_dirty = false;
+    e->pinned = false;
     e->in_use = false;
+    buf_slot_free(h);
     return 0;
 }
 
@@ -174,6 +287,7 @@ static uint64_t sys_gpu_buf_map_cpu(uint64_t args[6])
 
     gpu_buf_entry_t *e = &gpu_buf_pool[h-1];
     e->mapped = true;
+    e->cpu_dirty = true;
     return e->phys;   /* PA == VA */
 }
 
@@ -191,15 +305,7 @@ static uint64_t sys_gpu_buf_unmap_cpu(uint64_t args[6])
 
     gpu_buf_entry_t *e = &gpu_buf_pool[h-1];
     if (!e->mapped) return ERR(EINVAL);
-
-    /* Flush D-cache: garantisce coerenza CPU → GPU DMA */
-    uintptr_t base = (uintptr_t)e->phys;
-    uintptr_t end  = base + e->size;
-    for (uintptr_t addr = base & ~63u; addr < end; addr += 64) {
-        __asm__ volatile("dc civac, %0" :: "r"(addr) : "memory");
-    }
-    __asm__ volatile("dsb sy" ::: "memory");
-
+    (void)gpu_buf_flush_entry(e);
     e->mapped = false;
     return 0;
 }
@@ -297,6 +403,7 @@ static uint64_t sys_gpu_cmdbuf_submit(uint64_t args[6])
     if (!fence) { entry->in_use = false; return GPU_INVALID_FENCE; }
 
     fence->submit_ns = timer_now_ns();
+    gpu_flush_dirty_buffers();
 
     /* Esegue / sottomette tramite il backend */
     int ret = gpu_active_backend->execute_cmdbuf(entry, fence);
@@ -321,6 +428,7 @@ static uint64_t sys_gpu_fence_wait(uint64_t args[6])
 
     gpu_fence_entry_t *f = fence_find(fence_id);
     if (!f) return ERR(EINVAL);
+    gpu_fence_update(f);
 
     /* Polling immediato */
     if (timeout_ns == 0)
@@ -331,6 +439,7 @@ static uint64_t sys_gpu_fence_wait(uint64_t args[6])
     uint64_t deadline_ns = infinite ? 0 : timer_now_ns() + timeout_ns;
 
     while (f->state == GPU_FENCE_PENDING) {
+        gpu_fence_update(f);
         if (!infinite && timer_now_ns() >= deadline_ns) return ERR(EAGAIN);
         sched_yield();
     }
@@ -347,6 +456,7 @@ static uint64_t sys_gpu_fence_query(uint64_t args[6])
 {
     gpu_fence_entry_t *f = fence_find(args[0]);
     if (!f) return ERR(EINVAL);
+    gpu_fence_update(f);
     return (uint64_t)f->state;
 }
 
@@ -389,6 +499,7 @@ static uint64_t sys_gpu_present(uint64_t args[6])
     if (!fence) return GPU_INVALID_FENCE;
 
     fence->submit_ns = timer_now_ns();
+    gpu_flush_dirty_buffers();
 
     int ret = gpu_active_backend->present(scanout, x, y, w, h, fence);
     if (ret != 0) fence->state = GPU_FENCE_ERROR;
@@ -461,6 +572,7 @@ static uint64_t sys_gpu_compute_dispatch(uint64_t args[6])
     if (!fence) { entry->in_use = false; return GPU_INVALID_FENCE; }
 
     fence->submit_ns = timer_now_ns();
+    gpu_flush_dirty_buffers();
 
     int ret = gpu_active_backend->execute_cmdbuf(entry, fence);
     if (ret != 0) fence->state = GPU_FENCE_ERROR;
@@ -474,6 +586,8 @@ static uint64_t sys_gpu_compute_dispatch(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 void gpu_init(void)
 {
+    gpu_mm_init();
+
     /* 1. Seleziona backend */
     gpu_backend_init();
 
@@ -503,6 +617,12 @@ void gpu_init(void)
     uart_puts(" fence=");
     uart_putc('0' + GPU_MAX_FENCES / 10);
     uart_putc('0' + GPU_MAX_FENCES % 10);
+    uart_puts(" | mm scanout=");
+    uart_putc('0' + GPU_MM_SCANOUT_SLOTS);
+    uart_puts(" general=");
+    uart_putc('0' + GPU_MM_GENERAL_SLOTS);
+    uart_puts(" cmd=");
+    uart_putc('0' + GPU_MM_CMD_SLOTS);
     uart_puts("\n");
 
     /* 3. Registra syscall 120-133 */
@@ -588,4 +708,78 @@ void gpu_get_caps(gpu_caps_t *out)
 {
     if (!out || !gpu_active_backend) return;
     gpu_active_backend->query_caps(out);
+}
+
+void gpu_get_scanout_info(gpu_scanout_info_t *out)
+{
+    if (!out || !gpu_active_backend || !gpu_active_backend->query_scanout)
+        return;
+    gpu_active_backend->query_scanout(out);
+}
+
+int gpu_flush_cache(gpu_buf_handle_t handle)
+{
+    if (!buf_valid(handle)) return -EINVAL;
+    return gpu_buf_flush_entry(&gpu_buf_pool[handle - 1U]);
+}
+
+static void gpu_mm_init(void)
+{
+    for (uint32_t i = 0U; i < GPU_MAX_BUFS; i++) {
+        gpu_buf_pool[i].phys = 0U;
+        gpu_buf_pool[i].iova = 0U;
+        gpu_buf_pool[i].size = 0U;
+        gpu_buf_pool[i].capacity = 0U;
+        gpu_buf_pool[i].type = 0U;
+        gpu_buf_pool[i].pool_kind = 0U;
+        gpu_buf_pool[i].pool_slot = GPU_MM_INVALID_SLOT;
+        gpu_buf_pool[i].next_free = (i + 1U < GPU_MAX_BUFS) ? (uint16_t)(i + 1U)
+                                                            : GPU_MM_INVALID_SLOT;
+        gpu_buf_pool[i].mapped = false;
+        gpu_buf_pool[i].cpu_dirty = false;
+        gpu_buf_pool[i].pinned = false;
+        gpu_buf_pool[i].in_use = false;
+    }
+    gpu_mm_handle_head = 0U;
+
+    for (uint32_t i = 0U; i < GPU_MM_SCANOUT_SLOTS; i++)
+        gpu_mm_scanout_next[i] = (i + 1U < GPU_MM_SCANOUT_SLOTS)
+                               ? (uint16_t)(i + 1U) : GPU_MM_INVALID_SLOT;
+    gpu_mm_scanout_head = 0U;
+
+    for (uint32_t i = 0U; i < GPU_MM_GENERAL_SLOTS; i++)
+        gpu_mm_general_next[i] = (i + 1U < GPU_MM_GENERAL_SLOTS)
+                               ? (uint16_t)(i + 1U) : GPU_MM_INVALID_SLOT;
+    gpu_mm_general_head = 0U;
+
+    for (uint32_t i = 0U; i < GPU_MM_CMD_SLOTS; i++)
+        gpu_mm_cmd_next[i] = (i + 1U < GPU_MM_CMD_SLOTS)
+                           ? (uint16_t)(i + 1U) : GPU_MM_INVALID_SLOT;
+    gpu_mm_cmd_head = 0U;
+}
+
+static int gpu_buf_flush_entry(gpu_buf_entry_t *e)
+{
+    uintptr_t base;
+    uintptr_t end;
+
+    if (!e || !e->in_use) return -EINVAL;
+
+    base = (uintptr_t)e->phys;
+    end  = base + e->size;
+    for (uintptr_t addr = base & ~(uintptr_t)63U; addr < end; addr += 64U)
+        __asm__ volatile("dc civac, %0" :: "r"(addr) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    e->cpu_dirty = false;
+    return 0;
+}
+
+static void gpu_flush_dirty_buffers(void)
+{
+    for (uint32_t i = 0U; i < GPU_MAX_BUFS; i++) {
+        if (!gpu_buf_pool[i].in_use) continue;
+        if (!gpu_buf_pool[i].cpu_dirty) continue;
+        (void)gpu_buf_flush_entry(&gpu_buf_pool[i]);
+    }
 }

@@ -90,6 +90,22 @@ typedef uint64_t gpu_fence_t;      /* 0 = invalido */
 #define GPU_FENCE_SIGNALED 1u
 #define GPU_FENCE_ERROR    2u
 
+/* ── Stato scanout / display engine ──────────────────────────────── */
+
+#define GPU_SCANOUT_ACTIVE         (1u << 0)
+#define GPU_SCANOUT_DOUBLE_BUFFER  (1u << 1)
+#define GPU_SCANOUT_VSYNC          (1u << 2)
+
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t refresh_hz;
+    uint32_t flags;
+    uint32_t front_index;
+    uint32_t back_index;
+    uint64_t frame_counter;
+} gpu_scanout_info_t;
+
 /* ── Command buffer ─────────────────────────────────────────────────── */
 
 /*
@@ -127,5 +143,17 @@ void gpu_present_fullscreen(void);
  * Utile per scegliere una UI di boot coerente tra SW fallback e VirtIO-GPU.
  */
 void gpu_get_caps(gpu_caps_t *out);
+
+/*
+ * gpu_get_scanout_info() — stato del display engine attivo:
+ * scanout size, vsync, double buffering, front/back index e frame count.
+ */
+void gpu_get_scanout_info(gpu_scanout_info_t *out);
+
+/*
+ * gpu_flush_cache() — pulisce la D-cache per un GBO e lo rende visibile
+ * al DMA GPU. API kernel-side; le syscall continuano a usare map/unmap.
+ */
+int gpu_flush_cache(gpu_buf_handle_t handle);
 
 #endif /* ENLILOS_GPU_H */

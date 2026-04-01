@@ -293,6 +293,26 @@ static void bootcli_push_current_input(void)
     bootcli_push_line(line);
 }
 
+static void bootcli_fmt_scanout_status(char *dst, uint32_t cap)
+{
+    gpu_scanout_info_t info;
+
+    dst[0] = '\0';
+    gpu_get_scanout_info(&info);
+    bootcli_buf_append(dst, cap, "Scanout ");
+    bootcli_buf_append_u32(dst, cap, info.width);
+    bootcli_buf_append(dst, cap, "x");
+    bootcli_buf_append_u32(dst, cap, info.height);
+    bootcli_buf_append(dst, cap, " hz=");
+    bootcli_buf_append_u32(dst, cap, info.refresh_hz);
+    bootcli_buf_append(dst, cap, " front=");
+    bootcli_buf_append_u32(dst, cap, info.front_index);
+    bootcli_buf_append(dst, cap, " back=");
+    bootcli_buf_append_u32(dst, cap, info.back_index);
+    bootcli_buf_append(dst, cap, " frames=");
+    bootcli_buf_append_u32(dst, cap, (uint32_t)info.frame_counter);
+}
+
 static const char *bootcli_errno_name(int rc)
 {
     int err = (rc < 0) ? -rc : rc;
@@ -480,6 +500,7 @@ static void bootcli_render(void)
     char prompt_line[BOOTCLI_LINE_MAX + 1];
     char footer[BOOTCLI_LINE_MAX + 1];
     char mouse_status[BOOTCLI_LINE_MAX + 1];
+    char scanout_status[BOOTCLI_LINE_MAX + 1];
     uint64_t cursor_phase = timer_now_ms() / 400ULL;
 
     fb_clear(bg_color);
@@ -508,6 +529,9 @@ static void bootcli_render(void)
                    muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
+        bootcli_fmt_scanout_status(scanout_status, sizeof(scanout_status));
+        fb_draw_string(48U, 132U, scanout_status, accent_color, panel_color);
+
         if (bootcli_mouse_ready) {
             bootcli_fmt_mouse_status(mouse_status, sizeof(mouse_status));
         } else {
@@ -516,7 +540,7 @@ static void bootcli_render(void)
                                "Mouse guest non rilevato: run-gpu richiede virtio-mouse-device.");
         }
 
-        fb_draw_string(48U, 132U, mouse_status,
+        fb_draw_string(48U, 150U, mouse_status,
                        bootcli_mouse_ready ? muted_color : warning_color,
                        panel_color);
     }
@@ -606,7 +630,7 @@ static void bootcli_execute_command(void)
         bootcli_buf_append(line, sizeof(line), "GPU: ");
         if (bootcli_caps.vendor == GPU_VENDOR_VIRTIO) {
             bootcli_buf_append(line, sizeof(line),
-                               "VirtIO-GPU, modalita grafica attiva.");
+                               "VirtIO-GPU, page flip doppio buffer + vsync attivi.");
         } else if (bootcli_caps.vendor == GPU_VENDOR_APPLE_AGX) {
             bootcli_buf_append(line, sizeof(line),
                                "Apple AGX backend selezionato.");

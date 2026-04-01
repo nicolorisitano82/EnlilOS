@@ -73,6 +73,18 @@ static void agx_query_caps(gpu_caps_t *out)
     out->flags           = GPU_CAP_HW | GPU_CAP_COMPUTE | GPU_CAP_SCANOUT;
 }
 
+static void agx_query_scanout(gpu_scanout_info_t *out)
+{
+    if (!out) return;
+    out->width         = 800U;
+    out->height        = 600U;
+    out->refresh_hz    = 60U;
+    out->flags         = GPU_SCANOUT_ACTIVE | GPU_SCANOUT_VSYNC;
+    out->front_index   = 0U;
+    out->back_index    = 0U;
+    out->frame_counter = 0U;
+}
+
 /* ── Stub: delega a SW (driver MMIO in M5b-01) ──────────────────────── */
 
 static int agx_execute_cmdbuf(gpu_cmdbuf_entry_t *cb, gpu_fence_entry_t *fence)
@@ -90,6 +102,7 @@ static int agx_present(gpu_buf_entry_t *scanout, uint32_t x, uint32_t y,
 
 const gpu_backend_ops_t gpu_agx_backend = {
     .query_caps     = agx_query_caps,
+    .query_scanout  = agx_query_scanout,
     .execute_cmdbuf = agx_execute_cmdbuf,
     .present        = agx_present,
 };

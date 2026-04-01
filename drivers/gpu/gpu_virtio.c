@@ -17,15 +17,16 @@
  *   offset 512 – 645 : vring_used_t       — used ring (device→driver)
  *
  * Sequenza GPU (lazy, prima chiamata a present):
- *   RESOURCE_CREATE_2D  id=1, B8G8R8X8_UNORM, FB_WIDTH×FB_HEIGHT
- *   RESOURCE_ATTACH_BACKING  id=1, PA = fb_get_ptr()
- *   SET_SCANOUT  id=0, resource=1, rect (0,0,FB_WIDTH,FB_HEIGHT)
+ *   RESOURCE_CREATE_2D  id=1 e id=2, B8G8R8X8_UNORM, FB_WIDTH×FB_HEIGHT
+ *   RESOURCE_ATTACH_BACKING  per due scanout buffer CPU-writable
+ *   SET_SCANOUT  iniziale sul front buffer
  *
  * present():
- *   fb_flush() — DC CIVAC per rendere i pixel visibili in RAM
- *   TRANSFER_TO_HOST_2D — sincronizza dirty rect nel device
- *   RESOURCE_FLUSH — aggiorna il display
- *   Sincrono poll-bounded (max 2M iterazioni ≈ 2ms @ 1GHz).
+ *   copia la dirty rect dal framebuffer staging al back buffer
+ *   TRANSFER_TO_HOST_2D sul back buffer
+ *   SET_SCANOUT atomico sul back buffer
+ *   RESOURCE_FLUSH e swap front/back
+ *   Fence completata al prossimo tick vsync (60 Hz emulato).
  *
  * RT: vq_mem, vgpu_cmd, vgpu_resp sono statici (nessuna allocazione
  *     runtime). present() ha WCET noto = poll bound × ciclo_clock.
@@ -137,9 +138,19 @@ static void vgpu_pr_u32(uint32_t v)
 #define VGPU_RESP_OK_DISPLAY_INFO   0x1101U
 
 #define VGPU_FORMAT_B8G8R8X8_UNORM  2U   /* corrisponde al layout del FB */
-#define VGPU_RESOURCE_ID            1U
+#define VGPU_RESOURCE_FRONT_ID      1U
+#define VGPU_RESOURCE_BACK_ID       2U
 #define VGPU_SCANOUT_ID             0U
 #define VGPU_MAX_SCANOUTS           16U
+#define VGPU_VSYNC_NS               16666666ULL
+
+static uint32_t vgpu_scanbuf[2][FB_WIDTH * FB_HEIGHT] __attribute__((aligned(4096)));
+static uint32_t vgpu_scanout_id = VGPU_SCANOUT_ID;
+static uint32_t vgpu_front_idx;
+static uint32_t vgpu_host_w = FB_WIDTH;
+static uint32_t vgpu_host_h = FB_HEIGHT;
+static uint64_t vgpu_frame_counter;
+static uint64_t vgpu_next_vsync_ns;
 
 typedef struct {
     uint32_t type;
@@ -212,6 +223,11 @@ typedef struct {
 
 static int vq_send_expect(uint32_t req_size, uint32_t resp_size,
                           uint32_t expected_type);
+static int vgpu_create_resource(uint32_t resource_id, uint32_t *pixels);
+static int vgpu_set_scanout_resource(uint32_t resource_id);
+static int vgpu_transfer_and_flush(uint32_t resource_id,
+                                   uint32_t x, uint32_t y,
+                                   uint32_t w, uint32_t h);
 
 /*
  * vq_send() — invia req_size byte da vgpu_cmd[], riceve in vgpu_resp[].
@@ -350,6 +366,10 @@ static uint32_t virtio_gpu_pick_scanout(void)
         }
     }
 
+    vgpu_scanout_id = chosen;
+    vgpu_host_w = info->pmodes[chosen].r.w ? info->pmodes[chosen].r.w : FB_WIDTH;
+    vgpu_host_h = info->pmodes[chosen].r.h ? info->pmodes[chosen].r.h : FB_HEIGHT;
+
     uart_puts("[VGPU] Host scanout ");
     vgpu_pr_u32(chosen);
     uart_puts(found_enabled ? " attivo " : " fallback ");
@@ -455,52 +475,25 @@ static bool virtio_transport_init(void)
  */
 static void virtio_gpu_device_init(void)
 {
-    uint32_t *fb = fb_get_ptr();
-    if (!fb) return;
+    virtio_gpu_pick_scanout();
 
-    uint32_t scanout_id = virtio_gpu_pick_scanout();
-
-    /* RESOURCE_CREATE_2D */
-    vgpu_create_2d_t *c2d = (vgpu_create_2d_t *)(void *)vgpu_cmd;
-    vgpu_prepare_hdr(&c2d->hdr, VGPU_CMD_CREATE_2D);
-    c2d->resource_id = VGPU_RESOURCE_ID;
-    c2d->format      = VGPU_FORMAT_B8G8R8X8_UNORM;
-    c2d->width       = FB_WIDTH;
-    c2d->height      = FB_HEIGHT;
-    if (vq_send((uint32_t)sizeof(vgpu_create_2d_t),
-                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
-        uart_puts("[VGPU] WARN: create_2d fallito\n");
+    if (vgpu_create_resource(VGPU_RESOURCE_FRONT_ID, vgpu_scanbuf[0]) != 0)
         return;
-    }
-
-    /* RESOURCE_ATTACH_BACKING */
-    vgpu_attach_backing_t *ab =
-        (vgpu_attach_backing_t *)(void *)vgpu_cmd;
-    vgpu_prepare_hdr(&ab->hdr, VGPU_CMD_ATTACH_BACKING);
-    ab->resource_id = VGPU_RESOURCE_ID;
-    ab->nr_entries  = 1U;
-    ab->mem_addr    = (uint64_t)(uintptr_t)fb;
-    ab->mem_len     = FB_WIDTH * FB_HEIGHT * 4U;
-    ab->mem_pad     = 0U;
-    if (vq_send((uint32_t)sizeof(vgpu_attach_backing_t),
-                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
-        uart_puts("[VGPU] WARN: attach_backing fallito\n");
+    if (vgpu_create_resource(VGPU_RESOURCE_BACK_ID, vgpu_scanbuf[1]) != 0)
         return;
-    }
 
-    /* SET_SCANOUT */
-    vgpu_set_scanout_t *ss = (vgpu_set_scanout_t *)(void *)vgpu_cmd;
-    vgpu_prepare_hdr(&ss->hdr, VGPU_CMD_SET_SCANOUT);
-    ss->r           = (vgpu_rect_t){ 0U, 0U, FB_WIDTH, FB_HEIGHT };
-    ss->scanout_id  = scanout_id;
-    ss->resource_id = VGPU_RESOURCE_ID;
-    if (vq_send((uint32_t)sizeof(vgpu_set_scanout_t),
-                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
-        uart_puts("[VGPU] WARN: set_scanout fallito\n");
+    vgpu_front_idx = 0U;
+    vgpu_frame_counter = 0U;
+    vgpu_next_vsync_ns = 0U;
+
+    if (vgpu_set_scanout_resource(VGPU_RESOURCE_FRONT_ID) != 0)
         return;
-    }
+    if (vgpu_transfer_and_flush(VGPU_RESOURCE_FRONT_ID, 0U, 0U,
+                                FB_WIDTH, FB_HEIGHT) != 0)
+        return;
 
     vgpu_device = true;
+    uart_puts("[VGPU] Display engine: double buffer + page flip + vsync 60Hz\n");
     uart_puts("[VGPU] Scanout 800x600 BGRX attivo su display virtio\n");
 }
 
@@ -522,6 +515,21 @@ static void virtio_query_caps(gpu_caps_t *out)
     out->flags           = GPU_CAP_SCANOUT | GPU_CAP_HW;
 }
 
+static void virtio_query_scanout(gpu_scanout_info_t *out)
+{
+    if (!out) return;
+
+    out->width         = vgpu_host_w;
+    out->height        = vgpu_host_h;
+    out->refresh_hz    = 60U;
+    out->flags         = GPU_SCANOUT_ACTIVE |
+                         GPU_SCANOUT_DOUBLE_BUFFER |
+                         GPU_SCANOUT_VSYNC;
+    out->front_index   = vgpu_front_idx;
+    out->back_index    = vgpu_front_idx ^ 1U;
+    out->frame_counter = vgpu_frame_counter;
+}
+
 static int virtio_execute_cmdbuf(gpu_cmdbuf_entry_t *cb,
                                   gpu_fence_entry_t  *fence)
 {
@@ -540,6 +548,12 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
                            uint32_t           w, uint32_t h,
                            gpu_fence_entry_t *fence)
 {
+    uint32_t front_resource;
+    uint32_t back_idx;
+    uint32_t back_resource;
+    uint32_t *src;
+    uint32_t *dst;
+
     vgpu_ensure_device();
 
     if (!vgpu_device) {
@@ -547,37 +561,53 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
         return -1;
     }
 
-    /* 1. Flush D-cache: rende i pixel visibili in RAM fisica per il device */
-    fb_flush();
-
-    /* 2. TRANSFER_TO_HOST_2D — carica la dirty rect nel device */
-    vgpu_transfer_t *tr = (vgpu_transfer_t *)(void *)vgpu_cmd;
-    vgpu_prepare_hdr(&tr->hdr, VGPU_CMD_TRANSFER_TO_HOST);
-    tr->r           = (vgpu_rect_t){ x, y, w, h };
-    tr->offset      = ((uint64_t)y * FB_WIDTH + x) * 4ULL;
-    tr->resource_id = VGPU_RESOURCE_ID;
-    tr->padding     = 0U;
-    if (vq_send((uint32_t)sizeof(vgpu_transfer_t),
-                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+    if (!scanout || x >= FB_WIDTH || y >= FB_HEIGHT) {
         fence->state = GPU_FENCE_ERROR;
         return -1;
     }
 
-    /* 3. RESOURCE_FLUSH — aggiorna il display fisico */
-    vgpu_flush_t *fl = (vgpu_flush_t *)(void *)vgpu_cmd;
-    vgpu_prepare_hdr(&fl->hdr, VGPU_CMD_RESOURCE_FLUSH);
-    fl->r           = (vgpu_rect_t){ x, y, w, h };
-    fl->resource_id = VGPU_RESOURCE_ID;
-    fl->padding     = 0U;
-    if (vq_send((uint32_t)sizeof(vgpu_flush_t),
-                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+    if (x + w > FB_WIDTH)  w = FB_WIDTH - x;
+    if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
+
+    front_resource = (vgpu_front_idx == 0U) ? VGPU_RESOURCE_FRONT_ID
+                                            : VGPU_RESOURCE_BACK_ID;
+    back_idx = vgpu_front_idx ^ 1U;
+    back_resource = (back_idx == 0U) ? VGPU_RESOURCE_FRONT_ID
+                                     : VGPU_RESOURCE_BACK_ID;
+    src = (uint32_t *)(uintptr_t)scanout->phys;
+    dst = vgpu_scanbuf[back_idx];
+
+    for (uint32_t row = 0U; row < h; row++) {
+        uint32_t base = (y + row) * FB_WIDTH + x;
+        for (uint32_t col = 0U; col < w; col++)
+            dst[base + col] = src[base + col];
+    }
+
+    cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
+
+    if (vgpu_transfer_and_flush(back_resource, x, y, w, h) != 0) {
+        fence->state = GPU_FENCE_ERROR;
+        return -1;
+    }
+    if (vgpu_set_scanout_resource(back_resource) != 0) {
+        fence->state = GPU_FENCE_ERROR;
+        return -1;
+    }
+    if (vgpu_transfer_and_flush(back_resource, x, y, w, h) != 0) {
         fence->state = GPU_FENCE_ERROR;
         return -1;
     }
 
-    (void)scanout;
-    fence->done_ns = timer_now_ns();
-    fence->state   = GPU_FENCE_SIGNALED;
+    (void)front_resource;
+    vgpu_front_idx = back_idx;
+    vgpu_frame_counter++;
+    if (vgpu_next_vsync_ns == 0U || timer_now_ns() >= vgpu_next_vsync_ns) {
+        vgpu_next_vsync_ns = timer_now_ns() + VGPU_VSYNC_NS;
+    } else {
+        vgpu_next_vsync_ns += VGPU_VSYNC_NS;
+    }
+    fence->done_ns = vgpu_next_vsync_ns;
+    fence->state   = GPU_FENCE_PENDING;
     return 0;
 }
 
@@ -585,6 +615,7 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
 
 const gpu_backend_ops_t gpu_virtio_backend = {
     .query_caps     = virtio_query_caps,
+    .query_scanout  = virtio_query_scanout,
     .execute_cmdbuf = virtio_execute_cmdbuf,
     .present        = virtio_present,
 };
@@ -610,4 +641,83 @@ bool virtio_gpu_init(void)
     vgpu_transport = true;
     uart_puts("[VGPU] VirtIO-GPU: trasporto v2 pronto\n");
     return true;
+}
+
+static int vgpu_create_resource(uint32_t resource_id, uint32_t *pixels)
+{
+    vgpu_create_2d_t *c2d = (vgpu_create_2d_t *)(void *)vgpu_cmd;
+    vgpu_attach_backing_t *ab;
+
+    vgpu_prepare_hdr(&c2d->hdr, VGPU_CMD_CREATE_2D);
+    c2d->resource_id = resource_id;
+    c2d->format      = VGPU_FORMAT_B8G8R8X8_UNORM;
+    c2d->width       = FB_WIDTH;
+    c2d->height      = FB_HEIGHT;
+    if (vq_send((uint32_t)sizeof(vgpu_create_2d_t),
+                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+        uart_puts("[VGPU] WARN: create_2d fallito\n");
+        return -1;
+    }
+
+    ab = (vgpu_attach_backing_t *)(void *)vgpu_cmd;
+    vgpu_prepare_hdr(&ab->hdr, VGPU_CMD_ATTACH_BACKING);
+    ab->resource_id = resource_id;
+    ab->nr_entries  = 1U;
+    ab->mem_addr    = (uint64_t)(uintptr_t)pixels;
+    ab->mem_len     = FB_WIDTH * FB_HEIGHT * 4U;
+    ab->mem_pad     = 0U;
+    if (vq_send((uint32_t)sizeof(vgpu_attach_backing_t),
+                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+        uart_puts("[VGPU] WARN: attach_backing fallito\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int vgpu_set_scanout_resource(uint32_t resource_id)
+{
+    vgpu_set_scanout_t *ss = (vgpu_set_scanout_t *)(void *)vgpu_cmd;
+    vgpu_prepare_hdr(&ss->hdr, VGPU_CMD_SET_SCANOUT);
+    ss->r           = (vgpu_rect_t){ 0U, 0U, FB_WIDTH, FB_HEIGHT };
+    ss->scanout_id  = vgpu_scanout_id;
+    ss->resource_id = resource_id;
+    if (vq_send((uint32_t)sizeof(vgpu_set_scanout_t),
+                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+        uart_puts("[VGPU] WARN: set_scanout fallito\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int vgpu_transfer_and_flush(uint32_t resource_id,
+                                   uint32_t x, uint32_t y,
+                                   uint32_t w, uint32_t h)
+{
+    vgpu_transfer_t *tr = (vgpu_transfer_t *)(void *)vgpu_cmd;
+    vgpu_flush_t    *fl;
+
+    vgpu_prepare_hdr(&tr->hdr, VGPU_CMD_TRANSFER_TO_HOST);
+    tr->r           = (vgpu_rect_t){ x, y, w, h };
+    tr->offset      = ((uint64_t)y * FB_WIDTH + x) * 4ULL;
+    tr->resource_id = resource_id;
+    tr->padding     = 0U;
+    if (vq_send((uint32_t)sizeof(vgpu_transfer_t),
+                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+        uart_puts("[VGPU] WARN: transfer_to_host fallito\n");
+        return -1;
+    }
+
+    fl = (vgpu_flush_t *)(void *)vgpu_cmd;
+    vgpu_prepare_hdr(&fl->hdr, VGPU_CMD_RESOURCE_FLUSH);
+    fl->r           = (vgpu_rect_t){ x, y, w, h };
+    fl->resource_id = resource_id;
+    fl->padding     = 0U;
+    if (vq_send((uint32_t)sizeof(vgpu_flush_t),
+                (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
+        uart_puts("[VGPU] WARN: resource_flush fallito\n");
+        return -1;
+    }
+
+    return 0;
 }

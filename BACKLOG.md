@@ -659,7 +659,7 @@ gpu_ops_t {
 
 ---
 
-### ⬜ M5b-02 · Scanout & Display Engine
+### ✅ M5b-02 · Scanout & Display Engine
 **Priorità:** ALTA (dipende da M5b-01)
 
 La GPU gestisce il **display engine** — il kernel non mantiene mai un framebuffer
@@ -676,9 +676,15 @@ software accessibile dalla CPU in modalità operativa:
 - Passa il buffer al compositor via IPC con zero-copy (shared GPU memory handle)
 - Il compositor chiama `gpu_flush()` → scanout → display
 
+**Implementato ora:** backend `virtio-gpu` con doppio scanout buffer,
+page flip front/back, fence di present completata sul tick vsync emulato
+a 60 Hz, query dello stato scanout e boot console aggiornata con telemetria
+di display engine. Su backend SW/AGX il contratto scanout resta esposto con
+telemetria coerente, in attesa del display engine hardware reale.
+
 ---
 
-### ⬜ M5b-03 · GPU Memory Manager
+### ✅ M5b-03 · GPU Memory Manager
 **Priorità:** MEDIA (dipende da M5b-01)
 
 Gestione della VRAM / memoria GPU-mappata:
@@ -688,6 +694,12 @@ Gestione della VRAM / memoria GPU-mappata:
 - `gpu_free(gbo)`: O(1) — ritorno al pool
 - **IOMMU mapping** per DMA sicuro: la GPU vede solo le sue regioni autorizzate
 - Cache management: `gpu_flush_cache(gbo)` prima di submit command buffer
+
+**Implementato ora:** pool statici separati per scanout, general buffer e
+command/uniform buffer con allocazione a freelist, handle GBO O(1), IOVA
+identity-mapped come stub sicuro in attesa di IOMMU reale, `gpu_flush_cache()`
+esposta lato kernel e flush automatico dei buffer CPU-dirty prima di submit,
+dispatch compute e present.
 
 ---
 

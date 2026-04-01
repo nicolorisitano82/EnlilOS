@@ -22,9 +22,16 @@
 
 typedef struct {
     uint64_t phys;     /* indirizzo fisico == virtuale (identity map) */
+    uint64_t iova;     /* IOVA GPU; identity-mapped finche' manca IOMMU */
     uint32_t size;     /* dimensione in byte                          */
+    uint32_t capacity; /* capacita' reale dello slot preallocato      */
     uint32_t type;     /* GPU_BUF_*                                   */
+    uint16_t pool_kind;
+    uint16_t pool_slot;
+    uint16_t next_free;
     bool     mapped;   /* CPU mapping attivo                          */
+    bool     cpu_dirty;/* il buffer va flushato prima del DMA GPU     */
+    bool     pinned;   /* slot non-evictable / riservato              */
     bool     in_use;
 } gpu_buf_entry_t;
 
@@ -66,6 +73,7 @@ extern uint64_t           gpu_next_fence_id;   /* contatore monotono */
 
 typedef struct {
     void (*query_caps)        (gpu_caps_t *out);
+    void (*query_scanout)     (gpu_scanout_info_t *out);
     /*
      * execute_cmdbuf: esegue/sottomette il command buffer.
      * Imposta la fence come SIGNALED (SW) o sottomette all'HW.
@@ -74,8 +82,8 @@ typedef struct {
     int  (*execute_cmdbuf)    (gpu_cmdbuf_entry_t *cb, gpu_fence_entry_t *fence);
     /*
      * present: page-flip del buffer di scanout.
-     * Su SW: flush del framebuffer. Su HW: DCP page-flip.
-     * Segnala immediatamente la fence (vsync non ancora supportato).
+     * Su SW: flush/copia. Su HW: page-flip sul display engine.
+     * La fence puo' restare pending fino al prossimo vsync.
      */
     int  (*present)           (gpu_buf_entry_t *scanout, uint32_t x, uint32_t y,
                                uint32_t w, uint32_t h, gpu_fence_entry_t *fence);

@@ -15,6 +15,16 @@
 #include "timer.h"
 #include "uart.h"
 
+static gpu_scanout_info_t sw_scanout = {
+    .width        = FB_WIDTH,
+    .height       = FB_HEIGHT,
+    .refresh_hz   = 60U,
+    .flags        = GPU_SCANOUT_ACTIVE,
+    .front_index  = 0U,
+    .back_index   = 0U,
+    .frame_counter = 0U,
+};
+
 /* ── query_caps ─────────────────────────────────────────────────────── */
 
 static void sw_query_caps(gpu_caps_t *out)
@@ -25,6 +35,12 @@ static void sw_query_caps(gpu_caps_t *out)
     out->max_texture_dim = 4096;
     out->compute_units   = 0;
     out->flags           = GPU_CAP_SWFALLBACK | GPU_CAP_SCANOUT | GPU_CAP_COMPUTE;
+}
+
+static void sw_query_scanout(gpu_scanout_info_t *out)
+{
+    if (!out) return;
+    *out = sw_scanout;
 }
 
 /* ── execute_cmdbuf ─────────────────────────────────────────────────── */
@@ -86,6 +102,7 @@ static int sw_present(gpu_buf_entry_t *scanout, uint32_t x, uint32_t y,
         fb_flush();
     }
 
+    sw_scanout.frame_counter++;
     fence->done_ns = timer_now_ns();
     fence->state   = GPU_FENCE_SIGNALED;
     return 0;
@@ -95,6 +112,7 @@ static int sw_present(gpu_buf_entry_t *scanout, uint32_t x, uint32_t y,
 
 const gpu_backend_ops_t gpu_sw_backend = {
     .query_caps     = sw_query_caps,
+    .query_scanout  = sw_query_scanout,
     .execute_cmdbuf = sw_execute_cmdbuf,
     .present        = sw_present,
 };
