@@ -1,6 +1,6 @@
-# EnlilOS - Nicolo's Realtime Operating System
+# EnlilOS - Realtime Operating System
 
-Microkernel per AArch64 (ARMv8-A), stile GNU Hurd.
+Microkernel per AArch64 (ARMv8-A).
 
 ## Architettura
 
