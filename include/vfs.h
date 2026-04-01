@@ -40,6 +40,15 @@ typedef struct {
     int     (*readdir)(vfs_file_t *file, vfs_dirent_t *out);
     int     (*stat)(vfs_file_t *file, stat_t *out);
     int     (*close)(vfs_file_t *file);
+    int     (*mkdir)(const struct vfs_mount *mount, const char *relpath,
+                     uint32_t mode);
+    int     (*unlink)(const struct vfs_mount *mount, const char *relpath);
+    int     (*rename)(const struct vfs_mount *old_mount, const char *old_relpath,
+                      const struct vfs_mount *new_mount, const char *new_relpath);
+    int     (*fsync)(vfs_file_t *file);
+    int     (*truncate)(const struct vfs_mount *mount, const char *relpath,
+                        uint64_t size);
+    int     (*sync)(const struct vfs_mount *mount);
 } vfs_ops_t;
 
 typedef struct vfs_mount {
@@ -61,5 +70,11 @@ ssize_t vfs_write(vfs_file_t *file, const void *buf, size_t count);
 int     vfs_readdir(vfs_file_t *file, vfs_dirent_t *out);
 int     vfs_stat(vfs_file_t *file, stat_t *out);
 int     vfs_close(vfs_file_t *file);
+int     vfs_mkdir(const char *path, uint32_t mode);
+int     vfs_unlink(const char *path);
+int     vfs_rename(const char *old_path, const char *new_path);
+int     vfs_fsync(vfs_file_t *file);
+int     vfs_truncate(const char *path, uint64_t size);
+int     vfs_sync(void);
 
 #endif /* ENLILOS_VFS_H */

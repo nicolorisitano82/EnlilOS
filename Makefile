@@ -6,15 +6,26 @@
 # Toolchain - usa il cross-compiler AArch64
 # Su macOS: brew install aarch64-elf-gcc
 # Su Linux: apt install gcc-aarch64-linux-gnu
-CROSS   ?= aarch64-elf-
+ifeq ($(origin CROSS), undefined)
+ifeq ($(shell command -v aarch64-elf-gcc >/dev/null 2>&1; echo $$?),0)
+CROSS := aarch64-elf-
+else ifeq ($(shell command -v aarch64-none-elf-gcc >/dev/null 2>&1; echo $$?),0)
+CROSS := aarch64-none-elf-
+else ifeq ($(shell command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; echo $$?),0)
+CROSS := aarch64-linux-gnu-
+else
+CROSS := aarch64-elf-
+endif
+endif
 CC       = $(CROSS)gcc
-AS       = $(CROSS)gcc
-LD       = $(CROSS)ld
-OBJCOPY  = $(CROSS)objcopy
-OBJDUMP  = $(CROSS)objdump
+AS       = $(CC)
+LD       = $(shell $(CC) -print-prog-name=ld 2>/dev/null || printf '%s' "$(CROSS)ld")
+OBJCOPY  = $(shell $(CC) -print-prog-name=objcopy 2>/dev/null || printf '%s' "$(CROSS)objcopy")
+OBJDUMP  = $(shell $(CC) -print-prog-name=objdump 2>/dev/null || printf '%s' "$(CROSS)objdump")
 
-# Se non hai aarch64-elf-*, prova con aarch64-linux-gnu-
-# CROSS ?= aarch64-linux-gnu-
+# Override manuale:
+#   make CROSS=aarch64-none-elf-
+#   make CROSS=/path/to/bin/aarch64-none-elf-
 
 # Flags
 CFLAGS   = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
@@ -37,6 +48,7 @@ C_SRCS   = kernel/main.c \
            kernel/sched.c \
            kernel/tty.c \
            kernel/string.c \
+           kernel/selftest.c \
            kernel/ext4.c \
            kernel/vfs.c \
            kernel/syscall.c \
@@ -56,14 +68,16 @@ C_SRCS   = kernel/main.c \
 
 # Oggetti
 OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o)
+SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o)
 
 # Output
 KERNEL   = enlil.elf
 KERNEL_BIN = enlil.bin
+SELFTEST_KERNEL = enlil-selftest.elf
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -79,11 +93,20 @@ $(KERNEL): $(OBJS)
 $(KERNEL_BIN): $(KERNEL)
 	$(OBJCOPY) -O binary $< $@
 
+$(SELFTEST_KERNEL): $(SELFTEST_OBJS)
+	$(LD) $(LDFLAGS) -o $@ $^
+
 %.o: %.S
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+%.selftest.o: %.S
+	$(AS) $(ASFLAGS) -DENLILOS_SELFTEST=1 -c $< -o $@
+
+%.selftest.o: %.c
+	$(CC) $(CFLAGS) -DENLILOS_SELFTEST=1 -c $< -o $@
 
 # Esegui con QEMU (solo output seriale UART)
 run: $(KERNEL)
@@ -182,7 +205,7 @@ disk-fsck: disk.img
 		echo "  e2fsck non trovato"; \
 	fi
 
-# Esegui con VirtIO-GPU + VirtIO-Block (M5-03 read-only ext4)
+# Esegui con VirtIO-GPU + VirtIO-Block (M5-03 / M5-04 ext4 rw-core)
 run-blk: $(KERNEL) disk-ready
 	qemu-system-aarch64 \
 		-machine virt \
@@ -200,6 +223,25 @@ run-blk: $(KERNEL) disk-ready
 		-monitor none \
 		-serial stdio \
 		-kernel $(KERNEL)
+
+test-build: $(SELFTEST_KERNEL)
+	@echo "Selftest kernel pronto: $(SELFTEST_KERNEL)"
+
+test: $(SELFTEST_KERNEL) disk-ready
+	qemu-system-aarch64 \
+		-machine virt \
+		-accel tcg \
+		-cpu cortex-a72 \
+		-m 512M \
+		-vga none \
+		-global virtio-mmio.force-legacy=false \
+		-device virtio-gpu-device \
+		-drive format=raw,file=disk.img,if=none,id=blk0 \
+		-device virtio-blk-device,drive=blk0 \
+		-display none \
+		-monitor none \
+		-serial stdio \
+		-kernel $(SELFTEST_KERNEL)
 
 # Debug con GDB
 debug: $(KERNEL)
@@ -219,5 +261,5 @@ dump: $(KERNEL)
 	$(OBJDUMP) -d $< | head -100
 
 clean:
-	rm -f $(OBJS) $(KERNEL) $(KERNEL_BIN)
+	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL)
 	@echo "Clean completato."

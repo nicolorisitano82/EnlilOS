@@ -786,6 +786,15 @@ static const uint8_t *font_ext_lookup(uint32_t cp)
     return font_ext[FONT_EXT_COUNT - 1U].glyph;
 }
 
+const uint8_t *fb_font_lookup_glyph(uint32_t cp)
+{
+    if (cp >= 0x20U && cp <= 0x7EU)
+        return font_8x16[(int)(cp - 0x20U)];
+    if (cp == '\t' || cp == '\n' || cp == '\r')
+        return font_8x16[0];
+    return font_ext_lookup(cp);
+}
+
 /*
  * fb_draw_char_utf8 — disegna un singolo codepoint Unicode.
  *
@@ -797,13 +806,10 @@ void fb_draw_char_utf8(uint32_t x, uint32_t y, uint32_t cp,
 {
     const uint8_t *glyph;
 
-    if (cp >= 0x20U && cp <= 0x7EU) {
-        glyph = font_8x16[(int)(cp - 0x20U)];
-    } else if (cp == '\t' || cp == '\n' || cp == '\r') {
+    if (cp == '\t' || cp == '\n' || cp == '\r') {
         return;
-    } else {
-        glyph = font_ext_lookup(cp);
     }
+    glyph = fb_font_lookup_glyph(cp);
 
     for (uint32_t row = 0; row < 16; row++) {
         uint8_t bits = glyph[row];

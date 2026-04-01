@@ -81,5 +81,6 @@ int blk_read_sync(uint64_t sector, void *buf, uint32_t count);
  * Ritorna BLK_OK (0) o un codice BLK_ERR_*.
  */
 int blk_write_sync(uint64_t sector, const void *buf, uint32_t count);
+int blk_flush_sync(void);
 
 #endif /* ENLILOS_BLK_H */

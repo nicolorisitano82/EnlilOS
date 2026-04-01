@@ -1,8 +1,9 @@
 /*
- * EnlilOS Microkernel - ext4 read-only backend (M5-03)
+ * EnlilOS Microkernel - ext4 backend core (M5-03 / M5-04)
  *
  * Backend singleton per il primo mount ext4 su virtio-blk.
- * Espone un'interfaccia VFS read-only: mount, open, read, readdir, stat.
+ * Espone un'interfaccia VFS con read path completo e write core per
+ * file regolari gia' allocati: write, truncate e sync esplicito.
  */
 
 #ifndef ENLILOS_EXT4_H
@@ -15,6 +16,9 @@ void            ext4_unmount(void);
 int             ext4_is_mounted(void);
 const char     *ext4_status(void);
 const char     *ext4_label(void);
+int             ext4_sync(void);
+int             ext4_has_dirty(void);
+int             ext4_service_writeback(uint64_t min_age_ms);
 const vfs_ops_t *ext4_vfs_ops(void);
 
 #endif /* ENLILOS_EXT4_H */

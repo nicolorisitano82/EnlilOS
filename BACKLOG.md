@@ -590,17 +590,61 @@ Tool immagine host iniziali:
 
 ---
 
-### ⬜ M5-04 · ext4 — Write Path & Sync Policy
+### ✅ M5-04 · ext4 — Write Path & Sync Policy
 **Priorità:** MEDIA
 
+**Stato:** COMPLETATA (`rw-full` core)
+
 - `write`, `mkdir`, `unlink`, `rename`, `truncate`
-- Journal replay al mount e supporto writeback del journal
 - Politica esplicita di `sync` / `fsync` per confinare la latenza nei punti noti
 - Flush su deadline-safe server thread, mai nel task hard-RT chiamante
 - Policy di mount per dev/prod:
   dev → `data=ordered,nodelalloc,commit=1,max_batch_time=0`
-  critical → valutare `data=journal`
+  critical → policy piu' conservativa o journal dedicato
+
+**Implementato ora:** backend `ext4` `rw-full` per il profilo EnlilOS:
+`write`, `O_TRUNC`, `O_APPEND`, `O_CREAT`, `mkdir`, `unlink`, `rename`,
+`truncate`, `fsync`, `sync`, allocazione/free di blocchi e inode, checksum
+metadata (`inode`, bitmap, group descriptor, directory tail) e flush task
+`ext4-flush` a bassa priorita' per writeback periodico bounded.
+La boot console espone i comandi `write`, `append`, `mkdir`, `rm`, `mv`,
+`fsync`, `truncate` e `sync`, e la suite `selftest` ora esercita davvero
+il path `ext4-core` end-to-end su QEMU.
+
+Stato dettagliato:
+- [x] `write` su file regolari ext4 gia' esistenti
+- [x] `O_CREAT` per file regolari
+- [x] `O_TRUNC` e `O_APPEND`
+- [x] `mkdir`
+- [x] `unlink`
+- [x] `rename`
+- [x] `truncate`
+- [x] `fsync` per-file
+- [x] `sync` esplicito lato VFS
+- [x] cache dirty bounded di blocchi e inode
+- [x] allocazione di nuovi blocchi/inode
+- [x] flush su task dedicato deadline-safe (`ext4-flush`)
+- [x] smoke test/kernel self-test del profilo `ext4-core`
+
+---
+
+### ⬜ M5-04b · ext4 — Journal & Crash Consistency
+**Priorità:** MEDIA
+
+**Stato:** APERTA
+
+- Journal replay al mount e supporto writeback del journal (`jbd2`-like o
+  profilo compatibile limitato)
+- Politica di recovery dopo reset improvviso e verifica integrita' al boot
 - Test crash-consistency usando power-cut simulato sull'immagine raw
+- Valutazione profilo `data=journal` per deployment ad alta affidabilita'
+
+Stato dettagliato:
+- [ ] journal replay al mount
+- [ ] writeback del journal
+- [ ] recovery path con mount sporco
+- [ ] test con power-cut simulato
+- [ ] documentazione policy dev/prod con vincoli di latenza
 
 ---
 
@@ -703,7 +747,7 @@ dispatch compute e present.
 
 ---
 
-### ⬜ M5b-04 · 2D Rendering Accelerato
+### ✅ M5b-04 · 2D Rendering Accelerato
 **Priorità:** MEDIA (dipende da M5b-02)
 
 Operazioni 2D eseguite sulla GPU, non sulla CPU:
@@ -715,6 +759,12 @@ Operazioni 2D eseguite sulla GPU, non sulla CPU:
 
 Tutti i comandi vengono accodati in un **command ring** e sottomessi in batch
 per massimizzare il throughput GPU e minimizzare il numero di context switch GPU.
+
+**Implementato ora:** renderer 2D batch con command ring statico,
+target scanout GPU dedicato, primitive `gpu_fill_rect()`, `gpu_blit()`,
+`gpu_draw_glyph()`, `gpu_draw_string()` e `gpu_alpha_blend()`. La boot
+graphics console usa questo path per pannelli, bordi, testo e cursore
+alpha-blended, poi presenta il frame via display engine VirtIO-GPU.
 
 ---
 

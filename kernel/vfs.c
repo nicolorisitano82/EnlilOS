@@ -544,8 +544,8 @@ static void build_dynamic_texts(void)
     p = buf_puts(p, "/dev     -> devfs\n");
     if (blk_is_ready()) {
         if (ext4_is_mounted()) {
-            p = buf_puts(p, "/data    -> ext4 ro su virtio-blk\n");
-            p = buf_puts(p, "/sysroot -> ext4 ro su virtio-blk\n");
+            p = buf_puts(p, "/data    -> ext4 rw-core su virtio-blk\n");
+            p = buf_puts(p, "/sysroot -> ext4 rw-core su virtio-blk\n");
         } else {
             p = buf_puts(p, "/data    -> ext4 mount fallito\n");
             p = buf_puts(p, "/sysroot -> ext4 mount fallito\n");
@@ -576,9 +576,9 @@ static void build_mount_table(void)
     if (blk_is_ready()) {
         if (ext4_rc == 0 && ext4_is_mounted()) {
             mount_register("/data", "data-root", "ext4",
-                           true, ext4_vfs_ops(), 0U);
+                           false, ext4_vfs_ops(), 0U);
             mount_register("/sysroot", "sysroot-root", "ext4",
-                           true, ext4_vfs_ops(), 0U);
+                           false, ext4_vfs_ops(), 0U);
         } else {
             mount_register("/data", "data-root", "ext4-error",
                            true, &placefs_ops, (uintptr_t)ext4_status());
@@ -656,4 +656,93 @@ int vfs_close(vfs_file_t *file)
     if (!file || !file->mount || !file->mount->ops || !file->mount->ops->close)
         return -EBADF;
     return file->mount->ops->close(file);
+}
+
+int vfs_mkdir(const char *path, uint32_t mode)
+{
+    const vfs_mount_t *mount;
+
+    if (!path) return -EFAULT;
+    if (path[0] != '/') return -ENOENT;
+
+    mount = find_mount(path);
+    if (!mount || !mount->ops || !mount->ops->mkdir)
+        return mount && mount->readonly ? -EROFS : -ENOSYS;
+
+    return mount->ops->mkdir(mount, relpath_from_mount(mount, path), mode);
+}
+
+int vfs_unlink(const char *path)
+{
+    const vfs_mount_t *mount;
+
+    if (!path) return -EFAULT;
+    if (path[0] != '/') return -ENOENT;
+
+    mount = find_mount(path);
+    if (!mount || !mount->ops || !mount->ops->unlink)
+        return mount && mount->readonly ? -EROFS : -ENOSYS;
+
+    return mount->ops->unlink(mount, relpath_from_mount(mount, path));
+}
+
+int vfs_rename(const char *old_path, const char *new_path)
+{
+    const vfs_mount_t *old_mount;
+    const vfs_mount_t *new_mount;
+
+    if (!old_path || !new_path) return -EFAULT;
+    if (old_path[0] != '/' || new_path[0] != '/') return -ENOENT;
+
+    old_mount = find_mount(old_path);
+    new_mount = find_mount(new_path);
+    if (!old_mount || !new_mount)
+        return -ENOENT;
+    if (old_mount != new_mount)
+        return -EXDEV;
+    if (!old_mount->ops || !old_mount->ops->rename)
+        return old_mount->readonly ? -EROFS : -ENOSYS;
+
+    return old_mount->ops->rename(old_mount, relpath_from_mount(old_mount, old_path),
+                                  new_mount, relpath_from_mount(new_mount, new_path));
+}
+
+int vfs_fsync(vfs_file_t *file)
+{
+    if (!file || !file->mount || !file->mount->ops || !file->mount->ops->fsync)
+        return -EBADF;
+    return file->mount->ops->fsync(file);
+}
+
+int vfs_truncate(const char *path, uint64_t size)
+{
+    const vfs_mount_t *mount;
+
+    if (!path) return -EFAULT;
+    if (path[0] != '/') return -ENOENT;
+
+    mount = find_mount(path);
+    if (!mount || !mount->ops || !mount->ops->truncate)
+        return mount && mount->readonly ? -EROFS : -ENOSYS;
+
+    return mount->ops->truncate(mount, relpath_from_mount(mount, path), size);
+}
+
+int vfs_sync(void)
+{
+    int first_err = 0;
+
+    for (size_t i = 0; i < vfs_mount_count; i++) {
+        const vfs_mount_t *mount = &vfs_mounts[i];
+        int rc;
+
+        if (!mount->active || !mount->ops || !mount->ops->sync)
+            continue;
+
+        rc = mount->ops->sync(mount);
+        if (rc < 0 && first_err == 0)
+            first_err = rc;
+    }
+
+    return first_err;
 }

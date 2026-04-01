@@ -454,3 +454,16 @@ int blk_write_sync(uint64_t sector, const void *buf, uint32_t count)
 
     return bvq_poll_complete(d0);
 }
+
+int blk_flush_sync(void)
+{
+    static uint8_t dummy;
+    uint16_t d0;
+
+    if (!bvq_base) return BLK_ERR_NOT_READY;
+
+    if (bvq_submit(VIRTIO_BLK_T_FLUSH, 0ULL, &dummy, 1U, &d0) == 0xFFFFU)
+        return BLK_ERR_BUSY;
+
+    return bvq_poll_complete(d0);
+}

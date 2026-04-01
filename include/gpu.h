@@ -156,4 +156,23 @@ void gpu_get_scanout_info(gpu_scanout_info_t *out);
  */
 int gpu_flush_cache(gpu_buf_handle_t handle);
 
+/*
+ * Renderer 2D batched (M5b-04).
+ *
+ * Le primitive vengono accodate in un command ring statico e applicate in
+ * batch al prossimo gpu_present_fullscreen(). In modalita' grafica il target
+ * e' un buffer di scanout GPU dedicato; altrove il fallback resta il FB CPU.
+ */
+int gpu_begin_2d_frame(uint32_t clear_color);
+int gpu_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
+int gpu_blit(uint32_t dst_x, uint32_t dst_y,
+             uint32_t src_x, uint32_t src_y,
+             uint32_t w, uint32_t h);
+int gpu_draw_glyph(uint32_t x, uint32_t y, uint32_t codepoint,
+                   uint32_t fg, uint32_t bg, bool transparent_bg);
+int gpu_draw_string(uint32_t x, uint32_t y, const char *utf8_str,
+                    uint32_t fg, uint32_t bg, bool transparent_bg);
+int gpu_alpha_blend(uint32_t x, uint32_t y, const uint32_t *src,
+                    uint32_t w, uint32_t h, uint8_t global_alpha);
+
 #endif /* ENLILOS_GPU_H */

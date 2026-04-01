@@ -49,11 +49,16 @@
 #define EFAULT              14
 #define EBADF               9
 #define EBUSY               16
+#define EEXIST              17
+#define EXDEV               18
 #define ENOTDIR             20
 #define EISDIR              21
 #define EINVAL              22
 #define ENFILE              23
+#define ENOSPC              28
 #define EROFS               30
+#define ENAMETOOLONG        36
+#define ENOTEMPTY           39
 #define EIO                 5
 #define ENOSYS              38
 
@@ -107,10 +112,13 @@ typedef struct {
 
 #define S_IRUSR     0400U
 #define S_IWUSR     0200U
+#define S_IXUSR     0100U
 #define S_IRGRP     0040U
 #define S_IWGRP     0020U
+#define S_IXGRP     0010U
 #define S_IROTH     0004U
 #define S_IWOTH     0002U
+#define S_IXOTH     0001U
 
 typedef struct {
     uint32_t st_mode;

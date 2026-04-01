@@ -35,6 +35,13 @@ void fb_draw_string_utf8(uint32_t x, uint32_t y, const char *utf8_str,
 void fb_draw_string_centered_utf8(const char *utf8_str, uint32_t fg, uint32_t bg);
 
 /*
+ * fb_font_lookup_glyph() — ritorna il bitmap 8x16 per un codepoint Unicode.
+ * ASCII e Latin-1 usano il font del boot; sconosciuto -> U+FFFD.
+ * Il puntatore resta valido per tutta la vita del kernel.
+ */
+const uint8_t *fb_font_lookup_glyph(uint32_t codepoint);
+
+/*
  * fb_flush() — forza il write-back della D-cache per l'intero framebuffer.
  * Chiamare dopo ogni sessione di disegno per rendere visibile il contenuto
  * a QEMU (che legge la RAM fisica, non la cache della CPU).
