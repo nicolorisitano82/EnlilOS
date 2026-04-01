@@ -1,14 +1,17 @@
 /*
- * EnlilOS Microkernel - ELF64 static loader (M6-01)
+ * EnlilOS Microkernel - ELF64 loader (M6-01 / M6-03)
  *
- * Loader minimale per ELF64 AArch64 statici:
+ * Loader minimale per ELF64 AArch64:
  *   - valida header e program header
  *   - mappa i PT_LOAD in uno mm_space dedicato
  *   - prepara stack ABI (argc/argv/envp/auxv)
  *   - pre-faulta segmenti e stack
+ *   - da M6-03 supporta anche PT_INTERP + DT_NEEDED con linker dinamico
+ *     kernel-side per PIE/ET_DYN e librerie condivise semplici
  *
- * M6-01 NON espone ancora execve(): il loader e' usato internamente da
- * selftest e boot console. M6-02 colleghera' questa API alla syscall.
+ * M6-01 NON esponeva ancora execve(): il loader era usato internamente da
+ * selftest e boot console. M6-02 lo collega a execve(), mentre M6-03
+ * aggiunge il profilo dinamico minimo per demo/shared object user-space.
  */
 
 #ifndef ENLILOS_ELF_LOADER_H
@@ -22,6 +25,7 @@
 #define ELF_AT_PHDR     3U
 #define ELF_AT_PHENT    4U
 #define ELF_AT_PHNUM    5U
+#define ELF_AT_BASE     7U
 #define ELF_AT_PAGESZ   6U
 #define ELF_AT_ENTRY    9U
 #define ELF_AT_HWCAP    16U

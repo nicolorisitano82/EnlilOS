@@ -70,10 +70,26 @@ C_SRCS   = kernel/main.c \
            drivers/blk.c \
            drivers/framebuffer.c
 
-USER_SRCS      = user/demo.S user/execve_demo.S user/execve_target.S
-USER_OBJS      = $(USER_SRCS:.S=.o)
-USER_ELFS      = $(USER_SRCS:.S=.elf)
-USER_EMBEDOBJS = $(USER_SRCS:.S=.embed.o)
+USER_STATIC_SRCS      = user/demo.S user/execve_demo.S user/execve_target.S
+USER_STATIC_OBJS      = $(USER_STATIC_SRCS:.S=.o)
+USER_STATIC_ELFS      = $(USER_STATIC_SRCS:.S=.elf)
+USER_STATIC_EMBEDOBJS = $(USER_STATIC_SRCS:.S=.embed.o)
+USER_DYNAPP_SRCS      = user/dynamic_demo.c
+USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
+USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
+USER_DYNAPP_EMBEDOBJS = $(USER_DYNAPP_ELFS:.elf=.embed.o)
+USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c
+USER_SHARED_PICOBJS   = $(USER_SHARED_SRCS:.c=.pic.o)
+USER_SHARED_LIBS      = $(USER_SHARED_SRCS:.c=.so)
+USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
+USER_OBJS             = $(USER_STATIC_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
+USER_ELFS             = $(USER_STATIC_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
+USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
+
+USER_CFLAGS      = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
+                   -fno-builtin -mcpu=cortex-a72 -Iinclude
+USER_PIC_CFLAGS  = $(USER_CFLAGS) -fPIC
+USER_PIE_CFLAGS  = $(USER_CFLAGS) -fPIE
 
 # Oggetti
 OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(USER_EMBEDOBJS)
@@ -105,10 +121,26 @@ $(KERNEL_BIN): $(KERNEL)
 $(SELFTEST_KERNEL): $(SELFTEST_OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^
 
-%.elf: %.o user/user.ld
+user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
+user/%.pic.o: user/%.c
+	$(CC) $(USER_PIC_CFLAGS) -c $< -o $@
+
+user/%.pie.o: user/%.c
+	$(CC) $(USER_PIE_CFLAGS) -c $< -o $@
+
+user/%.so: user/%.pic.o user/user_shared.ld
+	$(CC) -shared -nostdlib -Wl,-T,user/user_shared.ld -o $@ $<
+
+user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
+	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
+	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
+
 %.embed.o: %.elf
+	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
+
+%.so.embed.o: %.so
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@
 
 %.o: %.S

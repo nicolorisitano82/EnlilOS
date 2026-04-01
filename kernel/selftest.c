@@ -317,6 +317,31 @@ static int selftest_case_execve(void)
     return -1;
 }
 
+static int selftest_case_dynelf(void)
+{
+    static const char case_name[] = "elf-dynamic";
+    uint32_t pid = 0U;
+    uint64_t deadline;
+    sched_tcb_t *task;
+    int rc;
+
+    rc = elf64_spawn_path("/DYNDEMO.ELF", "/DYNDEMO.ELF", PRIO_KERNEL, &pid);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, pid != 0U, "pid dynamic demo nullo");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task dynamic ELF non trovata");
+        if (task->state == TCB_STATE_ZOMBIE)
+            return 0;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, 0, "timeout attesa dynamic ELF");
+    return -1;
+}
+
 int selftest_run_all(void)
 {
     static const selftest_case_t cases[] = {
@@ -325,6 +350,7 @@ int selftest_run_all(void)
         { "ext4-core",  selftest_case_ext4   },
         { "elf-loader", selftest_case_elf    },
         { "execve",     selftest_case_execve },
+        { "elf-dynamic", selftest_case_dynelf },
         { "gpu-stack",  gpu_selftest_run     },
     };
     uint32_t total = 0U;

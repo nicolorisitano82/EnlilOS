@@ -23,6 +23,9 @@
 #define ROOT_NODE_DEMO_ELF  4U
 #define ROOT_NODE_EXEC1_ELF 5U
 #define ROOT_NODE_EXEC2_ELF 6U
+#define ROOT_NODE_DYN_ELF   7U
+#define ROOT_NODE_LIBDYN    8U
+#define ROOT_NODE_LD_ENLIL  9U
 
 #define DEV_NODE_DIR        1U
 #define DEV_NODE_CONSOLE    2U
@@ -46,6 +49,12 @@ extern const uint8_t _binary_user_execve_demo_elf_start[];
 extern const uint8_t _binary_user_execve_demo_elf_end[];
 extern const uint8_t _binary_user_execve_target_elf_start[];
 extern const uint8_t _binary_user_execve_target_elf_end[];
+extern const uint8_t _binary_user_dynamic_demo_elf_start[];
+extern const uint8_t _binary_user_dynamic_demo_elf_end[];
+extern const uint8_t _binary_user_libdyn_so_start[];
+extern const uint8_t _binary_user_libdyn_so_end[];
+extern const uint8_t _binary_user_ld_enlil_so_start[];
+extern const uint8_t _binary_user_ld_enlil_so_end[];
 
 static char vfs_root_boot_txt[256];
 static vfs_mount_t vfs_mounts[VFS_MAX_MOUNTS];
@@ -231,6 +240,27 @@ static int rootfs_open(const vfs_mount_t *mount, const char *relpath,
                                 _binary_user_execve_target_elf_start));
         return 0;
     }
+    if (vfs_streq(name, "DYNDEMO.ELF")) {
+        file_bind_blob(out, mount, ROOT_NODE_DYN_ELF, flags,
+                       _binary_user_dynamic_demo_elf_start,
+                       (size_t)(_binary_user_dynamic_demo_elf_end -
+                                _binary_user_dynamic_demo_elf_start));
+        return 0;
+    }
+    if (vfs_streq(name, "libdyn.so")) {
+        file_bind_blob(out, mount, ROOT_NODE_LIBDYN, flags,
+                       _binary_user_libdyn_so_start,
+                       (size_t)(_binary_user_libdyn_so_end -
+                                _binary_user_libdyn_so_start));
+        return 0;
+    }
+    if (vfs_streq(name, "LD-ENLIL.SO")) {
+        file_bind_blob(out, mount, ROOT_NODE_LD_ENLIL, flags,
+                       _binary_user_ld_enlil_so_start,
+                       (size_t)(_binary_user_ld_enlil_so_end -
+                                _binary_user_ld_enlil_so_start));
+        return 0;
+    }
 
     return -ENOENT;
 }
@@ -275,11 +305,20 @@ static int rootfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
             return dirent_fill(out, "EXEC2.ELF",
                                S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
         case 6:
+            return dirent_fill(out, "DYNDEMO.ELF",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 7:
+            return dirent_fill(out, "libdyn.so",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 8:
+            return dirent_fill(out, "LD-ENLIL.SO",
+                               S_IFREG | S_IRUSR | S_IRGRP | S_IROTH);
+        case 9:
             if (mount_is_active("/data"))
                 return dirent_fill(out, "data",
                                    S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);
             break;
-        case 7:
+        case 10:
             if (mount_is_active("/sysroot"))
                 return dirent_fill(out, "sysroot",
                                    S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH);

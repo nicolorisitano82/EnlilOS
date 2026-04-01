@@ -872,7 +872,8 @@ static void bootcli_execute_command(void)
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
-        bootcli_push_line("runelf P  carica e lancia un ELF64 statico da VFS");
+        bootcli_push_line("dyndemo   lancia un PIE con PT_INTERP + DT_NEEDED");
+        bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
@@ -995,6 +996,16 @@ static void bootcli_execute_command(void)
         } else {
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "execve demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "dyndemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/DYNDEMO.ELF", "/DYNDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "dynamic ELF lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
@@ -1168,7 +1179,7 @@ static void bootcli_init(void)
     bootcli_push_line("Digita 'help' e premi Invio per testare la tastiera.");
     bootcli_push_line("Prova anche: fs, ls /data, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
-    bootcli_push_line("M6-02: elfdemo, execdemo e runelf PATH per ELF64/execve a EL0.");
+    bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)

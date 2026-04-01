@@ -838,9 +838,33 @@ Stato dettagliato:
 
 ---
 
-### ⬜ M6-03 · ELF Dynamic Loader
+### ✅ M6-03 · ELF Dynamic Loader
 **Priorità:** BASSA
 Solo dopo static loader funzionante e testato.
+
+**Stato:** COMPLETATA
+
+Profilo dinamico minimale ma reale per AArch64:
+- parsing `PT_INTERP`
+- load di `ld-enlil.so` e delle dipendenze `DT_NEEDED` via VFS bootstrap
+- supporto `ET_DYN` / PIE con load-bias dinamico
+- relocation `RELA` kernel-side per `R_AARCH64_RELATIVE`,
+  `R_AARCH64_GLOB_DAT` e `R_AARCH64_JUMP_SLOT`
+- risoluzione simboli tra executable e shared object nel medesimo `mm_space`
+
+Validazione:
+- rootfs bootstrap espone `DYNDEMO.ELF`, `libdyn.so`, `LD-ENLIL.SO`
+- boot console: comando `dyndemo`
+- self-test runtime su QEMU: caso `elf-dynamic`
+
+Stato dettagliato:
+- [x] parsing `PT_INTERP`
+- [x] parsing `DT_NEEDED`
+- [x] load shared object via VFS bootstrap
+- [x] supporto `ET_DYN` / PIE con load bias dinamico
+- [x] relocation `RELA` essenziali AArch64 (`RELATIVE`, `GLOB_DAT`, `JUMP_SLOT`)
+- [x] demo user-space dinamica con `.so` separata
+- [x] self-test end-to-end su QEMU
 
 ---
 
