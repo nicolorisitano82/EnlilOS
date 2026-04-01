@@ -36,6 +36,7 @@ C_SRCS   = kernel/main.c \
            kernel/timer.c \
            kernel/sched.c \
            kernel/tty.c \
+           kernel/string.c \
            kernel/ext4.c \
            kernel/vfs.c \
            kernel/syscall.c \
@@ -62,7 +63,7 @@ KERNEL_BIN = enlil.bin
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -147,6 +148,33 @@ disk.img:
 		echo "  disk.img gia' presente"; \
 	fi
 
+# Verifica che disk.img sia davvero ext4. Se non lo e', prova a formattarla.
+disk-ready:
+	@if [ ! -f disk.img ]; then \
+		$(MAKE) disk.img; \
+	else \
+		magic=$$(dd if=disk.img bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n'); \
+		if [ "$$magic" = "53ef" ]; then \
+			echo "  disk.img valida: superblock ext4 trovato"; \
+		else \
+			echo "  disk.img presente ma non ext4: provo a riformattarla"; \
+			if command -v mkfs.ext4 >/dev/null 2>&1; then \
+				mkfs.ext4 -F -q -b 4096 disk.img >/dev/null 2>&1; \
+				echo "  disk.img riformattata ext4 (64MB, 4KB)"; \
+			elif command -v mke2fs >/dev/null 2>&1; then \
+				mke2fs -t ext4 -F -q -b 4096 disk.img >/dev/null 2>&1; \
+				echo "  disk.img riformattata ext4 (64MB, 4KB)"; \
+			else \
+				echo "  ERRORE: disk.img non e' ext4 e mkfs.ext4/mke2fs non e' disponibile"; \
+				exit 1; \
+			fi; \
+		fi; \
+	fi
+
+disk-reset:
+	@rm -f disk.img
+	@$(MAKE) disk.img
+
 disk-fsck: disk.img
 	@if command -v e2fsck >/dev/null 2>&1; then \
 		e2fsck -f disk.img; \
@@ -155,7 +183,7 @@ disk-fsck: disk.img
 	fi
 
 # Esegui con VirtIO-GPU + VirtIO-Block (M5-03 read-only ext4)
-run-blk: $(KERNEL) disk.img
+run-blk: $(KERNEL) disk-ready
 	qemu-system-aarch64 \
 		-machine virt \
 		-accel tcg \
