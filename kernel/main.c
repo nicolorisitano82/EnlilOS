@@ -23,6 +23,7 @@
 #include "blk.h"
 #include "ane.h"
 #include "gpu.h"
+#include "ext4.h"
 #include "vfs.h"
 
 /* Banner ASCII art per la console seriale */
@@ -292,6 +293,167 @@ static void bootcli_push_current_input(void)
     bootcli_push_line(line);
 }
 
+static const char *bootcli_errno_name(int rc)
+{
+    int err = (rc < 0) ? -rc : rc;
+
+    switch (err) {
+    case ENOENT: return "ENOENT";
+    case EIO:    return "EIO";
+    case EINVAL: return "EINVAL";
+    case EROFS:  return "EROFS";
+    case ENOTDIR:return "ENOTDIR";
+    case EISDIR: return "EISDIR";
+    case EBADF:  return "EBADF";
+    default:     return "ERR";
+    }
+}
+
+static void bootcli_push_error(const char *prefix, int rc)
+{
+    char line[BOOTCLI_LINE_MAX + 1];
+
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), prefix);
+    bootcli_buf_append(line, sizeof(line), ": ");
+    bootcli_buf_append(line, sizeof(line), bootcli_errno_name(rc));
+    bootcli_push_line(line);
+}
+
+static void bootcli_cmd_fs(void)
+{
+    char line[BOOTCLI_LINE_MAX + 1];
+
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), "FS: ");
+    bootcli_buf_append(line, sizeof(line), ext4_status());
+    bootcli_push_line(line);
+}
+
+static void bootcli_cmd_ls(const char *path)
+{
+    vfs_file_t   file;
+    vfs_dirent_t ent;
+    stat_t       st;
+    char         line[BOOTCLI_LINE_MAX + 1];
+    uint32_t     shown = 0U;
+    int          rc;
+
+    rc = vfs_open(path, O_RDONLY, &file);
+    if (rc < 0) {
+        bootcli_push_error("ls open", rc);
+        return;
+    }
+
+    rc = vfs_stat(&file, &st);
+    if (rc < 0) {
+        (void)vfs_close(&file);
+        bootcli_push_error("ls stat", rc);
+        return;
+    }
+    if ((st.st_mode & S_IFMT) != S_IFDIR) {
+        (void)vfs_close(&file);
+        bootcli_push_line("ls: il path non e' una directory.");
+        return;
+    }
+
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), "ls ");
+    bootcli_buf_append(line, sizeof(line), path);
+    bootcli_push_line(line);
+
+    while ((rc = vfs_readdir(&file, &ent)) == 0) {
+        line[0] = '\0';
+        bootcli_buf_append(line, sizeof(line), "  ");
+        bootcli_buf_append(line, sizeof(line), ent.name);
+        if ((ent.mode & S_IFMT) == S_IFDIR)
+            bootcli_buf_append(line, sizeof(line), "/");
+        bootcli_push_line(line);
+        shown++;
+        if (shown >= 10U) {
+            bootcli_push_line("  ... output troncato ...");
+            break;
+        }
+    }
+
+    (void)vfs_close(&file);
+
+    if (rc < 0 && rc != -ENOENT) {
+        bootcli_push_error("ls readdir", rc);
+        return;
+    }
+    if (shown == 0U)
+        bootcli_push_line("  <directory vuota>");
+}
+
+static void bootcli_cmd_cat(const char *path)
+{
+    vfs_file_t file;
+    stat_t     st;
+    char       raw[241];
+    char       line[BOOTCLI_LINE_MAX + 1];
+    uint32_t   line_len = 0U;
+    int        rc;
+
+    rc = vfs_open(path, O_RDONLY, &file);
+    if (rc < 0) {
+        bootcli_push_error("cat open", rc);
+        return;
+    }
+
+    rc = vfs_stat(&file, &st);
+    if (rc < 0) {
+        (void)vfs_close(&file);
+        bootcli_push_error("cat stat", rc);
+        return;
+    }
+    if ((st.st_mode & S_IFMT) == S_IFDIR) {
+        (void)vfs_close(&file);
+        bootcli_push_line("cat: il path e' una directory.");
+        return;
+    }
+
+    rc = (int)vfs_read(&file, raw, 240U);
+    (void)vfs_close(&file);
+    if (rc < 0) {
+        bootcli_push_error("cat read", rc);
+        return;
+    }
+
+    if (rc == 0) {
+        bootcli_push_line("<file vuoto>");
+        return;
+    }
+
+    raw[rc] = '\0';
+    line[0] = '\0';
+    for (int i = 0; i < rc; i++) {
+        char ch = raw[i];
+
+        if (ch == '\r')
+            continue;
+        if (ch == '\n' || line_len >= BOOTCLI_LINE_MAX - 1U) {
+            line[line_len] = '\0';
+            bootcli_push_line(line);
+            line_len = 0U;
+            line[0] = '\0';
+            if (ch == '\n')
+                continue;
+        }
+
+        if ((uint8_t)ch < 32U || (uint8_t)ch >= 127U)
+            ch = '.';
+        line[line_len++] = ch;
+    }
+
+    if (line_len > 0U) {
+        line[line_len] = '\0';
+        bootcli_push_line(line);
+    }
+    if (rc == 240)
+        bootcli_push_line("...[cat troncato a 240 byte]...");
+}
+
 static void bootcli_render(void)
 {
     const uint32_t bg_color     = 0x000c1118;
@@ -337,12 +499,12 @@ static void bootcli_render(void)
                        "Modo: FRAMEBUFFER DI BOOT",
                    accent_color, panel_color);
     fb_draw_string(48U, 92U,
-                   "Comandi: help  clear  gpu  mouse  echo <test>  keyboard",
+                   "Comandi: help  clear  gpu  fs  ls [path]  cat <path>",
                    muted_color, panel_color);
     fb_draw_string(48U, 112U,
                    bootcli_graphics_mode ?
-                       "Fai click nella finestra QEMU e poi digita." :
-                       "Digita per testare l'input da tastiera o seriale.",
+                       "mouse  echo <test>  keyboard  | click nella finestra QEMU e digita." :
+                       "mouse  echo <test>  keyboard  | digita per testare tastiera o seriale.",
                    muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -430,6 +592,9 @@ static void bootcli_execute_command(void)
         bootcli_push_line("help      mostra i comandi disponibili");
         bootcli_push_line("clear     pulisce la console di boot");
         bootcli_push_line("gpu       mostra il backend grafico attivo");
+        bootcli_push_line("fs        mostra lo stato del mount ext4");
+        bootcli_push_line("ls PATH   lista una directory VFS (default: /data)");
+        bootcli_push_line("cat PATH  mostra il contenuto di un file");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
@@ -450,6 +615,14 @@ static void bootcli_execute_command(void)
                                "software fallback / framebuffer.");
         }
         bootcli_push_line(line);
+    } else if (bootcli_streq(bootcli_input, "fs")) {
+        bootcli_cmd_fs();
+    } else if (bootcli_streq(bootcli_input, "ls")) {
+        bootcli_cmd_ls("/data");
+    } else if (bootcli_startswith(bootcli_input, "ls ")) {
+        bootcli_cmd_ls(bootcli_input + 3);
+    } else if (bootcli_startswith(bootcli_input, "cat ")) {
+        bootcli_cmd_cat(bootcli_input + 4);
     } else if (bootcli_streq(bootcli_input, "mouse")) {
         if (!bootcli_mouse_ready) {
             bootcli_push_line("Mouse: nessun puntatore guest attivo.");
@@ -607,6 +780,7 @@ static void bootcli_init(void)
     else
         bootcli_push_line("Modalita framebuffer locale attiva.");
     bootcli_push_line("Digita 'help' e premi Invio per testare la tastiera.");
+    bootcli_push_line("Prova anche: fs, ls /data, cat /BOOT.TXT.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)

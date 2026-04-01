@@ -4,16 +4,16 @@
  * Mount table statica:
  *   /        -> initrd-ro bootstrap stub
  *   /dev     -> devfs
- *   /data    -> ext4-prep (solo se virtio-blk pronto)
- *   /sysroot -> ext4-prep (solo se virtio-blk pronto)
+ *   /data    -> ext4 read-only (se mount riuscito)
+ *   /sysroot -> ext4 read-only (se mount riuscito)
  *
- * L'obiettivo e' sbloccare la milestone M5-03: le syscall file-oriented
- * parlano gia' con un VFS vero, mentre il backend ext4 verra' agganciato
- * in un passo successivo senza cambiare l'ABI lato syscall.
+ * M5-03 sostituisce il vecchio placeholder ext4 con un parser read-only
+ * sopra virtio-blk, mantenendo la stessa ABI lato syscall/VFS.
  */
 
 #include "vfs.h"
 #include "blk.h"
+#include "ext4.h"
 #include "tty.h"
 #include "uart.h"
 
@@ -38,8 +38,6 @@ static const char vfs_root_readme[] =
     "I device node vivono sotto `/dev`.\n";
 
 static char vfs_root_boot_txt[256];
-static char vfs_ext4_info_txt[256];
-
 static vfs_mount_t vfs_mounts[VFS_MAX_MOUNTS];
 static size_t      vfs_mount_count;
 static bool        vfs_initialized;
@@ -79,29 +77,6 @@ static void vfs_strlcpy(char *dst, const char *src, size_t max)
 static char *buf_puts(char *dst, const char *src)
 {
     while (*src) *dst++ = *src++;
-    *dst = '\0';
-    return dst;
-}
-
-static char *buf_putdec(char *dst, uint64_t value)
-{
-    char tmp[32];
-    int  len = 0;
-
-    if (value == 0) {
-        *dst++ = '0';
-        *dst = '\0';
-        return dst;
-    }
-
-    while (value && len < (int)sizeof(tmp)) {
-        tmp[len++] = (char)('0' + (value % 10ULL));
-        value /= 10ULL;
-    }
-
-    while (len-- > 0)
-        *dst++ = tmp[len];
-
     *dst = '\0';
     return dst;
 }
@@ -402,7 +377,7 @@ static const vfs_ops_t devfs_ops = {
     .close   = devfs_close,
 };
 
-/* ── ext4 mount placeholder ──────────────────────────────────────── */
+/* ── info mount fallback (ext4 assente / errore mount) ───────────── */
 
 static int placefs_open(const vfs_mount_t *mount, const char *relpath,
                         uint32_t flags, vfs_file_t *out)
@@ -562,36 +537,34 @@ static void log_mounts(void)
 static void build_dynamic_texts(void)
 {
     char    *p;
-    uint64_t sectors = blk_sector_count();
 
     p = vfs_root_boot_txt;
     p = buf_puts(p, "Mount profile bootstrap:\n");
     p = buf_puts(p, "/        -> initrd-ro stub\n");
     p = buf_puts(p, "/dev     -> devfs\n");
     if (blk_is_ready()) {
-        p = buf_puts(p, "/data    -> ext4-prep on virtio-blk\n");
-        p = buf_puts(p, "/sysroot -> ext4-prep on virtio-blk\n");
+        if (ext4_is_mounted()) {
+            p = buf_puts(p, "/data    -> ext4 ro su virtio-blk\n");
+            p = buf_puts(p, "/sysroot -> ext4 ro su virtio-blk\n");
+        } else {
+            p = buf_puts(p, "/data    -> ext4 mount fallito\n");
+            p = buf_puts(p, "/sysroot -> ext4 mount fallito\n");
+        }
     } else {
         p = buf_puts(p, "/data    -> offline (virtio-blk assente)\n");
         p = buf_puts(p, "/sysroot -> offline (virtio-blk assente)\n");
     }
-
-    p = vfs_ext4_info_txt;
-    p = buf_puts(p, "Mount placeholder per ext4.\n");
-    if (blk_is_ready()) {
-        p = buf_puts(p, "virtio-blk pronto: ");
-        p = buf_putdec(p, sectors);
-        p = buf_puts(p, " settori da 512B (");
-        p = buf_putdec(p, sectors / 2048ULL);
-        p = buf_puts(p, " MB).\n");
-    } else {
-        p = buf_puts(p, "virtio-blk non rilevato.\n");
-    }
-    p = buf_puts(p, "M5-03 sostituira' questo stub con il mount ext4 reale.\n");
 }
 
 static void build_mount_table(void)
 {
+    int ext4_rc = -1;
+
+    if (blk_is_ready())
+        ext4_rc = ext4_mount();
+    else
+        ext4_unmount();
+
     build_dynamic_texts();
 
     vfs_mount_count = 0;
@@ -601,10 +574,17 @@ static void build_mount_table(void)
                    false, &devfs_ops, 0U);
 
     if (blk_is_ready()) {
-        mount_register("/data", "data-root", "ext4-prep",
-                       true, &placefs_ops, (uintptr_t)vfs_ext4_info_txt);
-        mount_register("/sysroot", "sysroot-root", "ext4-prep",
-                       true, &placefs_ops, (uintptr_t)vfs_ext4_info_txt);
+        if (ext4_rc == 0 && ext4_is_mounted()) {
+            mount_register("/data", "data-root", "ext4",
+                           true, ext4_vfs_ops(), 0U);
+            mount_register("/sysroot", "sysroot-root", "ext4",
+                           true, ext4_vfs_ops(), 0U);
+        } else {
+            mount_register("/data", "data-root", "ext4-error",
+                           true, &placefs_ops, (uintptr_t)ext4_status());
+            mount_register("/sysroot", "sysroot-root", "ext4-error",
+                           true, &placefs_ops, (uintptr_t)ext4_status());
+        }
     }
 }
 

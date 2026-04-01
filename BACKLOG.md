@@ -567,7 +567,7 @@ instradate interamente su `vfs_ops_t`.
 
 ---
 
-### ⬜ M5-03 · ext4 — Mount & Read Path
+### ✅ M5-03 · ext4 — Mount & Read Path
 **Priorità:** ALTA
 
 Integrazione di `ext4` nel server VFS user-space:
@@ -576,6 +576,12 @@ Integrazione di `ext4` nel server VFS user-space:
 - `open`, `read`, `readdir`, `stat` mappati sul server VFS
 - Buffer cache e inode cache statiche/bounded nel server filesystem
 - Supporto immagine host tramite `mkfs.ext4`, `e2fsck`, `debugfs`
+
+**Implementato ora:** backend `ext4` read-only su `virtio-blk`, con mount
+singleton per `/data` e `/sysroot`, cache statica di blocchi/inode, lookup
+path, lettura file, `readdir`, `stat`, extent tree e fallback legacy
+direct/single-indirect. In assenza di un'immagine ext4 valida, il VFS monta
+un nodo informativo `ext4-error` con il motivo del fallimento.
 
 Tool immagine host iniziali:
 - `mkfs.ext4 disk.img`

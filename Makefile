@@ -36,6 +36,7 @@ C_SRCS   = kernel/main.c \
            kernel/timer.c \
            kernel/sched.c \
            kernel/tty.c \
+           kernel/ext4.c \
            kernel/vfs.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \
@@ -127,12 +128,33 @@ run-gpu: $(KERNEL)
 		-serial stdio \
 		-kernel $(KERNEL)
 
-# Crea un'immagine disco raw vuota da 64MB per il testing di M5-01
+# Crea un'immagine disco raw da 64MB.
+# Se mkfs.ext4/mke2fs e' disponibile, la formatta gia' ext4 (4KB block size).
 disk.img:
-	dd if=/dev/zero of=disk.img bs=1M count=64 2>/dev/null
-	@echo "  disk.img creata (64MB raw)"
+	@if [ ! -f disk.img ]; then \
+		dd if=/dev/zero of=disk.img bs=1M count=64 2>/dev/null; \
+		if command -v mkfs.ext4 >/dev/null 2>&1; then \
+			mkfs.ext4 -F -q -b 4096 disk.img >/dev/null 2>&1; \
+			echo "  disk.img creata e formattata ext4 (64MB, 4KB)"; \
+		elif command -v mke2fs >/dev/null 2>&1; then \
+			mke2fs -t ext4 -F -q -b 4096 disk.img >/dev/null 2>&1; \
+			echo "  disk.img creata e formattata ext4 (64MB, 4KB)"; \
+		else \
+			echo "  disk.img creata raw (64MB): mkfs.ext4/mke2fs non trovato"; \
+			echo "  Per M5-03 serve un'immagine ext4 valida su disk.img"; \
+		fi; \
+	else \
+		echo "  disk.img gia' presente"; \
+	fi
 
-# Esegui con VirtIO-GPU + VirtIO-Block (M5-01)
+disk-fsck: disk.img
+	@if command -v e2fsck >/dev/null 2>&1; then \
+		e2fsck -f disk.img; \
+	else \
+		echo "  e2fsck non trovato"; \
+	fi
+
+# Esegui con VirtIO-GPU + VirtIO-Block (M5-03 read-only ext4)
 run-blk: $(KERNEL) disk.img
 	qemu-system-aarch64 \
 		-machine virt \
