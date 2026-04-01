@@ -56,6 +56,10 @@ typedef struct {
 #define IPC_MSG_PONG        2
 #define IPC_MSG_PRINT       3
 #define IPC_MSG_FB_DRAW     4
+#define IPC_MSG_BLK_REQ     5
+#define IPC_MSG_BLK_RESP    6
+#define IPC_MSG_VFS_REQ     7
+#define IPC_MSG_VFS_RESP    8
 #define IPC_MSG_SHUTDOWN    0xFF
 
 /* === Port System (stile Mach/Hurd) === */

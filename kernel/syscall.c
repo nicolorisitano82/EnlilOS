@@ -1,5 +1,5 @@
 /*
- * EnlilOS Microkernel - Syscall Base (M3-01 / M3-02)
+ * EnlilOS Microkernel - Syscall Base (M3-01 / M3-02 / M5-02)
  *
  * Implementa:
  *   - syscall_table[256]: dispatch O(1)
@@ -18,21 +18,23 @@
 #include "pmm.h"
 #include "uart.h"
 #include "types.h"
+#include "vfs.h"
 
 /* ════════════════════════════════════════════════════════════════════
  * File descriptor table
  * ════════════════════════════════════════════════════════════════════ */
 
-#define MAX_FD          16
+#define MAX_FD          64
 
 #define FD_TYPE_FREE    0
-#define FD_TYPE_CONSOLE 1   /* stdin / stdout / stderr → UART */
-#define FD_TYPE_NULL    2   /* /dev/null */
+#define FD_TYPE_VFS     1
 
 typedef struct {
     uint8_t  type;
-    uint8_t  flags;     /* O_RDONLY / O_WRONLY / O_RDWR */
-    uint16_t _pad;
+    uint8_t  _pad0;
+    uint16_t flags;
+    uint32_t _pad1;
+    vfs_file_t file;
 } fd_entry_t;
 
 /*
@@ -48,13 +50,6 @@ static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
 static uint64_t task_brk[SCHED_MAX_TASKS];
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
-
-/* Confronto stringhe senza libreria C */
-static int streq(const char *a, const char *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return (*a == *b);
-}
 
 /* Indice nel fd_table per il task corrente */
 static inline int task_idx(void)
@@ -82,6 +77,32 @@ static int fd_alloc(void)
     return -1;
 }
 
+static void fd_clear(fd_entry_t *e)
+{
+    e->type = FD_TYPE_FREE;
+    e->flags = 0;
+    e->file.mount = NULL;
+    e->file.node_id = 0;
+    e->file.flags = 0;
+    e->file.pos = 0;
+    e->file.size_hint = 0;
+    e->file.dir_index = 0;
+    e->file.cookie = 0;
+}
+
+static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
+{
+    int rc = vfs_open(path, flags, &e->file);
+    if (rc < 0) {
+        fd_clear(e);
+        return rc;
+    }
+
+    e->type  = FD_TYPE_VFS;
+    e->flags = flags;
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * Tabella globale
  * ════════════════════════════════════════════════════════════════════ */
@@ -92,7 +113,7 @@ syscall_entry_t syscall_table[SYSCALL_MAX];
  * Syscall 1 — write
  *
  * args: fd, buf, count
- * RT-safe: O(n) su UART (n ≤ 4096), nessuna allocazione
+ * RT-safe: dipende dal backend VFS; console/devfs rimane bounded.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_write(uint64_t args[6])
 {
@@ -100,27 +121,23 @@ static uint64_t sys_write(uint64_t args[6])
     const char *buf   = (const char *)(uintptr_t)args[1];
     uint64_t    count = args[2];
 
-    if (!buf)   return ERR(EFAULT);
-    if (!count) return 0;
-    if (count > 4096) count = 4096;
-
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
+    if (!buf) return ERR(EFAULT);
+    if (!count) return 0;
+    if (count > 4096) count = 4096;
+    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
-    if (e->type == FD_TYPE_NULL)    return count;   /* discard */
-    if (e->type != FD_TYPE_CONSOLE) return ERR(EBADF);
-
-    for (uint64_t i = 0; i < count; i++)
-        uart_putc(buf[i]);
-
-    return count;
+    ssize_t rc = vfs_write(&e->file, buf, count);
+    if (rc < 0) return ERR((int)-rc);
+    return (uint64_t)rc;
 }
 
 /* ════════════════════════════════════════════════════════════════════
  * Syscall 2 — read
  *
  * args: fd, buf, count
- * RT-safe: non-blocking. Console in modalita' canonica via line discipline.
+ * RT-safe per devfs/console; gli altri backend dipendono dal mount.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_read(uint64_t args[6])
 {
@@ -130,13 +147,14 @@ static uint64_t sys_read(uint64_t args[6])
 
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
-    if (!buf || cnt == 0) return ERR(EFAULT);
-
-    if (e->type == FD_TYPE_NULL)    return 0;       /* EOF */
-    if (e->type != FD_TYPE_CONSOLE) return ERR(EBADF);
+    if (!buf) return ERR(EFAULT);
+    if (cnt == 0) return 0;
+    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
     if (cnt > 4096) cnt = 4096;
-    return tty_read(buf, cnt);
+    ssize_t rc = vfs_read(&e->file, buf, cnt);
+    if (rc < 0) return ERR((int)-rc);
+    return (uint64_t)rc;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -158,36 +176,24 @@ static uint64_t sys_exit(uint64_t args[6])
  * Syscall 4 — open
  *
  * args: path, flags, mode (ignorato)
- * Supporta: /dev/console, /dev/tty, /dev/null
- * Tutto il resto → ENOENT (VFS non ancora disponibile, M5-02)
+ * Instrada la risoluzione path sul layer VFS.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_open(uint64_t args[6])
 {
     const char *path  = (const char *)(uintptr_t)args[0];
-    uint8_t     oflags = (uint8_t)args[1];
+    uint16_t    oflags = (uint16_t)args[1];
+    int         idx = task_idx();
+    int         rc;
 
     if (!path) return ERR(EFAULT);
 
     int fd = fd_alloc();
     if (fd < 0) return ERR(ENFILE);
 
-    int idx = task_idx();
+    rc = fd_bind_path(&fd_tables[idx][fd], path, oflags);
+    if (rc < 0) return ERR(-rc);
 
-    if (streq(path, "/dev/console") || streq(path, "/dev/tty") ||
-        streq(path, "/dev/stdin")   || streq(path, "/dev/stdout") ||
-        streq(path, "/dev/stderr")) {
-        fd_tables[idx][fd].type  = FD_TYPE_CONSOLE;
-        fd_tables[idx][fd].flags = oflags;
-        return (uint64_t)fd;
-    }
-    if (streq(path, "/dev/null")) {
-        fd_tables[idx][fd].type  = FD_TYPE_NULL;
-        fd_tables[idx][fd].flags = oflags;
-        return (uint64_t)fd;
-    }
-
-    /* VFS non disponibile fino a M5-02 */
-    return ERR(ENOENT);
+    return (uint64_t)fd;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -206,10 +212,15 @@ static uint64_t sys_close(uint64_t args[6])
     if (fd <= 2) return ERR(EBADF);
 
     int idx = task_idx();
-    if (fd_tables[idx][fd].type == FD_TYPE_FREE) return ERR(EBADF);
+    fd_entry_t *e = &fd_tables[idx][fd];
+    if (e->type == FD_TYPE_FREE) return ERR(EBADF);
 
-    fd_tables[idx][fd].type  = FD_TYPE_FREE;
-    fd_tables[idx][fd].flags = 0;
+    if (e->type == FD_TYPE_VFS) {
+        int rc = vfs_close(&e->file);
+        if (rc < 0) return ERR(-rc);
+    }
+
+    fd_clear(e);
     return 0;
 }
 
@@ -217,22 +228,20 @@ static uint64_t sys_close(uint64_t args[6])
  * Syscall 6 — fstat
  *
  * args: fd, struct stat *buf
- * Stub: ritorna 0 per console e null, EBADF altrimenti.
- * Popolamento completo della struct stat richiede M5-02 (VFS).
+ * Popola la struct stat minimale di EnlilOS.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_fstat(uint64_t args[6])
 {
-    int fd = (int)args[0];
+    int     fd  = (int)args[0];
+    stat_t *buf = (stat_t *)(uintptr_t)args[1];
 
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
+    if (!buf) return ERR(EFAULT);
+    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
-    /*
-     * struct stat non popolata: il chiamante deve aspettare M5-02.
-     * Ritorniamo 0 (successo) per non bloccare chi controlla solo
-     * il codice di ritorno (es. newlib isatty → fstat → controlla S_IFCHR).
-     * Il buffer puntato da args[1] NON viene scritto.
-     */
+    int rc = vfs_stat(&e->file, buf);
+    if (rc < 0) return ERR(-rc);
     return 0;
 }
 
@@ -450,29 +459,32 @@ static uint64_t sys_enosys(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 void syscall_init(void)
 {
-    /* 1. Inizializza fd_table: fd 0/1/2 = CONSOLE per tutti i task */
+    /* 1. Porta su line discipline + VFS bootstrap */
+    tty_init();
+    vfs_init();
+
+    /* 2. Inizializza fd_table: fd 0/1/2 = VFS devfs per tutti i task */
     for (int i = 0; i < SCHED_MAX_TASKS; i++) {
-        fd_tables[i][0].type = FD_TYPE_CONSOLE; /* stdin  */
-        fd_tables[i][1].type = FD_TYPE_CONSOLE; /* stdout */
-        fd_tables[i][2].type = FD_TYPE_CONSOLE; /* stderr */
-        for (int j = 3; j < MAX_FD; j++)
-            fd_tables[i][j].type = FD_TYPE_FREE;
+        for (int j = 0; j < MAX_FD; j++)
+            fd_clear(&fd_tables[i][j]);
+
+        (void)fd_bind_path(&fd_tables[i][0], "/dev/stdin",  O_RDONLY);
+        (void)fd_bind_path(&fd_tables[i][1], "/dev/stdout", O_WRONLY);
+        (void)fd_bind_path(&fd_tables[i][2], "/dev/stderr", O_WRONLY);
     }
 
-    /* 2. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
+    /* 3. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
     for (int i = 0; i < SCHED_MAX_TASKS; i++)
         task_brk[i] = 0;
 
-    tty_init();
-
-    /* 3. Riempi la tabella con ENOSYS */
+    /* 4. Riempi la tabella con ENOSYS */
     for (int i = 0; i < SYSCALL_MAX; i++) {
         syscall_table[i].handler = sys_enosys;
         syscall_table[i].flags   = 0;
         syscall_table[i].name    = "enosys";
     }
 
-    /* 4. Registra le 13 syscall base */
+    /* 5. Registra le 13 syscall base */
     syscall_table[SYS_WRITE] = (syscall_entry_t){
         sys_write, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "write"
     };
@@ -514,11 +526,7 @@ void syscall_init(void)
     };
 
     uart_puts("[SYSCALL] 13 syscall base registrate\n");
-    uart_puts("[SYSCALL] fd_table: 0/1/2=CONSOLE per ");
-    /* stampa SCHED_MAX_TASKS senza printf */
-    uart_putc('0' + SCHED_MAX_TASKS / 10);
-    uart_putc('0' + SCHED_MAX_TASKS % 10);
-    uart_puts(" task slot\n");
+    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 
 /* ════════════════════════════════════════════════════════════════════

@@ -76,6 +76,8 @@ void mk_init(void)
     mk_port_create(1, "console");
     mk_port_create(1, "framebuffer");
     mk_port_create(1, "memory");
+    mk_port_create(1, "block");
+    mk_port_create(1, "vfs");
 }
 
 task_t *mk_task_create(const char *name, task_type_t type, uint64_t entry)

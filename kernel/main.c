@@ -1,5 +1,5 @@
 /*
- * EnlilOS - Nicolo's Realtime Operating System
+ * EnlilOS - Realtime Operating System
  * Microkernel per AArch64 (ARM M-series compatible)
  *
  * Punto di ingresso principale del kernel.
@@ -19,8 +19,11 @@
 #include "sched.h"
 #include "syscall.h"
 #include "keyboard.h"
+#include "mouse.h"
+#include "blk.h"
 #include "ane.h"
 #include "gpu.h"
+#include "vfs.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -66,11 +69,20 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 #define BOOTCLI_HISTORY_MAX   18U
 #define BOOTCLI_LINE_MAX      78U
 #define BOOTCLI_INPUT_MAX     72U
+#define BOOTCLI_MOUSE_EVENT_MAX 4U
+#define BOOTCLI_MOUSE_LINE_MAX  52U
 
 static char      bootcli_lines[BOOTCLI_HISTORY_MAX][BOOTCLI_LINE_MAX + 1];
 static uint32_t  bootcli_line_count;
 static char      bootcli_input[BOOTCLI_INPUT_MAX + 1];
 static uint32_t  bootcli_input_len;
+static char      bootcli_mouse_lines[BOOTCLI_MOUSE_EVENT_MAX][BOOTCLI_MOUSE_LINE_MAX + 1];
+static uint32_t  bootcli_mouse_line_count;
+static int32_t   bootcli_mouse_x;
+static int32_t   bootcli_mouse_y;
+static uint32_t  bootcli_mouse_buttons;
+static int32_t   bootcli_mouse_wheel_total;
+static uint8_t   bootcli_mouse_ready;
 static gpu_caps_t bootcli_caps;
 static uint8_t   bootcli_graphics_mode;
 static volatile uint32_t bootcli_heartbeat;
@@ -150,6 +162,46 @@ static void bootcli_buf_append_u32(char *dst, uint32_t cap, uint32_t v)
     }
 }
 
+static void bootcli_buf_append_i32(char *dst, uint32_t cap, int32_t v)
+{
+    if (v < 0) {
+        bootcli_buf_append(dst, cap, "-");
+        bootcli_buf_append_u32(dst, cap, (uint32_t)(-(int64_t)v));
+        return;
+    }
+
+    bootcli_buf_append_u32(dst, cap, (uint32_t)v);
+}
+
+static int32_t bootcli_clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void bootcli_append_button_mask(char *dst, uint32_t cap, uint32_t buttons)
+{
+    bootcli_buf_append(dst, cap, (buttons & MOUSE_BTN_LEFT) ? "L" : "-");
+    bootcli_buf_append(dst, cap, (buttons & MOUSE_BTN_RIGHT) ? "R" : "-");
+    bootcli_buf_append(dst, cap, (buttons & MOUSE_BTN_MIDDLE) ? "M" : "-");
+}
+
+/* Formatta lo stato corrente del mouse in 'dst' (al massimo 'cap' byte).
+ * Usato sia dalla status bar grafica che dal comando "mouse". */
+static void bootcli_fmt_mouse_status(char *dst, uint32_t cap)
+{
+    dst[0] = '\0';
+    bootcli_buf_append(dst, cap, "Mouse x=");
+    bootcli_buf_append_u32(dst, cap, (uint32_t)bootcli_mouse_x);
+    bootcli_buf_append(dst, cap, " y=");
+    bootcli_buf_append_u32(dst, cap, (uint32_t)bootcli_mouse_y);
+    bootcli_buf_append(dst, cap, " btn=");
+    bootcli_append_button_mask(dst, cap, bootcli_mouse_buttons);
+    bootcli_buf_append(dst, cap, " wheel=");
+    bootcli_buf_append_i32(dst, cap, bootcli_mouse_wheel_total);
+}
+
 static void bootcli_fill_rect(uint32_t x, uint32_t y,
                               uint32_t w, uint32_t h, uint32_t color)
 {
@@ -176,6 +228,59 @@ static void bootcli_push_line(const char *s)
     uart_puts("\n");
 }
 
+static void bootcli_mouse_push_event(const char *s)
+{
+    if (bootcli_mouse_line_count == BOOTCLI_MOUSE_EVENT_MAX) {
+        for (uint32_t i = 1U; i < BOOTCLI_MOUSE_EVENT_MAX; i++) {
+            bootcli_copy_trunc(bootcli_mouse_lines[i - 1U],
+                               bootcli_mouse_lines[i],
+                               BOOTCLI_MOUSE_LINE_MAX + 1U);
+        }
+        bootcli_mouse_line_count--;
+    }
+
+    bootcli_copy_trunc(bootcli_mouse_lines[bootcli_mouse_line_count++], s,
+                       BOOTCLI_MOUSE_LINE_MAX + 1U);
+}
+
+static void bootcli_draw_mouse_cursor(void)
+{
+    static const uint16_t cursor_rows[] = {
+        0x8000, 0xC000, 0xE000, 0xF000,
+        0xF800, 0xFC00, 0xFE00, 0xFF00,
+        0xFC00, 0xD800, 0xCC00, 0x8E00,
+        0x0600, 0x0300,
+    };
+    const uint32_t shadow = 0x00111a21;
+    const uint32_t fg = (bootcli_mouse_buttons != 0U) ?
+                        0x00ffd166 : 0x00f7fbff;
+
+    if (!bootcli_graphics_mode || !bootcli_mouse_ready)
+        return;
+
+    for (uint32_t row = 0U; row < (uint32_t)(sizeof(cursor_rows) / sizeof(cursor_rows[0])); row++) {
+        uint16_t bits = cursor_rows[row];
+        for (uint32_t col = 0U; col < 16U; col++) {
+            if ((bits & (uint16_t)(0x8000U >> col)) == 0U)
+                continue;
+            fb_put_pixel((uint32_t)bootcli_mouse_x + col + 1U,
+                         (uint32_t)bootcli_mouse_y + row + 1U,
+                         shadow);
+        }
+    }
+
+    for (uint32_t row = 0U; row < (uint32_t)(sizeof(cursor_rows) / sizeof(cursor_rows[0])); row++) {
+        uint16_t bits = cursor_rows[row];
+        for (uint32_t col = 0U; col < 16U; col++) {
+            if ((bits & (uint16_t)(0x8000U >> col)) == 0U)
+                continue;
+            fb_put_pixel((uint32_t)bootcli_mouse_x + col,
+                         (uint32_t)bootcli_mouse_y + row,
+                         fg);
+        }
+    }
+}
+
 static void bootcli_push_current_input(void)
 {
     char line[BOOTCLI_LINE_MAX + 1];
@@ -197,20 +302,22 @@ static void bootcli_render(void)
     const uint32_t muted_color  = 0x0095a8bd;
     const uint32_t accent_color = 0x007ce7c8;
     const uint32_t prompt_color = 0x00ffd166;
+    const uint32_t warning_color = 0x00ff8a5b;
     const uint32_t panel_x      = 32U;
     const uint32_t panel_y      = 24U;
     const uint32_t panel_w      = 736U;
     const uint32_t panel_h      = 552U;
     const uint32_t history_x    = 48U;
-    const uint32_t history_y    = 136U;
+    const uint32_t history_y    = bootcli_graphics_mode ? 158U : 136U;
     const uint32_t line_step    = 18U;
-    const uint32_t prompt_y     = 488U;
+    const uint32_t prompt_y     = bootcli_graphics_mode ? 506U : 488U;
     const uint32_t footer_y     = 544U;
-    const uint32_t visible      = 18U;
+    const uint32_t visible      = bootcli_graphics_mode ? 12U : 18U;
     uint32_t first;
     uint32_t row = 0U;
     char prompt_line[BOOTCLI_LINE_MAX + 1];
     char footer[BOOTCLI_LINE_MAX + 1];
+    char mouse_status[BOOTCLI_LINE_MAX + 1];
     uint64_t cursor_phase = timer_now_ms() / 400ULL;
 
     fb_clear(bg_color);
@@ -230,7 +337,7 @@ static void bootcli_render(void)
                        "Modo: FRAMEBUFFER DI BOOT",
                    accent_color, panel_color);
     fb_draw_string(48U, 92U,
-                   "Comandi: help  clear  gpu  echo <test>  keyboard",
+                   "Comandi: help  clear  gpu  mouse  echo <test>  keyboard",
                    muted_color, panel_color);
     fb_draw_string(48U, 112U,
                    bootcli_graphics_mode ?
@@ -238,12 +345,49 @@ static void bootcli_render(void)
                        "Digita per testare l'input da tastiera o seriale.",
                    muted_color, panel_color);
 
+    if (bootcli_graphics_mode) {
+        if (bootcli_mouse_ready) {
+            bootcli_fmt_mouse_status(mouse_status, sizeof(mouse_status));
+        } else {
+            mouse_status[0] = '\0';
+            bootcli_buf_append(mouse_status, sizeof(mouse_status),
+                               "Mouse guest non rilevato: run-gpu richiede virtio-mouse-device.");
+        }
+
+        fb_draw_string(48U, 132U, mouse_status,
+                       bootcli_mouse_ready ? muted_color : warning_color,
+                       panel_color);
+    }
+
     first = (bootcli_line_count > visible) ?
             (bootcli_line_count - visible) : 0U;
     for (uint32_t i = first; i < bootcli_line_count; i++) {
         fb_draw_string(history_x, history_y + row * line_step,
                        bootcli_lines[i], title_color, panel_color);
         row++;
+    }
+
+    if (bootcli_graphics_mode) {
+        uint32_t event_y = 420U;
+
+        bootcli_fill_rect(40U, 390U, 720U, 2U, border_color);
+        fb_draw_string(48U, 402U, "Eventi mouse recenti",
+                       accent_color, panel_color);
+
+        if (!bootcli_mouse_ready) {
+            fb_draw_string(48U, event_y,
+                           "Nessun puntatore guest attivo in questa sessione.",
+                           muted_color, panel_color);
+        } else if (bootcli_mouse_line_count == 0U) {
+            fb_draw_string(48U, event_y,
+                           "Muovi il mouse o fai click per generare eventi.",
+                           muted_color, panel_color);
+        } else {
+            for (uint32_t i = 0U; i < bootcli_mouse_line_count; i++) {
+                fb_draw_string(48U, event_y + i * line_step,
+                               bootcli_mouse_lines[i], title_color, panel_color);
+            }
+        }
     }
 
     bootcli_fill_rect(40U, prompt_y - 6U, 720U, 2U, border_color);
@@ -263,8 +407,11 @@ static void bootcli_render(void)
         bootcli_buf_append(footer, sizeof(footer), " | Scanout VirtIO attivo");
     else
         bootcli_buf_append(footer, sizeof(footer), " | Scanout framebuffer");
+    if (bootcli_graphics_mode && bootcli_mouse_ready)
+        bootcli_buf_append(footer, sizeof(footer), " | Mouse guest attivo");
     fb_draw_string(48U, footer_y, footer, muted_color, panel_color);
 
+    bootcli_draw_mouse_cursor();
     gpu_present_fullscreen();
 }
 
@@ -283,6 +430,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("help      mostra i comandi disponibili");
         bootcli_push_line("clear     pulisce la console di boot");
         bootcli_push_line("gpu       mostra il backend grafico attivo");
+        bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
     } else if (bootcli_streq(bootcli_input, "clear")) {
@@ -302,6 +450,13 @@ static void bootcli_execute_command(void)
                                "software fallback / framebuffer.");
         }
         bootcli_push_line(line);
+    } else if (bootcli_streq(bootcli_input, "mouse")) {
+        if (!bootcli_mouse_ready) {
+            bootcli_push_line("Mouse: nessun puntatore guest attivo.");
+        } else {
+            bootcli_fmt_mouse_status(line, sizeof(line));
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "keyboard")) {
         bootcli_push_line("Tastiera: input ricevuto correttamente.");
     } else if (bootcli_startswith(bootcli_input, "echo ")) {
@@ -357,11 +512,91 @@ static int bootcli_poll_input(void)
     return dirty;
 }
 
+static void bootcli_record_mouse_event(const mouse_event_t *ev, uint32_t old_buttons)
+{
+    char line[BOOTCLI_MOUSE_LINE_MAX + 1];
+
+    if (!ev) return;
+
+    line[0] = '\0';
+
+    if (ev->flags & MOUSE_EVT_BUTTON) {
+        bootcli_buf_append(line, sizeof(line), "click ");
+        if ((old_buttons ^ ev->buttons) & MOUSE_BTN_LEFT)
+            bootcli_buf_append(line, sizeof(line),
+                               (ev->buttons & MOUSE_BTN_LEFT) ? "L-down " : "L-up ");
+        if ((old_buttons ^ ev->buttons) & MOUSE_BTN_RIGHT)
+            bootcli_buf_append(line, sizeof(line),
+                               (ev->buttons & MOUSE_BTN_RIGHT) ? "R-down " : "R-up ");
+        if ((old_buttons ^ ev->buttons) & MOUSE_BTN_MIDDLE)
+            bootcli_buf_append(line, sizeof(line),
+                               (ev->buttons & MOUSE_BTN_MIDDLE) ? "M-down " : "M-up ");
+    } else if ((ev->flags & MOUSE_EVT_WHEEL) && ev->wheel != 0) {
+        bootcli_buf_append(line, sizeof(line), "wheel ");
+        bootcli_buf_append_i32(line, sizeof(line), ev->wheel);
+        bootcli_buf_append(line, sizeof(line), " ");
+    } else if (ev->flags & MOUSE_EVT_ABS) {
+        bootcli_buf_append(line, sizeof(line), "move abs ");
+    } else if (ev->flags & MOUSE_EVT_MOVE) {
+        bootcli_buf_append(line, sizeof(line), "move ");
+    }
+
+    if ((ev->flags & MOUSE_EVT_MOVE) && !(ev->flags & MOUSE_EVT_ABS)) {
+        bootcli_buf_append(line, sizeof(line), "dx=");
+        bootcli_buf_append_i32(line, sizeof(line), ev->dx);
+        bootcli_buf_append(line, sizeof(line), " dy=");
+        bootcli_buf_append_i32(line, sizeof(line), ev->dy);
+        bootcli_buf_append(line, sizeof(line), " ");
+    }
+
+    if (line[0] == '\0')
+        return;
+
+    bootcli_buf_append(line, sizeof(line), "@ ");
+    bootcli_buf_append_u32(line, sizeof(line), (uint32_t)bootcli_mouse_x);
+    bootcli_buf_append(line, sizeof(line), ",");
+    bootcli_buf_append_u32(line, sizeof(line), (uint32_t)bootcli_mouse_y);
+    bootcli_mouse_push_event(line);
+}
+
+static int bootcli_poll_mouse(void)
+{
+    int dirty = 0;
+    mouse_event_t ev;
+
+    while (mouse_get_event(&ev)) {
+        uint32_t old_buttons = bootcli_mouse_buttons;
+
+        if (ev.flags & MOUSE_EVT_ABS) {
+            /* mi_scale_abs() garantisce già [0, FB_W/H-1]; clamp difensivo */
+            bootcli_mouse_x = bootcli_clamp_i32((int32_t)ev.x, 0, FB_WIDTH - 1);
+            bootcli_mouse_y = bootcli_clamp_i32((int32_t)ev.y, 0, FB_HEIGHT - 1);
+        } else {
+            bootcli_mouse_x = bootcli_clamp_i32(bootcli_mouse_x + ev.dx,
+                                                0, FB_WIDTH - 1);
+            bootcli_mouse_y = bootcli_clamp_i32(bootcli_mouse_y + ev.dy,
+                                                0, FB_HEIGHT - 1);
+        }
+        bootcli_mouse_buttons = ev.buttons;
+        bootcli_mouse_wheel_total += ev.wheel;
+        bootcli_record_mouse_event(&ev, old_buttons);
+        dirty = 1;
+    }
+
+    return dirty;
+}
+
 static void bootcli_init(void)
 {
     bootcli_line_count = 0U;
     bootcli_input_len = 0U;
     bootcli_input[0] = '\0';
+    bootcli_mouse_line_count = 0U;
+    bootcli_mouse_x = FB_WIDTH / 2;
+    bootcli_mouse_y = FB_HEIGHT / 2;
+    bootcli_mouse_buttons = 0U;
+    bootcli_mouse_wheel_total = 0;
+    bootcli_mouse_ready = (uint8_t)mouse_is_ready();
 
     gpu_get_caps(&bootcli_caps);
     bootcli_graphics_mode = (bootcli_caps.vendor == GPU_VENDOR_VIRTIO) ? 1U : 0U;
@@ -372,8 +607,13 @@ static void bootcli_init(void)
     else
         bootcli_push_line("Modalita framebuffer locale attiva.");
     bootcli_push_line("Digita 'help' e premi Invio per testare la tastiera.");
-    if (bootcli_graphics_mode)
+    if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
+        if (bootcli_mouse_ready)
+            bootcli_push_line("Mouse guest pronto: puntatore ed eventi attivi.");
+        else
+            bootcli_push_line("Mouse guest non rilevato: tastiera soltanto.");
+    }
 }
 
 /*
@@ -502,6 +742,9 @@ void kernel_main(void)
     sched_init();
     syscall_init();
     keyboard_init();
+    mouse_init();
+    blk_init();
+    vfs_rescan();
     ane_init();
     gpu_init();
     /* Da qui: task switching via timer IRQ ogni 1ms.
@@ -535,6 +778,8 @@ void kernel_main(void)
     mk_task_create("uart-server", TASK_TYPE_SERVER, 0);
     mk_task_create("fb-server", TASK_TYPE_SERVER, 0);
     mk_task_create("mem-server", TASK_TYPE_SERVER, 0);
+    mk_task_create("blk-server", TASK_TYPE_SERVER, 0);
+    mk_task_create("vfs-server", TASK_TYPE_SERVER, 0);
 
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 
@@ -552,6 +797,7 @@ void kernel_main(void)
     uint32_t last_heartbeat = bootcli_heartbeat;
     while (1) {
         int dirty = bootcli_poll_input();
+        dirty |= bootcli_poll_mouse();
         uint64_t cursor_phase = timer_now_ms() / 400ULL;
 
         if (cursor_phase != last_cursor_phase) {

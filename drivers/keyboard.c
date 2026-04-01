@@ -11,6 +11,7 @@
  */
 
 #include "keyboard.h"
+#include "virtio_mmio.h"
 #include "gic.h"
 #include "mmu.h"
 #include "uart.h"
@@ -94,69 +95,10 @@ static const uint8_t key_shifted[128] = {
 
 /* ── VirtIO Input (virtio-mmio) ──────────────────────────────────── */
 
-#define VMMIO_BASE           0x0a000000UL
-#define VMMIO_SLOT_SIZE      0x200UL
-#define VMMIO_MAX_SLOTS      32U
-
-#define VMMIO_MAGIC          0x000U
-#define VMMIO_VERSION        0x004U
-#define VMMIO_DEVICE_ID      0x008U
-#define VMMIO_DEV_FEATURES   0x010U
-#define VMMIO_DEV_FEAT_SEL   0x014U
-#define VMMIO_DRV_FEATURES   0x020U
-#define VMMIO_DRV_FEAT_SEL   0x024U
-#define VMMIO_QUEUE_SEL      0x030U
-#define VMMIO_QUEUE_NUM_MAX  0x034U
-#define VMMIO_QUEUE_NUM      0x038U
-#define VMMIO_QUEUE_READY    0x044U
-#define VMMIO_QUEUE_NOTIFY   0x050U
-#define VMMIO_IRQ_STATUS     0x060U
-#define VMMIO_IRQ_ACK        0x064U
-#define VMMIO_STATUS         0x070U
-#define VMMIO_QUEUE_DESC_LO  0x080U
-#define VMMIO_QUEUE_DESC_HI  0x084U
-#define VMMIO_QUEUE_DRV_LO   0x090U
-#define VMMIO_QUEUE_DRV_HI   0x094U
-#define VMMIO_QUEUE_DEV_LO   0x0A0U
-#define VMMIO_QUEUE_DEV_HI   0x0A4U
-#define VMMIO_CONFIG         0x100U
-
-#define VMMIO_MAGIC_VALUE    0x74726976UL
-#define VIRTIO_DEVICE_INPUT  18U
-
-#define VSTAT_ACKNOWLEDGE    1U
-#define VSTAT_DRIVER         2U
-#define VSTAT_DRIVER_OK      4U
-#define VSTAT_FEATURES_OK    8U
-#define VSTAT_FAILED         128U
-
-#define VIRTIO_F_VERSION_1   (1U << 0)
-
-#define VIRTIO_INPUT_CFG_ID_NAME  0x01U
-#define VIRTIO_INPUT_CFG_EV_BITS  0x11U
-
-#define EV_SYN               0U
-#define EV_KEY               1U
-
-#define SYN_REPORT           0U
-
-#define KEY_ENTER            28U
-#define KEY_A                30U
-#define KEY_LEFTCTRL         29U
-#define KEY_LEFTSHIFT        42U
-#define KEY_RIGHTSHIFT       54U
-#define KEY_SPACE            57U
-#define KEY_RIGHTCTRL        97U
-
+/* Queue depth per il keyboard input eventq */
 #define VIQ_SIZE             16U
 
-typedef struct {
-    uint64_t addr;
-    uint32_t len;
-    uint16_t flags;
-    uint16_t next;
-} __attribute__((packed)) vring_desc_t;
-
+/* vring_avail e vring_used con ring di lunghezza VIQ_SIZE */
 typedef struct {
     uint16_t flags;
     uint16_t idx;
@@ -165,22 +107,11 @@ typedef struct {
 } __attribute__((packed)) vring_avail_t;
 
 typedef struct {
-    uint32_t id;
-    uint32_t len;
-} __attribute__((packed)) vring_used_elem_t;
-
-typedef struct {
     uint16_t flags;
     uint16_t idx;
     vring_used_elem_t ring[VIQ_SIZE];
     uint16_t avail_event;
 } __attribute__((packed)) vring_used_t;
-
-typedef struct {
-    uint16_t type;
-    uint16_t code;
-    uint32_t value;
-} __attribute__((packed)) virtio_input_event_t;
 
 static uint8_t vi_vq_mem[4096] __attribute__((aligned(4096)));
 static virtio_input_event_t vi_events[VIQ_SIZE] __attribute__((aligned(64)));
@@ -225,23 +156,6 @@ static inline void vi_cfg_write8(uint32_t off, uint8_t val)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
-static void cache_invalidate_range_local(uintptr_t start, size_t size)
-{
-    uint64_t ctr;
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-
-    uintptr_t line = (uintptr_t)(4UL << ((ctr >> 16) & 0xFU));
-    uintptr_t mask = line - 1U;
-    uintptr_t addr = start & ~mask;
-    uintptr_t end  = start + size;
-
-    while (addr < end) {
-        __asm__ volatile("dc ivac, %0" :: "r"(addr) : "memory");
-        addr += line;
-    }
-
-    __asm__ volatile("dsb sy" ::: "memory");
-}
 
 static int vi_config_test_bit(uint8_t select, uint8_t subsel, uint16_t bit)
 {
@@ -325,7 +239,7 @@ static void vi_requeue_desc(uint16_t desc_id)
     vi_next_avail++;
     VI_AVAIL->idx = vi_next_avail;
 
-    cache_flush_range((uintptr_t)vi_vq_mem, sizeof(vi_vq_mem));
+    cache_flush_range((uintptr_t)VI_AVAIL, sizeof(*VI_AVAIL));
     vi_mmio_write(VMMIO_QUEUE_NOTIFY, 0U);
 }
 
@@ -358,14 +272,14 @@ static void vi_drain_events(void)
     if (isr)
         vi_mmio_write(VMMIO_IRQ_ACK, isr);
 
-    cache_invalidate_range_local((uintptr_t)VI_USED, sizeof(*VI_USED));
+    cache_invalidate_range((uintptr_t)VI_USED, sizeof(*VI_USED));
 
     while (vi_last_used != VI_USED->idx) {
         vring_used_elem_t elem = VI_USED->ring[vi_last_used % vi_queue_size];
         uint16_t desc_id = (uint16_t)elem.id;
 
         if (desc_id < vi_queue_size) {
-            cache_invalidate_range_local((uintptr_t)&vi_events[desc_id],
+            cache_invalidate_range((uintptr_t)&vi_events[desc_id],
                                          sizeof(vi_events[desc_id]));
 
             virtio_input_event_t ev = vi_events[desc_id];
@@ -376,7 +290,7 @@ static void vi_drain_events(void)
         }
 
         vi_last_used++;
-        cache_invalidate_range_local((uintptr_t)VI_USED, sizeof(*VI_USED));
+        cache_invalidate_range((uintptr_t)VI_USED, sizeof(*VI_USED));
     }
 }
 

@@ -247,6 +247,22 @@ void cache_flush_range(uintptr_t start, size_t size)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+void cache_invalidate_range(uintptr_t start, size_t size)
+{
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    uintptr_t line = (uintptr_t)(4UL << ((ctr >> 16) & 0xF));
+    uintptr_t mask = line - 1U;
+    uintptr_t addr = start & ~mask;
+    uintptr_t end  = start + size;
+
+    while (addr < end) {
+        __asm__ volatile("dc ivac, %0" :: "r"(addr) : "memory");
+        addr += line;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
 int mmu_enabled(void)
 {
     uint64_t sctlr;

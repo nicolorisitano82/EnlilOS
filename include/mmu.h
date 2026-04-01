@@ -161,6 +161,19 @@ void mmu_prefault_range(uintptr_t start, uintptr_t end);
 void cache_flush_range(uintptr_t start, size_t size);
 
 /*
+ * cache_invalidate_range(start, size) — esegue DC IVAC (Invalidate by VA
+ * to PoC) su ogni cache line del range, senza write-back.
+ *
+ * Usare quando si ricevono dati via DMA e si vuole che la CPU li legga
+ * dalla memoria fisica scartando qualsiasi copia stale in D-cache.
+ * NB: le cache line dirty vengono perse — non usare su dati non ancora
+ * scritti in RAM dal DMA.
+ *
+ * WCET: O(size / cache_line_size).
+ */
+void cache_invalidate_range(uintptr_t start, size_t size);
+
+/*
  * mmu_enabled() — ritorna 1 se la MMU è attiva.
  */
 int mmu_enabled(void);

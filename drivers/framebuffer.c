@@ -320,23 +320,6 @@ typedef struct __attribute__((packed, aligned(8))) {
 static fw_cfg_dma_t  fw_dma_req;           /* deve stare in RAM, non stack */
 static ramfb_cfg_t   fw_ramfb_cfg_buf;     /* idem */
 
-static void cache_invalidate_range_local(uintptr_t start, size_t size)
-{
-    uint64_t ctr;
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-
-    uintptr_t line = (uintptr_t)(4UL << ((ctr >> 16) & 0xFU));
-    uintptr_t mask = line - 1U;
-    uintptr_t addr = start & ~mask;
-    uintptr_t end  = start + size;
-
-    while (addr < end) {
-        __asm__ volatile("dc ivac, %0" :: "r"(addr) : "memory");
-        addr += line;
-    }
-
-    __asm__ volatile("dsb sy" ::: "memory");
-}
 
 static int fw_cfg_dma_submit(uint32_t control, void *data, uint32_t len)
 {
@@ -354,12 +337,12 @@ static int fw_cfg_dma_submit(uint32_t control, void *data, uint32_t len)
     __asm__ volatile("dsb sy" ::: "memory");
 
     for (uint32_t retry = 0; retry < 100000U; retry++) {
-        cache_invalidate_range_local((uintptr_t)&fw_dma_req, sizeof(fw_dma_req));
+        cache_invalidate_range((uintptr_t)&fw_dma_req, sizeof(fw_dma_req));
 
         uint32_t ctrl = bswap32(fw_dma_req.control);
         if ((ctrl & ~FW_CFG_DMA_CTL_ERROR) == 0U) {
             if (control & FW_CFG_DMA_CTL_READ)
-                cache_invalidate_range_local((uintptr_t)data, len);
+                cache_invalidate_range((uintptr_t)data, len);
 
             if (ctrl & FW_CFG_DMA_CTL_ERROR) {
                 uart_puts("[FB] fw_cfg DMA: errore segnalato da QEMU\n");
@@ -783,7 +766,8 @@ static const font_ext_entry_t font_ext[] = {
 
 /*
  * font_ext_lookup — ricerca binaria del glyph per codepoint Unicode.
- * Ritorna puntatore al glyph 8×16, o NULL se non trovato.
+ * Ritorna il glyph per cp se trovato, altrimenti il glyph di U+FFFD.
+ * Mai NULL — U+FFFD è garantito essere l'ultimo entry della tabella.
  * WCET: O(log FONT_EXT_COUNT) = costante per tabella fissa.
  */
 static const uint8_t *font_ext_lookup(uint32_t cp)
@@ -798,23 +782,15 @@ static const uint8_t *font_ext_lookup(uint32_t cp)
         else
             hi = mid;
     }
-    /* Non trovato: usa replacement character se è nella tabella */
-    if (cp != 0xFFFDU)
-        return font_ext_lookup(0xFFFDU);
-    return (const uint8_t *)0; /* safety: 0xFFFD è sempre in tabella */
+    /* Non trovato: U+FFFD è sempre l'ultimo entry */
+    return font_ext[FONT_EXT_COUNT - 1U].glyph;
 }
-
-/* Glyph 8x16 "fallback generico" usato solo se 0xFFFD manca dalla tabella */
-static const uint8_t font_unknown[16] = {
-    0xFE,0x82,0xBA,0xA2,0xAA,0xA2,0xBA,0xA2,0xBA,0xA2,0xBA,0x82,0xFE,0x00,0x00,0x00
-};
 
 /*
  * fb_draw_char_utf8 — disegna un singolo codepoint Unicode.
  *
  * - ASCII (0x20–0x7E): usa font_8x16 direttamente O(1).
- * - Extended (>0x7E):  usa font_ext_lookup() O(log N).
- * - Codepoint sconosciuto: glyph "?" box.
+ * - Extended (>0x7E):  usa font_ext_lookup() O(log N), mai NULL.
  */
 void fb_draw_char_utf8(uint32_t x, uint32_t y, uint32_t cp,
                        uint32_t fg, uint32_t bg)
@@ -822,14 +798,11 @@ void fb_draw_char_utf8(uint32_t x, uint32_t y, uint32_t cp,
     const uint8_t *glyph;
 
     if (cp >= 0x20U && cp <= 0x7EU) {
-        /* ASCII: lookup O(1) nel font esistente */
-        int idx = (int)(cp - 0x20U);
-        glyph = font_8x16[idx];
+        glyph = font_8x16[(int)(cp - 0x20U)];
     } else if (cp == '\t' || cp == '\n' || cp == '\r') {
-        return; /* controllo — ignorato in questa chiamata */
+        return;
     } else {
         glyph = font_ext_lookup(cp);
-        if (!glyph) glyph = font_unknown;
     }
 
     for (uint32_t row = 0; row < 16; row++) {

@@ -32,69 +32,18 @@
  */
 
 #include "gpu_internal.h"
+#include "virtio_mmio.h"
 #include "framebuffer.h"
 #include "mmu.h"
 #include "timer.h"
 #include "uart.h"
 
-/* ── VirtIO-MMIO register offsets ───────────────────────────────── */
-
-#define VMMIO_BASE           0x0a000000UL
-#define VMMIO_SLOT_SIZE      0x200UL
-#define VMMIO_MAX_SLOTS      32U
-
-#define VMMIO_MAGIC          0x000U
-#define VMMIO_VERSION        0x004U
-#define VMMIO_DEVICE_ID      0x008U
-#define VMMIO_VENDOR_ID      0x00CU
-#define VMMIO_DEV_FEATURES   0x010U
-#define VMMIO_DEV_FEAT_SEL   0x014U
-#define VMMIO_DRV_FEATURES   0x020U
-#define VMMIO_DRV_FEAT_SEL   0x024U
-#define VMMIO_QUEUE_SEL      0x030U
-#define VMMIO_QUEUE_NUM_MAX  0x034U
-#define VMMIO_QUEUE_NUM      0x038U
-#define VMMIO_QUEUE_READY    0x044U
-#define VMMIO_QUEUE_NOTIFY   0x050U
-#define VMMIO_IRQ_STATUS     0x060U
-#define VMMIO_IRQ_ACK        0x064U
-#define VMMIO_STATUS         0x070U
-#define VMMIO_QUEUE_DESC_LO  0x080U
-#define VMMIO_QUEUE_DESC_HI  0x084U
-#define VMMIO_QUEUE_DRV_LO   0x090U   /* driver = available ring */
-#define VMMIO_QUEUE_DRV_HI   0x094U
-#define VMMIO_QUEUE_DEV_LO   0x0A0U   /* device = used ring      */
-#define VMMIO_QUEUE_DEV_HI   0x0A4U
-
-/* Magic, IDs */
-#define VMMIO_MAGIC_VALUE    0x74726976UL   /* "virt" little-endian */
-#define VIRTIO_DEVICE_GPU    16U
-
-/* Device status bits */
-#define VSTAT_ACKNOWLEDGE    1U
-#define VSTAT_DRIVER         2U
-#define VSTAT_DRIVER_OK      4U
-#define VSTAT_FEATURES_OK    8U
-#define VSTAT_FAILED         128U
-
-/* Generic feature: VIRTIO_F_VERSION_1 lives in sel=1, bit 0 (= bit 32) */
-#define VIRTIO_F_VERSION_1   (1U << 0)
+/* GPU-specific feature flag */
 #define VIRTIO_GPU_FLAG_FENCE (1U << 0)
 
-/* Descriptor flags */
-#define VRING_DESC_F_NEXT    1U
-#define VRING_DESC_F_WRITE   2U   /* device writes into this buf */
-
-/* ── Split virtqueue structures ─────────────────────────────────── */
+/* ── Split virtqueue structures per GPU (VQ_SIZE entries) ────────── */
 
 #define VQ_SIZE  16U
-
-typedef struct {
-    uint64_t addr;
-    uint32_t len;
-    uint16_t flags;
-    uint16_t next;
-} __attribute__((packed)) vring_desc_t;         /* 16 bytes */
 
 typedef struct {
     uint16_t flags;
@@ -102,11 +51,6 @@ typedef struct {
     uint16_t ring[VQ_SIZE];
     uint16_t used_event;
 } __attribute__((packed)) vring_avail_t;        /* 38 bytes */
-
-typedef struct {
-    uint32_t id;
-    uint32_t len;
-} __attribute__((packed)) vring_used_elem_t;    /* 8 bytes  */
 
 typedef struct {
     uint16_t flags;
@@ -180,23 +124,6 @@ static void vgpu_pr_u32(uint32_t v)
         uart_putc(buf[len]);
 }
 
-static void cache_invalidate_range_local(uintptr_t start, size_t size)
-{
-    uint64_t ctr;
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-
-    uintptr_t line = (uintptr_t)(4UL << ((ctr >> 16) & 0xFU));
-    uintptr_t mask = line - 1U;
-    uintptr_t addr = start & ~mask;
-    uintptr_t end  = start + size;
-
-    while (addr < end) {
-        __asm__ volatile("dc ivac, %0" :: "r"(addr) : "memory");
-        addr += line;
-    }
-
-    __asm__ volatile("dsb sy" ::: "memory");
-}
 
 /* ── VirtIO GPU command types & structures ──────────────────────── */
 
@@ -340,7 +267,7 @@ static int vq_send_expect(uint32_t req_size, uint32_t resp_size,
      */
     cache_flush_range((uintptr_t)vq_mem, sizeof(vq_mem));
     cache_flush_range((uintptr_t)vgpu_cmd, req_size);
-    cache_invalidate_range_local((uintptr_t)vgpu_resp, resp_size);
+    cache_invalidate_range((uintptr_t)vgpu_resp, resp_size);
 
     vmmio_wr(VMMIO_QUEUE_NOTIFY, 0);            /* control queue = 0 */
 
@@ -352,11 +279,11 @@ static int vq_send_expect(uint32_t req_size, uint32_t resp_size,
      */
     uint32_t timeout = 2000000U;
     while (timeout-- > 0U) {
-        cache_invalidate_range_local((uintptr_t)VQ_USED, sizeof(*VQ_USED));
+        cache_invalidate_range((uintptr_t)VQ_USED, sizeof(*VQ_USED));
         if (VQ_USED->idx != used_snap) break;
 
         if (vmmio_rd(VMMIO_IRQ_STATUS) != 0U) {
-            cache_invalidate_range_local((uintptr_t)VQ_USED, sizeof(*VQ_USED));
+            cache_invalidate_range((uintptr_t)VQ_USED, sizeof(*VQ_USED));
             if (VQ_USED->idx != used_snap) break;
         }
     }
@@ -365,8 +292,8 @@ static int vq_send_expect(uint32_t req_size, uint32_t resp_size,
     if (isr)
         vmmio_wr(VMMIO_IRQ_ACK, isr);
 
-    cache_invalidate_range_local((uintptr_t)VQ_USED, sizeof(*VQ_USED));
-    cache_invalidate_range_local((uintptr_t)vgpu_resp, resp_size);
+    cache_invalidate_range((uintptr_t)VQ_USED, sizeof(*VQ_USED));
+    cache_invalidate_range((uintptr_t)vgpu_resp, resp_size);
     if (VQ_USED->idx == used_snap) {
         uart_puts("[VGPU] WARN: timeout waiting control queue completion\n");
         return -1;

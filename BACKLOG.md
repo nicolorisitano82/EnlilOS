@@ -149,9 +149,9 @@ Lookup O(1), nessuna lista, nessuna ricerca, nessuna allocazione nel hot path.
 | 1 | `write` | Sì | fd=1/2 → UART; fd_table per tipo; `/dev/null` → discard |
 | 2 | `read` | Sì (non-blocking) | fd=0 → EAGAIN (keyboard M4-01); `/dev/null` → EOF |
 | 3 | `exit` | Sì | TCB_STATE_ZOMBIE + sched_block(); non ritorna |
-| 4 | `open` | No | `/dev/console`, `/dev/tty`, `/dev/null`; ENOENT per il resto (VFS M5-02) |
+| 4 | `open` | No | Risoluzione path via VFS (`/`, `/dev`, `/data`, `/sysroot`) |
 | 5 | `close` | Sì | Libera slot fd; protegge fd 0/1/2 |
-| 6 | `fstat` | No | Stub → 0 (struct stat non popolata, VFS M5-02) |
+| 6 | `fstat` | No | `stat_t` minimale popolata dal backend VFS |
 | 7 | `mmap` | No | MAP_ANONYMOUS: phys_alloc_pages(order) + zero-fill; PA==VA (identity map) |
 | 8 | `munmap` | No | phys_free_pages(addr, order) |
 | 9 | `brk` | Sì | Per-task break pointer, area HEAP_BASE + idx×4MB; lazy-init; O(1) |
@@ -426,7 +426,7 @@ cooperativi senza introdurre ancora process group o handler utente.
 
 ---
 
-### ⬜ M4-05 · Mouse Input (VirtIO / PS/2)
+### ✅ M4-05 · Mouse Input (VirtIO / PS/2)
 **Priorità:** MEDIA
 
 Supporto puntatore per QEMU `virt`, con backend preferito `virtio-mouse-device`
@@ -435,9 +435,12 @@ e compatibilità futura con PS/2 mouse dove disponibile.
 - Probe `virtio-input` per device pointer/tablet via `virtio-mmio`
 - Eventi `EV_REL` / `EV_ABS` + pulsanti `BTN_LEFT/RIGHT/MIDDLE`
 - Ring buffer SPSC per eventi mouse (`dx`, `dy`, wheel, button mask)
-- API kernel non bloccante: `mouse_get_event()` / coda eventi per future syscall
-- Integrazione con server grafico/compositor per cursore, click e drag
-- Fallback opzionale PS/2 mouse (`IRQ_MOUSE`) se il target lo espone davvero
+- API kernel non bloccante: `mouse_get_event()` per consumer grafici
+- Integrazione con la boot console grafica: cursore guest, coordinate live,
+  stato pulsanti e viewer degli eventi click/move/wheel
+- `run-gpu` espone `virtio-mouse-device` e nasconde il cursore host
+- Fallback PS/2 lasciato come estensione futura: su QEMU `virt` il path attivo
+  e supportato e' VirtIO
 
 **Nota design:** il backend mouse deve riusare il pattern vring/IRQ/cache già
 introdotto in M4-02 per limitare la complessità e mantenere WCET prevedibile.
@@ -477,24 +480,74 @@ Esteso il sistema di rendering testuale per supportare UTF-8 con Latin-1 Supplem
 
 ---
 
-## MILESTONE 5 — Filesystem ReiserFS
+## MILESTONE 5 — Filesystem ext4
 
-### ⬜ M5-01 · VirtIO Block Device
-**Priorità:** CRITICA (prerequisito ReiserFS)
+### Decisione architetturale · Sostituzione ReiserFS → ext4
 
-**RT design:** I/O bloccante è incompatibile con task hard-RT. Soluzione:
-- Task hard-RT **non** accedono mai al filesystem direttamente
-- I/O su disco gestito da un server dedicato a priorità BASSA
-- Task RT comunicano col server via IPC con timeout: se il server non risponde
-  entro il deadline → il task RT continua senza i dati (graceful degradation)
+Per EnlilOS, `ext4` e' il fit migliore se l'obiettivo non e' un sistema piccolo
+embedded ma un OS realtime affidabile e anche general-purpose:
 
-- VirtIO-blk: `-drive format=raw,file=disk.img -device virtio-blk-device`
-- Virtqueue con split ring, DMA asincrono
-- Buffer cache: 64 blocchi × 4KB = 256KB, LRU, gestita dal server blk (non nel kernel)
+- `ext4`: e' maturo, diffusissimo, con tool di recovery consolidati, journaling,
+  extent, `fsck`, semantica POSIX familiare e un ecosistema reale per immagini,
+  test, bootstrap e manutenzione.
+- `littlefs`: resta eccellente per storage embedded e footprint bounded, ma e'
+  pensato esplicitamente per microcontroller e flash piccoli; come filesystem
+  principale di un OS general-purpose sarebbe una scelta troppo limitante.
+- `XFS`: ottimo per scalabilita' e throughput, ma e' piu' adatto come scelta
+  specialistica per grossi volumi/dataset che come filesystem root "default"
+  di un microkernel ancora in crescita.
+- `F2FS`: interessante su flash, ma cleaning e politiche adattive introducono
+  piu' variabilita' e complessita' rispetto al compromesso che ci serve qui.
+
+**Decisione:** sostituire ReiserFS con `ext4` come filesystem persistente di
+milestone 5. In ottica RT, i task hard-RT continuano comunque a non fare I/O
+diretto: il filesystem vive dietro un server VFS/blk con IPC e timeout.
+
+### Struttura consigliata del sottosistema storage
+
+- Bootstrap: `initrd` / `CPIO` in RAM per il primo userspace e il recovery path
+- Persistenza principale: `ext4` su `virtio-blk` come root/data filesystem
+- Policy RT: tutte le operazioni disco passano da server dedicati a priorita'
+  bassa, mai direttamente dal task hard-RT
+- Profilo integrita'/latenza iniziale consigliato per `ext4`:
+  `data=ordered`, `nodelalloc`, `commit=1`, `max_batch_time=0`
+- Profilo massima integrita' per sottoalberi critici o partizioni critiche:
+  `data=journal` dove la latenza extra e' accettabile
+
+### ✅ M5-01 · VirtIO Block Device
+**Stato:** COMPLETATA
+
+**RT design:** I/O bloccante mai da task hard-RT; solo da server blk a priorità bassa.
+
+**Implementazione (`drivers/blk.c` + `include/blk.h`):**
+
+- Probe virtio-mmio: scansiona 32 slot, rileva device ID 2 (virtio-blk), versione 2
+- Negoziazione feature: `VIRTIO_F_VERSION_1`; nessuna feature blk-specifica richiesta
+- Vring split a 16 entry (queue depth = `BLK_QUEUE_DEPTH`), memoria statica 4KB allineata
+- **Free list di descriptor** intrusive a 3 slot per richiesta (hdr + data + status):
+  alloc O(1), free O(1)
+- **`blk_read_sync` / `blk_write_sync`**: I/O sincrono con busy-wait bounded
+  (`BLK_POLL_TIMEOUT = 5 000 000 cicli ≈ 80ms a 62.5 MHz`) — usato solo da server blk
+- `VRING_AVAIL_F_NO_INTERRUPT` impostato: nessuna IRQ, solo polling
+- `bvq_submit()`: flush minimo — solo avail ring e descriptor toccati (non intera pagina)
+- Capacity letta dal config space al boot (offset 0 = `uint64_t capacity`)
+- Target QEMU: `run-blk` in Makefile con `disk.img` raw 64MB creata da `make disk.img`
+
+**API pubblica:**
+- `blk_init()` — rilevamento + init al boot
+- `blk_is_ready()` — 1 se pronto
+- `blk_sector_count()` — settori totali
+- `blk_read_sync(sector, buf, count)` — legge count×512B
+- `blk_write_sync(sector, buf, count)` — scrive count×512B
+
+**Codici di errore:** `BLK_OK`, `BLK_ERR_NOT_READY`, `BLK_ERR_IO`, `BLK_ERR_TIMEOUT`, `BLK_ERR_RANGE`, `BLK_ERR_BUSY`
+
+**Dipende da:** M3-01 (niente IPC ancora, server blk sarà M5-02+)
+**Necessario per:** M5-02 VFS layer, M5-03 ext4 read path
 
 ---
 
-### ⬜ M5-02 · VFS Layer
+### ✅ M5-02 · VFS Layer
 **Priorità:** CRITICA
 
 **RT design:** VFS gira interamente come server user-space (stile Hurd).
@@ -503,31 +556,50 @@ Il kernel non sa nulla di filesystem. I task comunicano via IPC.
 - `vfs_ops_t`: `open`, `read`, `write`, `readdir`, `stat`, `close`
 - Mount table: path → driver (array statico, nessuna allocazione runtime)
 - File descriptor table per processo: array fisso di MAX_FD=64
+- Mount profile iniziale:
+  `/` → `initrd` read-only
+  `/sysroot` oppure `/data` → `ext4` su `virtio-blk`
+
+**Implementato ora:** bootstrap VFS in-kernel con mount table statica,
+`devfs`, rootfs read-only di bootstrap, mount `/data` e `/sysroot`
+preparati quando `virtio-blk` e' pronto, e syscall `open/read/write/close/fstat`
+instradate interamente su `vfs_ops_t`.
 
 ---
 
-### ⬜ M5-03 · ReiserFS v3 — Read-Only
+### ⬜ M5-03 · ext4 — Mount & Read Path
 **Priorità:** ALTA
 
-Parsing del formato ReiserFS v3.3:
-- Superblock (offset 64KB): magic `0x1BADA1`, block size, root block
-- B-tree (S+tree): chiave `(dir_id, obj_id, offset, type)`
-- Item types: `DIRENTRY`, `STAT_DATA`, `INDIRECT`, `DIRECT` (dati inline)
-- `reiserfs_open(path)` → ricerca B-tree per nome
-- `reiserfs_read(inode, offset, buf, len)` → lettura blocchi dati
+Integrazione di `ext4` nel server VFS user-space:
+- Parsing superblock, block group descriptors, inode table, extent tree
+- Mount read-only iniziale per ridurre il rischio e chiudere il bootstrap
+- `open`, `read`, `readdir`, `stat` mappati sul server VFS
+- Buffer cache e inode cache statiche/bounded nel server filesystem
+- Supporto immagine host tramite `mkfs.ext4`, `e2fsck`, `debugfs`
 
-Tool di creazione immagine (host): `mkreiserfs disk.img`
+Tool immagine host iniziali:
+- `mkfs.ext4 disk.img`
+- `e2fsck -f disk.img`
+- Layout consigliato dev: blocchi 4KB, immagine raw montata via `virtio-blk`
 
 ---
 
-### ⬜ M5-04 · ReiserFS v3 — Read-Write
+### ⬜ M5-04 · ext4 — Write Path & Sync Policy
 **Priorità:** MEDIA
-Modifica B-tree, allocazione blocchi, replay journal al mount.
+
+- `write`, `mkdir`, `unlink`, `rename`, `truncate`
+- Journal replay al mount e supporto writeback del journal
+- Politica esplicita di `sync` / `fsync` per confinare la latenza nei punti noti
+- Flush su deadline-safe server thread, mai nel task hard-RT chiamante
+- Policy di mount per dev/prod:
+  dev → `data=ordered,nodelalloc,commit=1,max_batch_time=0`
+  critical → valutare `data=journal`
+- Test crash-consistency usando power-cut simulato sull'immagine raw
 
 ---
 
 ### ⬜ M5-05 · initrd / Ramdisk Bootstrap
-**Priorità:** ALTA (prima di ReiserFS r/w)
+**Priorità:** ALTA (prima di ext4 r/w)
 
 Formato CPIO: montato come `/` al boot, contiene il primo ELF da eseguire.
 Tutto in RAM → latenza di accesso O(1), adatto a task RT che leggono config al boot.

@@ -36,6 +36,7 @@ C_SRCS   = kernel/main.c \
            kernel/timer.c \
            kernel/sched.c \
            kernel/tty.c \
+           kernel/vfs.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \
            kernel/gpu_syscall.c \
@@ -47,6 +48,8 @@ C_SRCS   = kernel/main.c \
            drivers/gpu/gpu_virtio.c \
            drivers/uart.c \
            drivers/keyboard.c \
+           drivers/mouse.c \
+           drivers/blk.c \
            drivers/framebuffer.c
 
 # Oggetti
@@ -58,7 +61,7 @@ KERNEL_BIN = enlil.bin
 
 # === Targets ===
 
-.PHONY: all clean run run-fb debug dump
+.PHONY: all clean run run-fb run-gpu run-blk debug dump
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -118,7 +121,32 @@ run-gpu: $(KERNEL)
 		-global virtio-mmio.force-legacy=false \
 		-device virtio-gpu-device \
 		-device virtio-keyboard-device \
-		-display default,show-cursor=on \
+		-device virtio-mouse-device \
+		-display default,show-cursor=off \
+		-monitor none \
+		-serial stdio \
+		-kernel $(KERNEL)
+
+# Crea un'immagine disco raw vuota da 64MB per il testing di M5-01
+disk.img:
+	dd if=/dev/zero of=disk.img bs=1M count=64 2>/dev/null
+	@echo "  disk.img creata (64MB raw)"
+
+# Esegui con VirtIO-GPU + VirtIO-Block (M5-01)
+run-blk: $(KERNEL) disk.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-accel tcg \
+		-cpu cortex-a72 \
+		-m 512M \
+		-vga none \
+		-global virtio-mmio.force-legacy=false \
+		-device virtio-gpu-device \
+		-device virtio-keyboard-device \
+		-device virtio-mouse-device \
+		-drive format=raw,file=disk.img,if=none,id=blk0 \
+		-device virtio-blk-device,drive=blk0 \
+		-display default,show-cursor=off \
 		-monitor none \
 		-serial stdio \
 		-kernel $(KERNEL)

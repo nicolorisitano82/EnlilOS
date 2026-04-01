@@ -49,8 +49,11 @@
 #define EFAULT              14
 #define EBADF               9
 #define EBUSY               16
+#define ENOTDIR             20
+#define EISDIR              21
 #define EINVAL              22
 #define ENFILE              23
+#define EROFS               30
 #define EIO                 5
 #define ENOSYS              38
 
@@ -94,6 +97,27 @@ typedef struct {
     int64_t tv_sec;
     int64_t tv_nsec;
 } timespec_t;
+
+/* ── struct stat minimale (M5-02) ──────────────────────────────────── */
+
+#define S_IFMT      0170000U
+#define S_IFREG     0100000U
+#define S_IFDIR     0040000U
+#define S_IFCHR     0020000U
+
+#define S_IRUSR     0400U
+#define S_IWUSR     0200U
+#define S_IRGRP     0040U
+#define S_IWGRP     0020U
+#define S_IROTH     0004U
+#define S_IWOTH     0002U
+
+typedef struct {
+    uint32_t st_mode;
+    uint32_t st_blksize;
+    uint64_t st_size;
+    uint64_t st_blocks;
+} stat_t;
 
 /* ── Flag syscall ───────────────────────────────────────────────────── */
 
