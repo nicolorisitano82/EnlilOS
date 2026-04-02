@@ -11,6 +11,7 @@
  */
 
 #include "syscall.h"
+#include "cap.h"
 #include "kdebug.h"
 #include "keyboard.h"
 #include "elf_loader.h"
@@ -1388,7 +1389,24 @@ void syscall_init(void)
         sys_kmon_broadcast, SYSCALL_FLAG_RT, "kmon_broadcast"
     };
 
-    uart_puts("[SYSCALL] 42 syscall base/UX/signal/mreact/ksem/kmon registrate\n");
+    /* === Capability System (M9-01) === */
+    syscall_table[SYS_CAP_ALLOC]  = (syscall_entry_t){
+        sys_cap_alloc,  0,               "cap_alloc"
+    };
+    syscall_table[SYS_CAP_SEND]   = (syscall_entry_t){
+        sys_cap_send,   SYSCALL_FLAG_RT, "cap_send"
+    };
+    syscall_table[SYS_CAP_REVOKE] = (syscall_entry_t){
+        sys_cap_revoke, SYSCALL_FLAG_RT, "cap_revoke"
+    };
+    syscall_table[SYS_CAP_DERIVE] = (syscall_entry_t){
+        sys_cap_derive, 0,               "cap_derive"
+    };
+    syscall_table[SYS_CAP_QUERY]  = (syscall_entry_t){
+        sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
+    };
+
+    uart_puts("[SYSCALL] 47 syscall base/UX/signal/mreact/ksem/kmon/cap registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

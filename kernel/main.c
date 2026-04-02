@@ -29,6 +29,7 @@
 #include "selftest.h"
 #include "term80.h"
 #include "vfs.h"
+#include "cap.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -1752,6 +1753,10 @@ void kernel_main(void)
     kmem_cache_free(port_cache, p1_nc);
     kmem_cache_free(ipc_cache,  m1);
     uart_puts("[KHEAP] Test named cache alloc/free OK\n");
+
+    /* === Capability System (M9-01) === */
+    cap_init();
+    uart_puts("[CAP] Capability system inizializzato\n");
 
     /* === Fase 8: Microkernel === */
     mk_init();

@@ -19,6 +19,7 @@
 #include "mreact.h"
 #include "ksem.h"
 #include "kmon.h"
+#include "cap.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -63,7 +64,14 @@
 #define SYS_KMON_WAIT             99
 #define SYS_KMON_SIGNAL           110
 #define SYS_KMON_BROADCAST        111
-#define SYS_KILL            62
+#define SYS_KILL            129   /* Linux AArch64 standard */
+
+/* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
+#define SYS_CAP_ALLOC       60
+#define SYS_CAP_SEND        61
+#define SYS_CAP_REVOKE      62
+#define SYS_CAP_DERIVE      63
+#define SYS_CAP_QUERY       64
 
 /* Range ANE (M3-03): 100–119 */
 #define SYS_ANE_FIRST       100
