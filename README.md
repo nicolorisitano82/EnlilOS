@@ -23,6 +23,9 @@ Il backlog principale `BACKLOG.md` e' chiuso: il selftest QEMU corrente passa co
 
 ## Architettura
 
+Per una vista completa dell'architettura target del sistema, basata su `BACKLOG.md`,
+`BACKLOG2.md` e `BACKLOG3.md`, vedi [ARCHITETTURA_TARGET_ENLILOS.md](/Users/nicolo/nros/docs/ARCHITETTURA_TARGET_ENLILOS.md).
+
 ```text
 +---------------------------------------------------------------+
 |                           User Space                          |
