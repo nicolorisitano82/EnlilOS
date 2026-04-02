@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
 #include "mmu.h"
@@ -553,24 +554,26 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
 
 static void schedule_locked(uint64_t flags)
 {
-    int next_prio = bitmap_find_first();
-    if (next_prio < 0 || next_prio > 255) {
-        irq_restore(flags);
-        return;
-    }
-
-    sched_tcb_t *next = rq_pop((uint8_t)next_prio);
-    if (!next) {
-        irq_restore(flags);
-        return;
-    }
-
     sched_tcb_t *prev = current_task;
+    sched_tcb_t *next = NULL;
 
-    if (next == prev) {
-        rq_push(next);
-        irq_restore(flags);
-        return;
+    for (;;) {
+        int next_prio = bitmap_find_first();
+
+        if (next_prio < 0 || next_prio > 255) {
+            irq_restore(flags);
+            return;
+        }
+
+        next = rq_pop((uint8_t)next_prio);
+        if (!next)
+            continue;
+
+        /* Scarta entry stale: task non READY o duplicato del corrente. */
+        if (next == prev || next->state != TCB_STATE_READY)
+            continue;
+
+        break;
     }
 
     if (prev->state == TCB_STATE_RUNNING) {
@@ -589,6 +592,7 @@ static void schedule_locked(uint64_t flags)
 
     irq_restore(flags);
     sched_context_switch(prev, next);
+    __asm__ volatile("" ::: "memory");
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -840,6 +844,7 @@ void sched_task_bootstrap(uint64_t entry_reg)
 void sched_task_exit(void)
 {
     if (current_task) {
+        kmon_task_cleanup(current_task);
         ksem_task_cleanup(current_task);
         mreact_task_cleanup(current_task);
         signal_task_exit(current_task);

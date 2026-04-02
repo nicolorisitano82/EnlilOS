@@ -1048,7 +1048,7 @@ static void bootcli_render(void)
                           "Modo: FRAMEBUFFER DI BOOT",
                       accent_color, panel_color);
     bootcli_draw_text(48U, 92U,
-                      "Comandi: help clear pwd cd gpu selftest fs ls cat write",
+                      "Comandi: help clear pwd cd gpu selftest [nome] fs ls cat write",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 112U,
                       "append mkdir truncate rm mv fsync sync nsh mreactdemo mouse",
@@ -1148,7 +1148,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("pwd       mostra la directory corrente");
         bootcli_push_line("cd PATH   cambia directory corrente");
         bootcli_push_line("gpu       mostra il backend grafico attivo");
-        bootcli_push_line("selftest  esegue la suite kernel dei self-test");
+        bootcli_push_line("selftest [nome] esegue la suite o un singolo self-test");
         bootcli_push_line("fs        mostra lo stato del mount ext4");
         bootcli_push_line("ls [PATH] lista una directory VFS (default: cwd)");
         bootcli_push_line("cat PATH  mostra il contenuto di un file");
@@ -1199,6 +1199,11 @@ static void bootcli_execute_command(void)
         bootcli_push_line((rc == 0) ?
                           "Selftest: PASS (vedi log seriale per il dettaglio)." :
                           "Selftest: FAIL (vedi log seriale per il dettaglio).");
+    } else if (bootcli_startswith(bootcli_input, "selftest ")) {
+        int rc = selftest_run_named(bootcli_input + 9);
+        bootcli_push_line((rc == 0) ?
+                          "Selftest mirato: PASS (vedi log seriale per il dettaglio)." :
+                          "Selftest mirato: FAIL (vedi log seriale per il dettaglio).");
     } else if (bootcli_streq(bootcli_input, "fs")) {
         bootcli_cmd_fs();
     } else if (bootcli_streq(bootcli_input, "ls")) {

@@ -4,6 +4,7 @@
 
 #include "signal.h"
 
+#include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
 #include "mmu.h"
@@ -178,6 +179,7 @@ static void signal_terminate_current(void)
     if (!current_task)
         return;
 
+    kmon_task_cleanup(current_task);
     ksem_task_cleanup(current_task);
     mreact_task_cleanup(current_task);
     signal_task_exit(current_task);

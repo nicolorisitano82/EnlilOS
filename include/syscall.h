@@ -18,6 +18,7 @@
 #include "signal.h"
 #include "mreact.h"
 #include "ksem.h"
+#include "kmon.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -55,6 +56,13 @@
 #define SYS_KSEM_TRYWAIT          92
 #define SYS_KSEM_GETVALUE         93
 #define SYS_KSEM_ANON             94
+#define SYS_KMON_CREATE           95
+#define SYS_KMON_DESTROY          96
+#define SYS_KMON_ENTER            97
+#define SYS_KMON_EXIT             98
+#define SYS_KMON_WAIT             99
+#define SYS_KMON_SIGNAL           110
+#define SYS_KMON_BROADCAST        111
 #define SYS_KILL            62
 
 /* Range ANE (M3-03): 100–119 */

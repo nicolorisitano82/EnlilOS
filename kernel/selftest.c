@@ -13,6 +13,7 @@
 #include "ext4.h"
 #include "gpu.h"
 #include "kdebug.h"
+#include "kmon.h"
 #include "ksem.h"
 #include "microkernel.h"
 #include "mmu.h"
@@ -560,6 +561,19 @@ static volatile uint32_t ksem_test_waiter_ok;
 static volatile int32_t  ksem_test_waiter_rc;
 static volatile uint32_t ksem_test_hog_release;
 
+static volatile kmon_t   kmon_test_handle;
+static volatile uint32_t kmon_test_holder_ready;
+static volatile uint32_t kmon_test_holder_release;
+static volatile uint32_t kmon_test_holder_effprio;
+static volatile uint32_t kmon_test_enter_ok;
+static volatile uint32_t kmon_test_cond_waiting;
+static volatile uint32_t kmon_test_cond_value;
+static volatile uint32_t kmon_test_cond_ack;
+static volatile uint32_t kmon_test_signal_ok;
+static volatile int32_t  kmon_test_wait_rc;
+static volatile uint32_t kmon_test_timeout_ok;
+static volatile uint32_t kmon_test_signal_seen_cond;
+
 static void selftest_ksem_holder_task(void)
 {
     static const char sem_name[] = "/selftest-ksem-rt";
@@ -709,6 +723,176 @@ static int selftest_case_ksem(void)
     return 0;
 }
 
+static void selftest_kmon_holder_task(void)
+{
+    if (kmon_enter_current((kmon_t)kmon_test_handle) == 0) {
+        uart_puts("[SELFTEST] kmon-holder acquired\n");
+        kmon_test_holder_effprio = sched_task_effective_priority(current_task);
+        kmon_test_holder_ready = 1U;
+        while (!kmon_test_holder_release)
+            sched_yield();
+        (void)kmon_exit_current((kmon_t)kmon_test_handle);
+        uart_puts("[SELFTEST] kmon-holder exited\n");
+    }
+    sched_task_exit();
+}
+
+static void selftest_kmon_enter_task(void)
+{
+    if (kmon_enter_current((kmon_t)kmon_test_handle) == 0) {
+        uart_puts("[SELFTEST] kmon-enter acquired\n");
+        kmon_test_enter_ok = 1U;
+        (void)kmon_exit_current((kmon_t)kmon_test_handle);
+        uart_puts("[SELFTEST] kmon-enter exited\n");
+    }
+    sched_task_exit();
+}
+
+static void selftest_kmon_waiter_task(void)
+{
+    int rc = -EIO;
+
+    if (kmon_enter_current((kmon_t)kmon_test_handle) == 0) {
+        kmon_test_cond_waiting = 1U;
+        if (kmon_test_cond_value == 0U)
+            rc = kmon_wait_current((kmon_t)kmon_test_handle, 0U, 500000000ULL);
+        else
+            rc = 0;
+
+        kmon_test_wait_rc = rc;
+        if (rc == 0 && kmon_test_cond_value == 1U)
+            kmon_test_cond_ack = 1U;
+        (void)kmon_exit_current((kmon_t)kmon_test_handle);
+    } else {
+        kmon_test_wait_rc = -EIO;
+    }
+    sched_task_exit();
+}
+
+static void selftest_kmon_signaler_task(void)
+{
+    while (!kmon_test_cond_waiting)
+        sched_yield();
+
+    if (kmon_enter_current((kmon_t)kmon_test_handle) == 0) {
+        kmon_test_cond_value = 1U;
+        kmon_test_signal_seen_cond = kmon_test_cond_value;
+        if (kmon_signal_current((kmon_t)kmon_test_handle, 0U) == 0) {
+            kmon_test_signal_ok = 1U;
+        }
+        (void)kmon_exit_current((kmon_t)kmon_test_handle);
+    }
+    sched_task_exit();
+}
+
+static int selftest_case_kmon(void)
+{
+    static const char case_name[] = "kmon-core";
+    sched_tcb_t *holder = NULL;
+    sched_tcb_t *enterer = NULL;
+    sched_tcb_t *waiter = NULL;
+    sched_tcb_t *signaler = NULL;
+    kmon_t       handle = KMON_INVALID;
+    uint64_t     deadline;
+    int          rc;
+
+    rc = kmon_create_current(PRIO_HIGH, KMON_HOARE | KMON_RT, &handle);
+    ST_CHECK(case_name, rc == 0, "create monitor fallita");
+    uart_puts("[SELFTEST] kmon phase create\n");
+    kmon_test_handle = handle;
+    kmon_test_holder_ready = 0U;
+    kmon_test_holder_release = 0U;
+    kmon_test_holder_effprio = 0xFFU;
+    kmon_test_enter_ok = 0U;
+    kmon_test_cond_waiting = 0U;
+    kmon_test_cond_value = 0U;
+    kmon_test_cond_ack = 0U;
+    kmon_test_signal_ok = 0U;
+    kmon_test_wait_rc = -EIO;
+    kmon_test_timeout_ok = 0U;
+    kmon_test_signal_seen_cond = 0U;
+
+    holder = sched_task_create("kmon-holder", selftest_kmon_holder_task, PRIO_HIGH);
+    ST_CHECK(case_name, holder != NULL, "creazione holder monitor fallita");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (!kmon_test_holder_ready && timer_now_ms() < deadline)
+        sched_yield();
+    ST_CHECK(case_name, kmon_test_holder_ready != 0U,
+             "holder monitor non ha acquisito il lock");
+    ST_CHECK(case_name, kmon_test_holder_effprio == PRIO_HIGH,
+             "priority ceiling non applicato");
+    uart_puts("[SELFTEST] kmon phase holder-ready\n");
+
+    holder->priority = PRIO_LOW;
+    enterer = sched_task_create("kmon-enter", selftest_kmon_enter_task, PRIO_KERNEL);
+    ST_CHECK(case_name, enterer != NULL, "creazione enter waiter fallita");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (sched_task_effective_priority(holder) != PRIO_KERNEL &&
+           timer_now_ms() < deadline)
+        sched_yield();
+    ST_CHECK(case_name, sched_task_effective_priority(holder) == PRIO_KERNEL,
+             "PI sul monitor lock non applicata");
+    uart_puts("[SELFTEST] kmon phase pi-ok\n");
+
+    kmon_test_holder_release = 1U;
+    deadline = timer_now_ms() + 1000ULL;
+    while (!kmon_test_enter_ok && timer_now_ms() < deadline)
+        sched_yield();
+    ST_CHECK(case_name, kmon_test_enter_ok != 0U,
+             "enter waiter non ha acquisito il monitor");
+    uart_puts("[SELFTEST] kmon phase enter-ok\n");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (((holder && sched_task_find(holder->pid) &&
+             sched_task_find(holder->pid)->state != TCB_STATE_ZOMBIE) ||
+            (enterer && sched_task_find(enterer->pid) &&
+             sched_task_find(enterer->pid)->state != TCB_STATE_ZOMBIE)) &&
+           timer_now_ms() < deadline)
+        sched_yield();
+
+    waiter = sched_task_create("kmon-waiter", selftest_kmon_waiter_task, PRIO_HIGH);
+    ST_CHECK(case_name, waiter != NULL, "creazione cond waiter fallita");
+    signaler = sched_task_create("kmon-signal", selftest_kmon_signaler_task, PRIO_HIGH);
+    ST_CHECK(case_name, signaler != NULL, "creazione signaler fallita");
+
+    deadline = timer_now_ms() + 1500ULL;
+    while ((!kmon_test_signal_ok || kmon_test_wait_rc != 0) &&
+           timer_now_ms() < deadline)
+        sched_yield();
+    ST_CHECK(case_name, kmon_test_wait_rc == 0,
+             "wait/signal monitor non ha completato");
+    ST_CHECK(case_name, kmon_test_signal_seen_cond == 1U,
+             "signaler non ha pubblicato la condizione");
+    ST_CHECK(case_name, kmon_test_cond_ack != 0U,
+             "waiter non ha visto la condizione vera");
+    ST_CHECK(case_name, kmon_test_signal_ok != 0U,
+             "signal monitor non ha completato");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (((waiter && sched_task_find(waiter->pid) &&
+             sched_task_find(waiter->pid)->state != TCB_STATE_ZOMBIE) ||
+            (signaler && sched_task_find(signaler->pid) &&
+             sched_task_find(signaler->pid)->state != TCB_STATE_ZOMBIE)) &&
+           timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = kmon_enter_current(handle);
+    ST_CHECK(case_name, rc == 0, "enter monitor per timedwait fallita");
+    rc = kmon_wait_current(handle, 1U, 2000000ULL);
+    if (rc == -ETIMEDOUT)
+        kmon_test_timeout_ok = 1U;
+    ST_CHECK(case_name, rc == -ETIMEDOUT,
+             "timedwait monitor non ha dato ETIMEDOUT");
+    rc = kmon_exit_current(handle);
+    ST_CHECK(case_name, rc == 0, "exit monitor dopo timedwait fallita");
+
+    rc = kmon_destroy_current(handle);
+    ST_CHECK(case_name, rc == 0, "destroy monitor fallita");
+    return 0;
+}
+
 static void selftest_ipc_server_task(void)
 {
     ipc_message_t req;
@@ -838,42 +1022,76 @@ static int selftest_case_ipc_sync(void)
     return 0;
 }
 
+static const selftest_case_t selftest_cases[] = {
+    { "vfs-rootfs",  selftest_case_rootfs    },
+    { "vfs-devfs",   selftest_case_devfs     },
+    { "ext4-core",   selftest_case_ext4      },
+    { "elf-loader",  selftest_case_elf       },
+    { "execve",      selftest_case_execve    },
+    { "elf-dynamic", selftest_case_dynelf    },
+    { "fork-cow",    selftest_case_fork      },
+    { "signal-core", selftest_case_signal    },
+    { "mreact-core", selftest_case_mreact    },
+    { "ksem-core",   selftest_case_ksem      },
+    { "kmon-core",   selftest_case_kmon      },
+    { "ipc-sync",    selftest_case_ipc_sync  },
+    { "kdebug-core", kdebug_selftest_run     },
+    { "gpu-stack",   gpu_selftest_run        },
+};
+
+int selftest_run_named(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return -EINVAL;
+
+    for (uint32_t i = 0U; i < (uint32_t)(sizeof(selftest_cases) / sizeof(selftest_cases[0])); i++) {
+        if (!st_streq(selftest_cases[i].name, name))
+            continue;
+
+        uart_puts("\n[SELFTEST] ===== EnlilOS self-test =====\n");
+        uart_puts("[SELFTEST] RUN  ");
+        uart_puts(selftest_cases[i].name);
+        uart_puts("\n");
+
+        if (selftest_cases[i].fn() == 0) {
+            uart_puts("[SELFTEST] PASS ");
+            uart_puts(selftest_cases[i].name);
+            uart_puts("\n");
+            uart_puts("[SELFTEST] SUMMARY total=1 pass=1 fail=0\n");
+            return 0;
+        }
+
+        uart_puts("[SELFTEST] SUMMARY total=1 pass=0 fail=1\n");
+        return -1;
+    }
+
+    uart_puts("[SELFTEST] FAIL selftest: caso non trovato: ");
+    uart_puts(name);
+    uart_puts("\n");
+    return -ENOENT;
+}
+
 int selftest_run_all(void)
 {
-    static const selftest_case_t cases[] = {
-        { "vfs-rootfs", selftest_case_rootfs },
-        { "vfs-devfs",  selftest_case_devfs  },
-        { "ext4-core",  selftest_case_ext4   },
-        { "elf-loader", selftest_case_elf    },
-        { "execve",     selftest_case_execve },
-        { "elf-dynamic", selftest_case_dynelf },
-        { "fork-cow",   selftest_case_fork   },
-        { "signal-core", selftest_case_signal },
-        { "mreact-core", selftest_case_mreact },
-        { "ksem-core",  selftest_case_ksem   },
-        { "ipc-sync",   selftest_case_ipc_sync },
-        { "kdebug-core", kdebug_selftest_run },
-        { "gpu-stack",  gpu_selftest_run     },
-    };
     uint32_t total = 0U;
     uint32_t passed = 0U;
     uint32_t failed = 0U;
 
     uart_puts("\n[SELFTEST] ===== EnlilOS self-test suite =====\n");
 
-    for (uint32_t i = 0U; i < (uint32_t)(sizeof(cases) / sizeof(cases[0])); i++) {
+    for (uint32_t i = 0U; i < (uint32_t)(sizeof(selftest_cases) / sizeof(selftest_cases[0])); i++) {
         int rc;
 
         total++;
         uart_puts("[SELFTEST] RUN  ");
-        uart_puts(cases[i].name);
+        uart_puts(selftest_cases[i].name);
         uart_puts("\n");
 
-        rc = cases[i].fn();
+        rc = selftest_cases[i].fn();
         if (rc == 0) {
             passed++;
             uart_puts("[SELFTEST] PASS ");
-            uart_puts(cases[i].name);
+            uart_puts(selftest_cases[i].name);
             uart_puts("\n");
         } else {
             failed++;

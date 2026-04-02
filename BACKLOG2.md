@@ -419,187 +419,65 @@ kernel/syscall.c    — ksem_init() + syscall 85-94 al boot
 
 ---
 
-### ⬜ M8-07 · Monitor Kernel (`kmon`)
+### 🟡 M8-07 · Monitor Kernel (`kmon`)
 **Priorità:** ALTA (dipende da M8-06)
 
-> Un **monitor** è la struttura di sincronizzazione più potente a livello teorico:
-> combina un mutex + una o più condition variable in un'unica unità atomica.
-> Inventato da Hoare (1974) e Brinch Hansen (1975). Presente in Java (`synchronized`),
-> Go (implicitamente), C# (`lock`), Rust (`Mutex<T>`), Ada (protected objects) —
-> ma **mai come syscall kernel nativa** in nessun OS Unix/NT.
->
-> EnlilOS lo implementa come primitiva kernel per due motivi:
-> 1. **Priority Inheritance garantita end-to-end** — non dipende dalla corretta
->    implementazione user-space; il kernel applica PI in ogni lock/wait
-> 2. **WCET misurabile** — ogni operazione ha un upper bound in cicli noto al kernel,
->    esportabile via `/proc/wcet` (M13-03)
+**Stato reale:** implementazione v1 presente nel kernel; selftest dedicato `kmon-core`
+disponibile, ma il path `wait/signal` e' ancora sensibile al timing sotto QEMU e va
+stabilizzato prima di considerare la milestone completamente chiusa.
 
----
+**Profilo v1 implementato:**
+- monitor kernel con handle opaco `kmon_t`
+- mutex implicito con owner tracking, recursion check e priority ceiling / donation best-effort
+- fino a 8 condition queue per monitor
+- `wait`, `signal`, `broadcast`, `timedwait`
+- cleanup automatico dei waiter su `exit`, `execve` e terminazione task
+- integrazione completa nel dispatcher syscall
 
-#### Modello
+**Semantica v1:**
+- `enter/exit` fanno lock/unlock del monitor in kernel
+- `wait(cond)` rilascia il lock e parcheggia il task sulla condition
+- `signal(cond)` e `broadcast(cond)` spostano i waiter dalla condition alla `enter_q`
+- il lock torna al prossimo waiter su `kmon_exit()`
+- il profilo stabile attuale e' quindi **Mesa-style / signal-and-continue**
+- il flag `KMON_HOARE` resta esposto come ABI, ma l'handoff Hoare stretto e' rinviato a una revisione successiva
 
-Un `kmon_t` è un oggetto kernel che contiene:
-- Un **mutex implicito** (non esposto separatamente) con priority ceiling protocol
-- Fino a **8 condition variable** numerate 0–7, ciascuna con la propria wait queue
-- Un **contatore di entrate** per rilevare uso ricorsivo (→ panic se ricorsione)
-
-Operazioni:
-- `kmon_enter(m)` — acquisisce il mutex; blocca se occupato; PI automatica
-- `kmon_exit(m)` — rilascia il mutex; sveglia il prossimo waiter se presente
-- `kmon_wait(m, cond)` — rilascia atomicamente il mutex + si mette in attesa sulla cond
-- `kmon_signal(m, cond)` — sveglia **uno** waiter sulla cond (Hoare semantics: il waiter
-  riacquisisce il mutex prima di continuare — garantisce che la condizione sia ancora vera)
-- `kmon_broadcast(m, cond)` — sveglia **tutti** i waiter sulla cond
-- `kmon_timedwait(m, cond, timeout_ns)` — come `kmon_wait` ma con deadline
-
-**Hoare vs Mesa semantics:**
-EnlilOS implementa **Hoare semantics** (più forti): quando `kmon_signal` sveglia un waiter,
-il segnalante si blocca temporaneamente e il waiter riacquisisce il mutex immediatamente.
-Questo elimina la necessità del pattern `while (condition) kmon_wait()` — un singolo
-`if (condition) kmon_wait()` è sufficiente e corretto.
-Su sistemi SMP (M13-02) si degrada automaticamente a Mesa semantics per performance
-(segnalante non si blocca, waiter riacquisisce in competizione) — configurabile per monitor.
-
----
-
-#### Syscall (range 95–99, adiacente a futex 98)
+**Syscall effettive registrate:**
 
 | Nr | Nome | RT-safe | Firma C |
 |----|------|---------|---------|
-| 95 | `kmon_create` | No | `(uint32_t prio_ceiling, uint32_t flags) → kmon_t` |
-| 96 | `kmon_destroy` | No | `(kmon_t m) → int` |
-| 97 | `kmon_enter` | **Sì** | `(kmon_t m) → int` |
-| 98 | `kmon_exit` | **Sì** — O(1) | `(kmon_t m) → int` |
-| 99 | `kmon_wait` | **Sì** | `(kmon_t m, uint8_t cond, uint64_t timeout_ns) → int` |
-| — | `kmon_signal` | **Sì** — O(1) | `(kmon_t m, uint8_t cond) → int` — **alias nr 100** |
-| — | `kmon_broadcast` | **Sì** | `(kmon_t m, uint8_t cond) → int` — **alias nr 101** |
+| 95 | `kmon_create` | No | `(uint32_t prio_ceiling, uint32_t flags) -> kmon_t` |
+| 96 | `kmon_destroy` | No | `(kmon_t m) -> int` |
+| 97 | `kmon_enter` | Sì | `(kmon_t m) -> int` |
+| 98 | `kmon_exit` | Sì | `(kmon_t m) -> int` |
+| 99 | `kmon_wait` | Sì | `(kmon_t m, uint8_t cond, uint64_t timeout_ns) -> int` |
+| 110 | `kmon_signal` | Sì | `(kmon_t m, uint8_t cond) -> int` |
+| 111 | `kmon_broadcast` | Sì | `(kmon_t m, uint8_t cond) -> int` |
 
-*Nota: il range 98 è lo stesso del futex (M11-02). Il kernel distingue per tipo di syscall
-(il futex usa `uaddr` come primo argomento, il kmon usa `kmon_t` — tipi distinti nel dispatcher).*
+**Nota ABI:** `100-109` restano riservate all'ANE, quindi `signal` e `broadcast`
+sono state collocate a `110-111`.
 
----
-
-#### Strutture
-
-```c
-typedef uint32_t kmon_t;   /* handle opaco, 0 = KMON_INVALID */
-
-/* Condition variable interna */
-typedef struct {
-    sched_tcb_t  *head;     /* testa wait queue FIFO */
-    sched_tcb_t  *tail;
-    uint32_t      n_waiters;
-} kmon_cond_t;
-
-/* Entry nel pool kernel */
-typedef struct {
-    atomic_uint   locked;         /* 0 = libero, pid del owner se occupato */
-    sched_tcb_t  *owner;          /* TCB del task che ha il lock */
-    uint32_t      saved_priority; /* priorità originale dell'owner (per PI restore) */
-    uint32_t      prio_ceiling;   /* Priority Ceiling Protocol: max(owner, ceiling) */
-    uint32_t      entry_count;    /* deve essere 0 o 1; > 1 → panic ricorsione */
-    uint32_t      flags;          /* KMON_HOARE | KMON_MESA | KMON_RT */
-    kmon_cond_t   cond[8];        /* condition variable 0..7 */
-} kmon_entry_t;
-
-#define KMON_MAX  64
-static kmon_entry_t kmon_pool[KMON_MAX];
-```
-
----
-
-#### Implementazione
-
-**`kmon_enter` (lock):**
-1. `LDAXR`/`STLXR` — tenta CAS su `locked`: 0 → pid corrente
-2. Successo: imposta `owner`, applica `prio_ceiling` se > priorità corrente → O(1)
-3. Fallimento (contended): Priority Ceiling Protocol — se `owner->priority` < priorità
-   corrente, dona la priorità (`sched_donate_priority`) + `sched_block()` → O(1) ammortizzato
-4. `entry_count++`; se `entry_count > 1` → kernel panic "kmon recursive lock"
-
-**`kmon_exit` (unlock):**
-1. `entry_count--`
-2. Ripristina la priorità originale dell'owner (PI restore)
-3. Se `cond[any].head != NULL` (waiter in attesa su una qualsiasi cond): **non** sblocca qui
-4. Se nessun waiter su nessuna cond ma c'è qualcuno bloccato sull'enter (mutex contention):
-   sblocca il primo waiter con `sched_unblock()` → trasferimento diretto del lock
-5. `locked = 0` (release atomico `STLR`)
-
-**`kmon_wait` (Hoare semantics):**
-1. Verifica `owner == current` — panic se non si possiede il lock
-2. Salva il contesto del lock: `saved_owner = current, saved_prio = owner->priority`
-3. Inserisce il task corrente in `cond[c].tail`
-4. Rilascia atomicamente il lock: esegue `kmon_exit` interno senza ripristino PI
-   (il lock passa al prossimo contendente se presente)
-5. `sched_block(timeout_ns)` — blocca il task
-6. Al risveglio da `kmon_signal`: il monitor è già riacquisito (Hoare) → ritorna 0
-7. Se scaduto il timeout: ritorna `ETIMEDOUT` con il lock riacquisito
-
-**`kmon_signal` (Hoare — notifica uno):**
-1. Se `cond[c].head == NULL` → no-op, ritorna 0
-2. Estrae il primo waiter dalla coda
-3. **Hoare**: segnalante si inserisce in coda prioritaria del mutex (prima degli altri
-   contendenti) + sveglia il waiter con priorità massima (eredita la priorità del segnalante
-   se maggiore) → il waiter esegue prima del segnalante che riprende dopo
-4. `sched_unblock(waiter)` — O(1)
-
-**`kmon_broadcast`:**
-- Estrae tutti i waiter da `cond[c]`, li inserisce nella wait queue del mutex in ordine
-  di priorità decrescente, chiama `sched_unblock` su tutti
-
----
-
-#### Pattern d'uso
-
-**Buffer bounded classico (producer/consumer):**
-```c
-kmon_t mon  = kmon_create(0, KMON_RT);
-// cond 0 = "non pieno", cond 1 = "non vuoto"
-
-// Producer
-kmon_enter(mon);
-    if (is_full()) kmon_wait(mon, 0, TIMEOUT_NS);
-    enqueue(item);
-    kmon_signal(mon, 1);   // sveglia consumer
-kmon_exit(mon);
-
-// Consumer
-kmon_enter(mon);
-    if (is_empty()) kmon_wait(mon, 1, TIMEOUT_NS);
-    item = dequeue();
-    kmon_signal(mon, 0);   // sveglia producer
-kmon_exit(mon);
-```
-
-Con Hoare semantics: il `if` (non `while`) è sufficiente — garantito che la condizione
-sia ancora vera quando il waiter riprende.
-
-**Integrazione con C++ e linguaggi di alto livello (futuro):**
-```c
-// kmon come base per std::mutex + std::condition_variable in libc++
-// (alternativa più forte al futex per task RT)
-class Monitor {
-    kmon_t _m;
-public:
-    void lock()           { kmon_enter(_m); }
-    void unlock()         { kmon_exit(_m); }
-    void wait(uint8_t c)  { kmon_wait(_m, c, UINT64_MAX); }
-    void notify(uint8_t c){ kmon_signal(_m, c); }
-};
-```
+**Copertura test:**
+- contesa su `enter()` con donation/ceiling
+- `wait/signal` su condition queue
+- `timedwait` con ritorno `-ETIMEDOUT`
+- distruzione del monitor dopo drain dei waiter
+- esecuzione mirata da boot console tramite `selftest kmon-core`
 
 **Struttura file:**
 ```
-kernel/kmon.c       — pool, create/destroy, enter/exit, wait/signal/broadcast
-include/kmon.h      — strutture pubbliche, flag, costanti
-kernel/main.c       — kmon_init() registra syscall 95-101 al boot
+include/kmon.h       — API pubblica, handle, flag
+kernel/kmon.c        — pool monitor/waiter, enter/exit, wait/signal/broadcast
+kernel/syscall.c     — wrapper syscall + init al boot
+include/syscall.h    — numeri syscall 95-99 / 110-111
+kernel/selftest.c    — selftest kmon-core
+kernel/main.c        — comando boot console `selftest [nome]`
+include/selftest.h   — selftest_run_named()
 ```
 
-**Dipende da:** M3-01 (syscall dispatcher), M2-03 (sched_block/unblock/donate_priority),
-M8-06 (ksem — concetti condivisi di wait queue e PI)
-**Sblocca:** M11-02 (pthread_mutex_t e pthread_cond_t possono essere implementati sopra
-kmon invece che futex, con PI garantita dal kernel), M7-01 (IPC server usa kmon per
-serializzare le richieste con bounded latency)
+**Dipende da:** M3-01, M2-03, M8-06
+**Sblocca:** M11-02 (pthread condvar/mutex lato libc), server user-space che vogliono
+serializzare richieste con PI kernel-side
 
 ---
 

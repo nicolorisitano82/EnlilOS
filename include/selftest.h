@@ -11,5 +11,6 @@
 #include "types.h"
 
 int selftest_run_all(void);
+int selftest_run_named(const char *name);
 
 #endif /* ENLILOS_SELFTEST_H */

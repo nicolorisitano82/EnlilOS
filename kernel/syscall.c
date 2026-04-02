@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "elf_loader.h"
 #include "kheap.h"
+#include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
 #include "mmu.h"
@@ -605,6 +606,7 @@ static uint64_t sys_execve(uint64_t args[6])
     }
 
     mreact_task_cleanup(current_task);
+    kmon_task_cleanup(current_task);
     ksem_task_cleanup(current_task);
     mmu_activate_space(image.space);
     if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
@@ -1147,6 +1149,74 @@ static uint64_t sys_ksem_anon(uint64_t args[6])
     return (uint64_t)handle;
 }
 
+static uint64_t sys_kmon_create(uint64_t args[6])
+{
+    kmon_t handle = KMON_INVALID;
+    int    rc;
+
+    rc = kmon_create_current((uint32_t)args[0], (uint32_t)args[1], &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_kmon_destroy(uint64_t args[6])
+{
+    int rc = kmon_destroy_current((kmon_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_kmon_enter(uint64_t args[6])
+{
+    int rc = kmon_enter_current((kmon_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_kmon_exit(uint64_t args[6])
+{
+    int rc = kmon_exit_current((kmon_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_kmon_wait(uint64_t args[6])
+{
+    int rc = kmon_wait_current((kmon_t)(uint32_t)args[0],
+                               (uint8_t)args[1], args[2]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_kmon_signal(uint64_t args[6])
+{
+    int rc = kmon_signal_current((kmon_t)(uint32_t)args[0],
+                                 (uint8_t)args[1]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_kmon_broadcast(uint64_t args[6])
+{
+    int rc = kmon_broadcast_current((kmon_t)(uint32_t)args[0],
+                                    (uint8_t)args[1]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -1165,6 +1235,7 @@ void syscall_init(void)
     signal_init();
     mreact_init();
     ksem_init();
+    kmon_init();
     tty_init();
     vfs_init();
 
@@ -1295,8 +1366,29 @@ void syscall_init(void)
     syscall_table[SYS_KSEM_ANON] = (syscall_entry_t){
         sys_ksem_anon, 0, "ksem_anon"
     };
+    syscall_table[SYS_KMON_CREATE] = (syscall_entry_t){
+        sys_kmon_create, 0, "kmon_create"
+    };
+    syscall_table[SYS_KMON_DESTROY] = (syscall_entry_t){
+        sys_kmon_destroy, 0, "kmon_destroy"
+    };
+    syscall_table[SYS_KMON_ENTER] = (syscall_entry_t){
+        sys_kmon_enter, SYSCALL_FLAG_RT, "kmon_enter"
+    };
+    syscall_table[SYS_KMON_EXIT] = (syscall_entry_t){
+        sys_kmon_exit, SYSCALL_FLAG_RT, "kmon_exit"
+    };
+    syscall_table[SYS_KMON_WAIT] = (syscall_entry_t){
+        sys_kmon_wait, SYSCALL_FLAG_RT, "kmon_wait"
+    };
+    syscall_table[SYS_KMON_SIGNAL] = (syscall_entry_t){
+        sys_kmon_signal, SYSCALL_FLAG_RT, "kmon_signal"
+    };
+    syscall_table[SYS_KMON_BROADCAST] = (syscall_entry_t){
+        sys_kmon_broadcast, SYSCALL_FLAG_RT, "kmon_broadcast"
+    };
 
-    uart_puts("[SYSCALL] 35 syscall base/UX/signal/mreact/ksem registrate\n");
+    uart_puts("[SYSCALL] 42 syscall base/UX/signal/mreact/ksem/kmon registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 
