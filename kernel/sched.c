@@ -15,6 +15,8 @@
 #include "pmm.h"
 #include "uart.h"
 
+extern void *memset(void *dst, int value, size_t n);
+
 /* ── Costanti interne ────────────────────────────────────────────── */
 
 #define TICK_NS     (1000000ULL)    /* 1ms in nanosecondi               */
@@ -39,6 +41,9 @@ typedef struct {
     uint64_t    envp;
     uint64_t    auxv;
     uint8_t     is_user;
+    uint8_t     resume_from_frame;
+    uint8_t     _pad[6];
+    exception_frame_t start_frame;
 } sched_task_ctx_t;
 
 static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
@@ -252,6 +257,8 @@ static sched_tcb_t *task_alloc(void)
     task_ctx[slot].envp            = 0ULL;
     task_ctx[slot].auxv            = 0ULL;
     task_ctx[slot].is_user         = 0U;
+    task_ctx[slot].resume_from_frame = 0U;
+    memset(&task_ctx[slot].start_frame, 0, sizeof(task_ctx[slot].start_frame));
     donated_priority[slot]         = 0xFFU;
     return t;
 }
@@ -451,6 +458,7 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->envp            = envp;
     ctx->auxv            = auxv;
     ctx->is_user         = 1U;
+    ctx->resume_from_frame = 0U;
 
     task_setup_stack(t, stack_top, (sched_fn)0);
 
@@ -464,6 +472,66 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
 
     uart_puts("[SCHED] Task user creato: '");
     uart_puts(name);
+    uart_puts("' pid=");
+    pr_dec(t->pid);
+    uart_puts(" prio=");
+    pr_dec(priority);
+    uart_puts(" kstack=");
+    pr_hex64(stack_pa);
+    uart_puts("\n");
+
+    return t;
+}
+
+sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
+                                  const exception_frame_t *frame,
+                                  uint8_t priority)
+{
+    sched_tcb_t *t = task_alloc();
+    sched_task_ctx_t *ctx;
+    uint64_t stack_pa;
+    uint8_t *stack_top;
+
+    if (!t || !mm || !frame) {
+        uart_puts("[SCHED] PANIC: impossibile forkare task user\n");
+        while (1) __asm__ volatile("wfe");
+    }
+
+    stack_pa = phys_alloc_page();
+    stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
+
+    t->name       = name;
+    t->priority   = priority;
+    t->state      = TCB_STATE_READY;
+    t->flags      = TCB_FLAG_USER;
+    t->ticks_left = SCHED_TICK_QUANTUM;
+
+    ctx = ctx_of(t);
+    ctx->mm                = mm;
+    ctx->kernel_stack_pa   = stack_pa;
+    ctx->user_entry        = frame->pc;
+    ctx->user_sp           = frame->sp;
+    ctx->argc              = 0ULL;
+    ctx->argv              = 0ULL;
+    ctx->envp              = 0ULL;
+    ctx->auxv              = 0ULL;
+    ctx->is_user           = 1U;
+    ctx->resume_from_frame = 1U;
+    ctx->start_frame       = *frame;
+    ctx->start_frame.x[0]  = 0ULL;
+
+    task_setup_stack(t, stack_top, (sched_fn)0);
+
+    {
+        uint64_t flags = irq_save();
+        rq_push(t);
+        if (current_task && eff_prio_of(t) < eff_prio_of(current_task))
+            need_resched = 1;
+        irq_restore(flags);
+    }
+
+    uart_puts("[SCHED] Task forkato: '");
+    uart_puts(name ? name : "user-fork");
     uart_puts("' pid=");
     pr_dec(t->pid);
     uart_puts(" prio=");
@@ -741,6 +809,12 @@ int sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
 void sched_task_bootstrap(uint64_t entry_reg)
 {
     sched_task_ctx_t *ctx = ctx_of(current_task);
+
+    if (ctx && ctx->resume_from_frame) {
+        ctx->resume_from_frame = 0U;
+        sched_resume_user_frame(&ctx->start_frame);
+        while (1) __asm__ volatile("wfe");
+    }
 
     if (ctx && ctx->is_user) {
         sched_enter_user(ctx->argc, ctx->argv, ctx->envp, ctx->auxv,

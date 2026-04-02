@@ -3,8 +3,11 @@
 *.elf
 *.bin
 *.cpio
+*.pass1.elf
 disk.img
 user/*.so
+kernel/ksyms_data.c
+kernel/ksyms_data.selftest.c
 
 # macOS
 .DS_Store

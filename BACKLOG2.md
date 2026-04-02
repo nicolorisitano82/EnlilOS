@@ -34,7 +34,7 @@ Questo backlog assume completate tutte le milestone di `BACKLOG.md`:
 
 ## MILESTONE 8 — Process Model Completo
 
-### ⬜ M8-01 · fork() + Copy-on-Write MMU
+### ✅ M8-01 · fork() + Copy-on-Write MMU
 **Priorità:** CRITICA (sblocca qualsiasi shell POSIX e toolchain)
 
 **RT design:** `fork()` non è RT-safe — ma deve completare in tempo **bounded** per non
@@ -46,6 +46,9 @@ disturbare task a alta priorità in esecuzione.
 - `fork()` = `clone_address_space()` + nuovo TCB + copia fd_table + copia `brk`
 - Parent e figlio condividono le pagine fino al primo write; stack child è copia immediata
 - Limite: `fork()` di un task hard-RT è **vietato** (panic se `current->flags & TASK_HARD_RT`)
+- Implementato nel kernel: `sys_fork()`, clone `mm_space` con COW, fault handler write-on-COW,
+  refcount PMM per pagina e resume del figlio dal frame syscall salvato
+- Verifica dedicata: self-test `fork-cow` in QEMU e demo user-space `/FORKDEMO.ELF`
 
 **Strutture:**
 ```c
@@ -2003,18 +2006,19 @@ Filesystem virtuale per ispezione dello stato kernel da user-space.
 
 ---
 
-### ⬜ M14-02 · Crash Reporter e Kernel Debugger
+### ✅ M14-02 · Crash Reporter e Kernel Debugger
 **Priorità:** ALTA (fondamentale durante lo sviluppo)
 
 - **Kernel panic handler** migliorato: dumpa stack trace simbolico via tabella ELF `.symtab`
-  inclusa nel binario `enlil.elf` (linker script già presente)
+  generata a build-time e inclusa nel binario `enlil.elf`
 - **Stack unwinder AArch64**: segue frame pointer (`x29/x30`) — richiede `-fno-omit-frame-pointer`
-- **KGDB stub** (opzionale): interfaccia GDB remote su UART — `set debug remote 1` in QEMU
+- **KGDB stub** (opzionale): rinviato; non blocca la milestone, il crash reporter è già autosufficiente
 - **Assertion RT-safe**: `KASSERT(cond)` → stampa file:line + valore registri + panic; nessuna stringa
   dinamica allocata nell'handler
 - **Memory corruption detector**: canary a 0xDEADC0DE sui bordi degli slab; check a ogni `kfree()`
-- **Task watchdog**: timer hardware secondario che verifica che nessun task blocchi il tick > 10ms;
-  se sì → dump + panic (`SCHED_WATCHDOG_TIMEOUT = 10 * TIMER_HZ`)
+- **Task watchdog**: timer hardware secondario con campionamento 5ms e timeout >10ms sul progresso del tick;
+  se il tick non avanza → dump + panic
+- **Self-test**: `kdebug-core` copre lookup simboli, unwinder base e attivazione watchdog
 
 ---
 

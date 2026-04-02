@@ -25,6 +25,8 @@ OBJCOPY  = $(shell p="$$($(CC) -print-prog-name=objcopy 2>/dev/null)"; \
                    if [ -z "$$p" ] || [ "$$p" = "objcopy" ]; then printf '%s' "$(LD_PREFIX)objcopy"; else printf '%s' "$$p"; fi)
 OBJDUMP  = $(shell p="$$($(CC) -print-prog-name=objdump 2>/dev/null)"; \
                    if [ -z "$$p" ] || [ "$$p" = "objdump" ]; then printf '%s' "$(LD_PREFIX)objdump"; else printf '%s' "$$p"; fi)
+NM       = $(shell p="$$($(CC) -print-prog-name=nm 2>/dev/null)"; \
+                   if [ -z "$$p" ] || [ "$$p" = "nm" ]; then printf '%s' "$(LD_PREFIX)nm"; else printf '%s' "$$p"; fi)
 
 # Override manuale:
 #   make CROSS=aarch64-none-elf-
@@ -32,6 +34,7 @@ OBJDUMP  = $(shell p="$$($(CC) -print-prog-name=objdump 2>/dev/null)"; \
 
 # Flags
 CFLAGS   = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
+           -fno-omit-frame-pointer \
            -mcpu=cortex-a72 -Iinclude -Idrivers/ane -Idrivers/gpu
 ASFLAGS  = -mcpu=cortex-a72
 LDFLAGS  = -T linker.ld -nostdlib
@@ -43,6 +46,7 @@ ASM_SRCS = boot/boot.S \
 C_SRCS   = kernel/main.c \
            kernel/initrd.c \
            kernel/elf_loader.c \
+           kernel/kdebug.c \
            kernel/microkernel.c \
            kernel/exception.c \
            kernel/mmu.c \
@@ -73,7 +77,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
@@ -90,6 +94,11 @@ USER_ELFS             = $(USER_STATIC_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LI
 USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
+KSYMS_DATA            = kernel/ksyms_data.c
+KSYMS_SELFTEST_DATA   = kernel/ksyms_data.selftest.c
+KSYMS_OBJ             = kernel/ksyms_data.o
+KSYMS_SELFTEST_OBJ    = kernel/ksyms_data.selftest.o
+KSYMS_STUB_OBJ        = kernel/ksyms_stub.o
 
 USER_CFLAGS      = -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles \
                    -fno-builtin -mcpu=cortex-a72 -Iinclude
@@ -97,13 +106,17 @@ USER_PIC_CFLAGS  = $(USER_CFLAGS) -fPIC
 USER_PIE_CFLAGS  = $(USER_CFLAGS) -fPIE
 
 # Oggetti
-OBJS     = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
-SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
+BASE_OBJS         = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
+BASE_SELFTEST_OBJS = $(ASM_SRCS:.S=.selftest.o) $(C_SRCS:.c=.selftest.o) $(INITRD_EMBEDOBJ) $(USER_EMBEDOBJS)
+OBJS              = $(BASE_OBJS) $(KSYMS_OBJ)
+SELFTEST_OBJS     = $(BASE_SELFTEST_OBJS) $(KSYMS_SELFTEST_OBJ)
 
 # Output
 KERNEL   = enlil.elf
 KERNEL_BIN = enlil.bin
 SELFTEST_KERNEL = enlil-selftest.elf
+PASS1_KERNEL = enlil.pass1.elf
+PASS1_SELFTEST_KERNEL = enlil-selftest.pass1.elf
 
 # === Targets ===
 
@@ -117,14 +130,32 @@ all: $(KERNEL) $(KERNEL_BIN)
 	@echo "  ╚══════════════════════════════════════╝"
 	@echo ""
 
-$(KERNEL): $(OBJS)
+$(PASS1_KERNEL): $(BASE_OBJS) $(KSYMS_STUB_OBJ)
 	$(LD) $(LDFLAGS) -o $@ $^
+
+$(KSYMS_DATA): tools/gen_ksyms.py $(PASS1_KERNEL)
+	NM="$(NM)" python3 tools/gen_ksyms.py $(PASS1_KERNEL) $@
+
+$(KSYMS_OBJ): $(KSYMS_DATA)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KERNEL): $(PASS1_KERNEL) $(KSYMS_OBJ)
+	$(LD) $(LDFLAGS) -o $@ $(BASE_OBJS) $(KSYMS_OBJ)
 
 $(KERNEL_BIN): $(KERNEL)
 	$(OBJCOPY) -O binary $< $@
 
-$(SELFTEST_KERNEL): $(SELFTEST_OBJS)
+$(PASS1_SELFTEST_KERNEL): $(BASE_SELFTEST_OBJS) $(KSYMS_STUB_OBJ)
 	$(LD) $(LDFLAGS) -o $@ $^
+
+$(KSYMS_SELFTEST_DATA): tools/gen_ksyms.py $(PASS1_SELFTEST_KERNEL)
+	NM="$(NM)" python3 tools/gen_ksyms.py $(PASS1_SELFTEST_KERNEL) $@
+
+$(KSYMS_SELFTEST_OBJ): $(KSYMS_SELFTEST_DATA)
+	$(CC) $(CFLAGS) -DENLILOS_SELFTEST=1 -c $< -o $@
+
+$(SELFTEST_KERNEL): $(PASS1_SELFTEST_KERNEL) $(KSYMS_SELFTEST_OBJ)
+	$(LD) $(LDFLAGS) -o $@ $(BASE_SELFTEST_OBJS) $(KSYMS_SELFTEST_OBJ)
 
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
@@ -157,6 +188,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		EXEC1.ELF=user/execve_demo.elf \
 		EXEC2.ELF=user/execve_target.elf \
 		DYNDEMO.ELF=user/dynamic_demo.elf \
+		FORKDEMO.ELF=user/fork_demo.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf
@@ -336,5 +368,7 @@ dump: $(KERNEL)
 
 clean:
 	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL) \
-	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO)
+	      $(PASS1_KERNEL) $(PASS1_SELFTEST_KERNEL) \
+	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO) \
+	      $(KSYMS_DATA) $(KSYMS_SELFTEST_DATA)
 	@echo "Clean completato."

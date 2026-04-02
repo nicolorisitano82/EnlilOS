@@ -12,6 +12,7 @@
 #include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
+#include "kdebug.h"
 #include "microkernel.h"
 #include "sched.h"
 #include "syscall.h"
@@ -372,6 +373,52 @@ static int selftest_case_dynelf(void)
     return -1;
 }
 
+static int selftest_case_fork(void)
+{
+    static const char case_name[] = "fork-cow";
+    static const char expected[] =
+        "child global=7 local=99\n"
+        "parent global=1 local=11\n";
+    uint32_t    pid = 0U;
+    uint64_t    deadline;
+    sched_tcb_t *task;
+    vfs_file_t  file;
+    char        buf[96];
+    ssize_t     n;
+    int         rc;
+
+    rc = vfs_unlink("/data/FORK.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup FORK.TXT fallita");
+
+    rc = elf64_spawn_path("/FORKDEMO.ELF", "/FORKDEMO.ELF", PRIO_KERNEL, &pid);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, pid != 0U, "pid fork demo nullo");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task fork demo non trovata");
+        if (task->state == TCB_STATE_ZOMBIE)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, task && task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa fork demo");
+
+    rc = vfs_open("/data/FORK.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open FORK.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read FORK.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected), "contenuto FORK.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_unlink("/data/FORK.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink FORK.TXT fallita");
+    return 0;
+}
+
 static volatile uint32_t ipc_test_port_id;
 static volatile uint32_t ipc_test_server_waiting;
 static volatile uint32_t ipc_test_server_ok;
@@ -518,7 +565,9 @@ int selftest_run_all(void)
         { "elf-loader", selftest_case_elf    },
         { "execve",     selftest_case_execve },
         { "elf-dynamic", selftest_case_dynelf },
+        { "fork-cow",   selftest_case_fork   },
         { "ipc-sync",   selftest_case_ipc_sync },
+        { "kdebug-core", kdebug_selftest_run },
         { "gpu-stack",  gpu_selftest_run     },
     };
     uint32_t total = 0U;

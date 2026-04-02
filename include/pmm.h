@@ -71,6 +71,8 @@ uint64_t phys_alloc_page(void);
  * WCET: O(MAX_ORDER).
  */
 uint64_t phys_alloc_pages(uint32_t order);
+void     phys_retain_page(uint64_t pa);
+uint32_t phys_page_refcount(uint64_t pa);
 
 /*
  * phys_free_page(pa) — libera una pagina precedentemente allocata.
@@ -101,6 +103,12 @@ void *kmalloc(uint32_t size);
  * WCET: O(1) — sempre.
  */
 void kfree(void *ptr);
+
+/*
+ * pmm_debug_check_ptr(ptr) — verifica magic/canary dell'allocazione
+ * senza liberarla. Ritorna 0 se valida, negativo in caso di corruzione.
+ */
+int pmm_debug_check_ptr(const void *ptr);
 
 /*
  * slab_warm(size, count) — pre-popola la slab cache per la classe

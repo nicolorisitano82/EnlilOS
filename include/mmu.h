@@ -96,6 +96,8 @@
 #define PTE_nG          (1UL << 11)     /* not Global */
 #define PTE_PXN         (1UL << 53)     /* Privileged Execute Never */
 #define PTE_UXN         (1UL << 54)     /* Unprivileged Execute Never */
+#define PTE_COW         (1UL << 55)     /* Software bit: Copy-on-Write */
+#define PTE_ADDR_MASK   0x0000FFFFFFFFF000ULL
 
 /* Shareability */
 #define PTE_SH_NONE     (0UL << 8)
@@ -199,6 +201,7 @@ int mmu_enabled(void);
 mm_space_t *mmu_kernel_space(void);
 mm_space_t *mmu_current_space(void);
 mm_space_t *mmu_space_create(void);
+mm_space_t *mmu_space_clone_cow(mm_space_t *parent, uintptr_t stack_copy_start);
 void        mmu_space_destroy(mm_space_t *space);
 void        mmu_activate_space(mm_space_t *space);
 
@@ -215,6 +218,8 @@ int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
  * interamente mappato nello stesso extent.
  */
 void       *mmu_space_resolve_ptr(mm_space_t *space, uintptr_t va, size_t size);
+int         mmu_space_prepare_write(mm_space_t *space, uintptr_t va, size_t size);
+int         mmu_handle_user_fault(mm_space_t *space, uintptr_t far, uint64_t esr);
 
 /*
  * Esegue il prefault di un range all'interno di uno specifico mm_space.

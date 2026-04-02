@@ -13,6 +13,7 @@
  */
 
 #include "kheap.h"
+#include "kdebug.h"
 #include "pmm.h"
 #include "uart.h"
 
@@ -105,9 +106,11 @@ void *kmem_cache_alloc(kmem_cache_t *c)
         obj = c->free_head;
         c->free_head = *(void **)obj;
         c->free_count--;
+        KASSERT(pmm_debug_check_ptr(obj) == 0);
     } else {
         /* Cold path: alloca da kmalloc (slab O(1) se caldo) */
         obj = kmalloc(c->obj_size);
+        KASSERT(obj != NULL);
     }
 
     c->total_count++;
@@ -125,6 +128,7 @@ void *kmem_cache_alloc(kmem_cache_t *c)
 void kmem_cache_free(kmem_cache_t *c, void *ptr)
 {
     if (!ptr) return;
+    KASSERT(pmm_debug_check_ptr(ptr) == 0);
 
     /* Push in testa alla lista libera */
     *(void **)ptr = c->free_head;

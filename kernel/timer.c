@@ -22,6 +22,7 @@
 
 #include "timer.h"
 #include "gic.h"
+#include "kdebug.h"
 #include "uart.h"
 
 /* ── Stato globale (BSS, init a 0) ──────────────────────────────── */
@@ -108,6 +109,7 @@ static void timer_irq_handler(uint32_t irq, void *data)
     /* 2. Aggiorna contatori monotoni */
     jiffies++;
     tick_count++;
+    kdebug_note_primary_tick(timer_now_ticks());
 
     /* 3. Callback scheduler (M2-03 lo userà per preemption + accounting) */
     if (tick_callback)

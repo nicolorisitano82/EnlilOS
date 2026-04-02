@@ -15,6 +15,7 @@
 #include "pmm.h"
 #include "kheap.h"
 #include "gic.h"
+#include "kdebug.h"
 #include "timer.h"
 #include "sched.h"
 #include "syscall.h"
@@ -1163,6 +1164,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
         bootcli_push_line("dyndemo   lancia un PIE con PT_INTERP + DT_NEEDED");
+        bootcli_push_line("forkdemo  lancia un ELF che verifica fork() + COW");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
@@ -1345,6 +1347,16 @@ static void bootcli_execute_command(void)
         } else {
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "dynamic ELF lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "forkdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/FORKDEMO.ELF", "/FORKDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "fork demo lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
@@ -1636,6 +1648,7 @@ void kernel_main(void)
     /* === Fase 6: ARM Generic Timer (M2-02) === */
     timer_init();
     timer_start();
+    kdebug_init();
     /* Da qui: tick ogni 1ms, jiffies incrementato dall'IRQ handler.
      * timer_now_ns() O(1), timer_now_ms() O(1) — usabili ovunque. */
 

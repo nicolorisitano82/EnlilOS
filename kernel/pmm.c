@@ -15,6 +15,7 @@
  */
 
 #include "pmm.h"
+#include "kdebug.h"
 #include "uart.h"
 
 /* ── Liste circolari doppie — struttura intrusive ──────────────────────
@@ -70,6 +71,7 @@ static inline blk_node_t *list_pop(blk_node_t *s)
 
 static uint8_t page_state[NUM_PAGES];   /* PAGE_FREE / PAGE_ALLOC / … */
 static uint8_t page_ord[NUM_PAGES];     /* ordine buddy (solo per testa) */
+static uint16_t page_refs[NUM_PAGES];   /* refcount fisico per fork/COW   */
 
 /* ── Buddy free lists ──────────────────────────────────────────────── */
 
@@ -95,6 +97,8 @@ static uint32_t   total_free_pages;
 #define SLAB_MAGIC_FREE  0xDEAD
 #define SLAB_CLASS_NAMED 0xFE
 #define SLAB_CLASS_LARGE 0xFF
+#define SLAB_CANARY_WORD 0xDEADC0DEU
+#define SLAB_REDZONE_SZ  4U
 
 typedef struct {
     uint8_t  class_idx;
@@ -117,6 +121,43 @@ typedef struct {
 } slab_cache_t;
 
 static slab_cache_t slab_caches[SLAB_NUM_CLASSES];
+
+static inline uint32_t slab_usable_size(int ci)
+{
+    return slab_sizes[ci] - (2U * SLAB_REDZONE_SZ);
+}
+
+static inline uint8_t *slab_raw_from_user_ptr(const void *ptr)
+{
+    return (uint8_t *)(uintptr_t)((uint64_t)(uintptr_t)ptr - SLAB_REDZONE_SZ);
+}
+
+static inline void *slab_user_from_raw(void *raw)
+{
+    return (void *)(uintptr_t)((uint64_t)(uintptr_t)raw + SLAB_REDZONE_SZ);
+}
+
+static void slab_write_canaries(int ci, void *raw)
+{
+    uint8_t  *slot = (uint8_t *)raw;
+    uint32_t *head = (uint32_t *)(void *)slot;
+    uint32_t *tail = (uint32_t *)(void *)(slot + slab_caches[ci].obj_size - SLAB_REDZONE_SZ);
+
+    *head = SLAB_CANARY_WORD;
+    *tail = SLAB_CANARY_WORD;
+}
+
+static int slab_validate_canaries(const void *ptr, int ci)
+{
+    const uint8_t  *slot = slab_raw_from_user_ptr(ptr);
+    const uint32_t *head = (const uint32_t *)(const void *)slot;
+    const uint32_t *tail = (const uint32_t *)(const void *)
+                           (slot + slab_caches[ci].obj_size - SLAB_REDZONE_SZ);
+
+    if (*head != SLAB_CANARY_WORD || *tail != SLAB_CANARY_WORD)
+        return -1;
+    return 0;
+}
 
 /* ── Helpers numerici (no divisione, no modulo) ─────────────────────── */
 
@@ -268,6 +309,7 @@ uint64_t phys_alloc_page(void)
     uint32_t idx = (uint32_t)PA_TO_IDX(pa);
     page_state[idx] = PAGE_ALLOC;
     page_ord[idx]   = 0xFF;
+    page_refs[idx]  = 1U;
 
     return pa;
 }
@@ -318,13 +360,44 @@ uint64_t phys_alloc_pages(uint32_t order)
     uint32_t idx = (uint32_t)PA_TO_IDX(pa);
     page_state[idx] = PAGE_ALLOC;
     page_ord[idx]   = 0xFF;
+    page_refs[idx]  = 1U;
 
     /* Marca tutte le pagine del blocco come allocate */
     uint32_t n = 1U << order;
-    for (uint32_t i = 1; i < n; i++)
+    for (uint32_t i = 1; i < n; i++) {
         page_state[idx + i] = PAGE_ALLOC;
+        page_ord[idx + i]   = 0xFF;
+        page_refs[idx + i]  = 1U;
+    }
 
     return pa;
+}
+
+void phys_retain_page(uint64_t pa)
+{
+    uint32_t idx;
+
+    if (pa < PMM_BASE || pa >= PMM_END)
+        return;
+
+    idx = (uint32_t)PA_TO_IDX(pa & PAGE_MASK);
+    if (page_state[idx] == PAGE_RESERVED || page_state[idx] == PAGE_FREE)
+        return;
+    if (page_refs[idx] == 0U)
+        page_refs[idx] = 1U;
+    else
+        page_refs[idx]++;
+}
+
+uint32_t phys_page_refcount(uint64_t pa)
+{
+    uint32_t idx;
+
+    if (pa < PMM_BASE || pa >= PMM_END)
+        return 0U;
+
+    idx = (uint32_t)PA_TO_IDX(pa & PAGE_MASK);
+    return page_refs[idx];
 }
 
 /*
@@ -343,6 +416,22 @@ uint64_t phys_alloc_pages(uint32_t order)
 void phys_free_page(uint64_t pa)
 {
     uint32_t order = 0;
+    uint32_t idx;
+
+    if (pa < PMM_BASE || pa >= PMM_END)
+        return;
+
+    pa &= PAGE_MASK;
+    idx = (uint32_t)PA_TO_IDX(pa);
+
+    if (page_state[idx] == PAGE_RESERVED || page_state[idx] == PAGE_FREE)
+        return;
+
+    if (page_refs[idx] > 1U) {
+        page_refs[idx]--;
+        return;
+    }
+    page_refs[idx] = 0U;
 
     while (order < MAX_ORDER - 1) {
         uint64_t b_pa  = buddy_addr(pa, order);
@@ -354,6 +443,7 @@ void phys_free_page(uint64_t pa)
         /* Il buddy è libero allo stesso ordine? */
         if (page_state[b_idx] != PAGE_FREE) break;
         if (page_ord[b_idx]   != order)     break;
+        if (page_refs[b_idx]  != 0U)        break;
         /* Il buddy è riservato? (non dovrebbe, ma controlla) */
         if (b_pa < PMM_BASE)                break;
 
@@ -386,7 +476,7 @@ void phys_free_pages(uint64_t pa, uint32_t order)
 static int slab_class_for(uint32_t size)
 {
     for (int i = 0; i < SLAB_NUM_CLASSES; i++) {
-        if (size <= slab_sizes[i]) return i;
+        if (size <= slab_usable_size(i)) return i;
     }
     return -1;  /* size > 2048: usa phys_alloc_pages */
 }
@@ -463,10 +553,11 @@ void *kmalloc(uint32_t size)
             while (1) __asm__ volatile("wfe");
         }
 
-        void *obj = slab_caches[ci].free_head;
-        slab_caches[ci].free_head = *(void **)obj;
+        void *raw = slab_caches[ci].free_head;
+        slab_caches[ci].free_head = *(void **)raw;
         slab_caches[ci].free_count--;
-        return obj;
+        slab_write_canaries(ci, raw);
+        return slab_user_from_raw(raw);
     }
 
     /* ── Percorso large: size > 2048, usa phys_alloc_pages ───────── *
@@ -510,6 +601,7 @@ void *kmalloc(uint32_t size)
  */
 void kfree(void *ptr)
 {
+    uint8_t    *raw;
     if (!ptr) return;
 
     uint64_t pa     = (uint64_t)(uintptr_t)ptr & PAGE_MASK;
@@ -543,9 +635,34 @@ void kfree(void *ptr)
      * Il magic viene resettato solo quando l'intera pagina slab viene
      * restituita al buddy (non implementato in v0.1). */
     int ci = hdr->class_idx;
-    *(void **)ptr               = slab_caches[ci].free_head;
-    slab_caches[ci].free_head   = ptr;
+    if (slab_validate_canaries(ptr, ci) < 0)
+        kdebug_panic("heap/slab canary corrotto");
+
+    raw = slab_raw_from_user_ptr(ptr);
+    *(void **)raw               = slab_caches[ci].free_head;
+    slab_caches[ci].free_head   = raw;
     slab_caches[ci].free_count++;
+}
+
+int pmm_debug_check_ptr(const void *ptr)
+{
+    uint64_t          pa;
+    const slab_hdr_t *hdr;
+
+    if (!ptr)
+        return -1;
+
+    pa = (uint64_t)(uintptr_t)ptr & PAGE_MASK;
+    hdr = (const slab_hdr_t *)(uintptr_t)pa;
+
+    if (hdr->magic != SLAB_MAGIC_LIVE)
+        return -1;
+    if (hdr->class_idx == SLAB_CLASS_LARGE)
+        return 0;
+    if (hdr->class_idx >= SLAB_NUM_CLASSES)
+        return -1;
+
+    return slab_validate_canaries(ptr, hdr->class_idx);
 }
 
 /*

@@ -11,6 +11,7 @@
  */
 
 #include "syscall.h"
+#include "kdebug.h"
 #include "keyboard.h"
 #include "elf_loader.h"
 #include "kheap.h"
@@ -113,6 +114,11 @@ static void fd_clear(fd_entry_t *e)
     e->file.cookie = 0;
 }
 
+static void fd_clone_task_table(int dst_idx, int src_idx)
+{
+    memcpy(&fd_tables[dst_idx][0], &fd_tables[src_idx][0], sizeof(fd_tables[0]));
+}
+
 static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
 {
     int rc = vfs_open(path, flags, &e->file);
@@ -191,6 +197,8 @@ static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
         if (chunk > size - copied)
             chunk = size - copied;
 
+        if (mmu_space_prepare_write(space, cur, chunk) < 0)
+            return -EFAULT;
         dst = mmu_space_resolve_ptr(space, cur, chunk);
         if (!dst) return -EFAULT;
         memcpy(dst, in + copied, chunk);
@@ -549,11 +557,13 @@ static uint64_t sys_execve(uint64_t args[6])
     if (!copy)
         return ERR(ENOMEM);
 
+    kdebug_watchdog_pause();
     rc = exec_copy_from_user(copy,
                              (uintptr_t)args[0],
                              (uintptr_t)args[1],
                              (uintptr_t)args[2]);
     if (rc < 0) {
+        kdebug_watchdog_resume();
         kfree(copy);
         return ERR(-rc);
     }
@@ -563,6 +573,7 @@ static uint64_t sys_execve(uint64_t args[6])
                                    copy->envp, copy->envc,
                                    &image);
     if (rc < 0) {
+        kdebug_watchdog_resume();
         kfree(copy);
         return ERR(EIO);
     }
@@ -573,6 +584,7 @@ static uint64_t sys_execve(uint64_t args[6])
                                image.argc, image.argv,
                                image.envp, image.auxv) < 0) {
         elf64_unload_image(&image);
+        kdebug_watchdog_resume();
         kfree(copy);
         return ERR(EIO);
     }
@@ -591,6 +603,7 @@ static uint64_t sys_execve(uint64_t args[6])
     frame->pc   = image.entry;
     frame->spsr = 0ULL;
     active_syscall_replaced = 1U;
+    kdebug_watchdog_resume();
     kfree(copy);
     return 0;
 }
@@ -602,8 +615,38 @@ static uint64_t sys_execve(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_fork(uint64_t args[6])
 {
+    mm_space_t         *parent_mm;
+    mm_space_t         *child_mm;
+    sched_tcb_t        *child;
+    exception_frame_t  *frame = active_syscall_frame;
+    int                 parent_idx;
+    int                 child_idx;
+
     (void)args;
-    return ERR(ENOSYS);
+
+    if (!current_task || !sched_task_is_user(current_task) || !frame)
+        return ERR(ENOSYS);
+    if (current_task->flags & TCB_FLAG_RT)
+        kdebug_panic("fork() vietato su task hard-RT");
+
+    parent_mm = sched_task_space(current_task);
+    child_mm = mmu_space_clone_cow(parent_mm, frame->sp);
+    if (!child_mm)
+        return ERR(ENOMEM);
+
+    child = sched_task_fork_user(current_task->name ? current_task->name : "user-fork",
+                                 child_mm, frame, current_task->priority);
+    if (!child) {
+        mmu_space_destroy(child_mm);
+        return ERR(ENOMEM);
+    }
+
+    parent_idx = task_idx();
+    child_idx = (int)(child->pid % SCHED_MAX_TASKS);
+    fd_clone_task_table(child_idx, parent_idx);
+    task_brk[child_idx] = task_brk[parent_idx];
+
+    return (uint64_t)child->pid;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -911,6 +954,7 @@ void syscall_dispatch(exception_frame_t *frame)
     active_syscall_frame = frame;
     active_syscall_replaced = 0U;
     ret = syscall_table[nr].handler(args);
+
     if (!active_syscall_replaced)
         frame->x[0] = ret;
     active_syscall_frame = NULL;

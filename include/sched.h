@@ -42,6 +42,7 @@
 #ifndef ENLILOS_SCHED_H
 #define ENLILOS_SCHED_H
 
+#include "exception.h"
 #include "types.h"
 
 /* ── Costanti ───────────────────────────────────────────────────── */
@@ -147,6 +148,9 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
                                     uintptr_t argc, uintptr_t argv,
                                     uintptr_t envp, uintptr_t auxv,
                                     uint8_t priority);
+sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
+                                  const exception_frame_t *frame,
+                                  uint8_t priority);
 
 /*
  * schedule() — seleziona ed esegue il task con priorità massima. O(1).
@@ -200,6 +204,7 @@ void sched_task_bootstrap(uint64_t entry_reg);
 void sched_enter_user(uint64_t argc, uint64_t argv,
                       uint64_t envp, uint64_t auxv,
                       uint64_t user_sp, uint64_t entry);
+void sched_resume_user_frame(const exception_frame_t *frame);
 void sched_task_exit(void);
 
 /* Trampoline assembly — non chiamare direttamente */
