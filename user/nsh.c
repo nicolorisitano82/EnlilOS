@@ -21,6 +21,7 @@ typedef unsigned char  u8;
 #define NSH_DIRENT_MAX 8U
 
 static char nsh_cwd[NSH_PATH_MAX];
+static volatile u32 nsh_sigint_seen;
 
 static long sys_call3(long nr, long a0, long a1, long a2)
 {
@@ -106,6 +107,11 @@ static long sys_spawn_path(const char *path, u32 *pid_out, u32 priority)
     return sys_call3(SYS_SPAWN, (long)path, (long)pid_out, priority);
 }
 
+static long sys_sigaction_now(int sig, const sigaction_t *act, sigaction_t *old)
+{
+    return sys_call3(SYS_SIGACTION, sig, (long)act, (long)old);
+}
+
 static u32 nsh_strlen(const char *s)
 {
     u32 n = 0U;
@@ -121,6 +127,12 @@ static int nsh_streq(const char *a, const char *b)
         b++;
     }
     return *a == *b;
+}
+
+static void nsh_on_sigint(int sig)
+{
+    (void)sig;
+    nsh_sigint_seen = 1U;
 }
 
 static void nsh_strlcpy(char *dst, const char *src, u32 cap)
@@ -202,6 +214,7 @@ static const char *nsh_errno_name(long rc)
     switch ((int)(-rc)) {
     case EPERM: return "EPERM";
     case ENOENT: return "ENOENT";
+    case ESRCH: return "ESRCH";
     case ECHILD: return "ECHILD";
     case EAGAIN: return "EAGAIN";
     case EINTR: return "EINTR";
@@ -656,9 +669,16 @@ static void nsh_dispatch(char *line)
 
 void _start(void)
 {
+    sigaction_t sa;
     char line[NSH_LINE_MAX];
 
     nsh_strlcpy(nsh_cwd, "/", sizeof(nsh_cwd));
+    nsh_sigint_seen = 0U;
+    sa.sa_handler = nsh_on_sigint;
+    sa.sa_mask = 0ULL;
+    sa.sa_flags = 0U;
+    sa._pad = 0U;
+    (void)sys_sigaction_now(SIGINT, &sa, (sigaction_t *)0);
     nsh_cmd_clear();
     nsh_putln("EnlilOS nsh - shell ELF statico");
     nsh_putln("Digita 'help' per i comandi.");
@@ -672,6 +692,7 @@ void _start(void)
 
         rc = nsh_readline(line, sizeof(line));
         if (rc == -(int)EINTR) {
+            nsh_sigint_seen = 0U;
             nsh_putln("^C");
             continue;
         }

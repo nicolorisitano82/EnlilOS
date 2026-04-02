@@ -9,6 +9,7 @@
 #include "kdebug.h"
 #include "mmu.h"
 #include "sched.h"
+#include "signal.h"
 #include "syscall.h"
 #include "uart.h"
 
@@ -21,6 +22,8 @@ void exception_handler(exc_source_t src, exc_type_t type,
     /* IRQ: percorso veloce, gestito separatamente */
     if (type == EXC_TYPE_IRQ) {
         irq_handler(src, frame);
+        if (src == EXC_SRC_LOWER64)
+            (void)signal_deliver_pending(frame);
         return;
     }
 
@@ -32,11 +35,19 @@ void exception_handler(exc_source_t src, exc_type_t type,
     /* SVC da lower EL: dispatch al syscall handler (M3-01) */
     if (type == EXC_TYPE_SYNC && src == EXC_SRC_LOWER64 && ec == EC_SVC_AA64) {
         syscall_dispatch(frame);
+        (void)signal_deliver_pending(frame);
         return;
     }
 
     if (type == EXC_TYPE_SYNC && src == EXC_SRC_LOWER64 && ec == EC_DABT_LOWER) {
-        if (mmu_handle_user_fault(sched_task_space(current_task), frame->far, frame->esr) == 0)
+        if (mmu_handle_user_fault(sched_task_space(current_task), frame->far, frame->esr) == 0) {
+            (void)signal_deliver_pending(frame);
+            return;
+        }
+    }
+
+    if (src == EXC_SRC_LOWER64 && type == EXC_TYPE_SYNC) {
+        if (signal_handle_user_exception(frame, ec) == 0)
             return;
     }
 

@@ -5,18 +5,15 @@
  *   - modalita' canonica: la read ritorna solo linee terminate da '\n'
  *   - echo su UART del testo digitato
  *   - backspace locale con editing della linea corrente
- *   - CTRL+C: invalida la linea corrente e segnala un "SIGINT" minimale
- *             al task foreground; la successiva read ritorna -EINTR
- *
- * Nota: non esiste ancora un sottosistema segnali completo. Qui SIGINT e'
- * modellato come pending interrupt per task di foreground, sufficiente per
- * interrompere la read sulla console e sbloccare shell/programmi cooperativi.
+ *   - CTRL+C: invalida la linea corrente e genera SIGINT per il task foreground
+ *   - le read canoniche tornano -EINTR se esistono segnali non mascherati
  */
 
 #include "tty.h"
 
 #include "keyboard.h"
 #include "sched.h"
+#include "signal.h"
 #include "syscall.h"
 #include "term80.h"
 #include "uart.h"
@@ -35,13 +32,7 @@ static uint8_t tty_ready_buf[TTY_READY_MAX];
 static uint16_t tty_ready_head;
 static uint16_t tty_ready_tail;
 
-static uint8_t tty_sigint_pending[SCHED_MAX_TASKS];
 static uint32_t tty_foreground_pid;
-
-static inline uint32_t tty_task_slot(uint32_t pid)
-{
-    return pid % SCHED_MAX_TASKS;
-}
 
 static inline int tty_ready_empty(void)
 {
@@ -93,18 +84,7 @@ static void tty_echo_backspace(void)
 
 static void tty_signal_foreground_sigint(void)
 {
-    tty_sigint_pending[tty_task_slot(tty_foreground_pid)] = 1U;
-}
-
-static int tty_take_sigint_current(void)
-{
-    uint32_t pid = current_task ? current_task->pid : tty_foreground_pid;
-    uint32_t slot = tty_task_slot(pid);
-
-    if (!tty_sigint_pending[slot]) return 0;
-
-    tty_sigint_pending[slot] = 0U;
-    return 1;
+    (void)signal_send_pid(tty_foreground_pid, SIGINT);
 }
 
 static void tty_commit_line(void)
@@ -167,9 +147,6 @@ void tty_init(void)
     tty_ready_tail = 0U;
     tty_foreground_pid = current_task ? current_task->pid : 0U;
 
-    for (uint32_t i = 0; i < SCHED_MAX_TASKS; i++)
-        tty_sigint_pending[i] = 0U;
-
     uart_puts("[TTY] Line discipline: echo + canonical + ^C pronto\n");
 }
 
@@ -180,7 +157,7 @@ uint64_t tty_read(char *buf, uint64_t cnt)
     tty_foreground_pid = current_task ? current_task->pid : tty_foreground_pid;
     tty_pump_input();
 
-    if (tty_take_sigint_current())
+    if (signal_has_unblocked_pending(current_task))
         return ERR(EINTR);
 
     if (tty_ready_empty())

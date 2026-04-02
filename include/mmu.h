@@ -131,6 +131,7 @@
 #define MMU_USER_LIMIT       0x0000008000000000ULL
 #define MMU_USER_STACK_TOP   0x0000007FFF000000ULL
 #define MMU_USER_STACK_SIZE  (8ULL * 1024ULL * 1024ULL)
+#define MMU_USER_SIGTRAMP_VA (MMU_USER_LIMIT - 0x1000ULL)
 
 #define MMU_PROT_USER_R      (1U << 0)
 #define MMU_PROT_USER_W      (1U << 1)
@@ -201,6 +202,7 @@ int mmu_enabled(void);
 mm_space_t *mmu_kernel_space(void);
 mm_space_t *mmu_current_space(void);
 mm_space_t *mmu_space_create(void);
+int         mmu_space_map_signal_trampoline(mm_space_t *space);
 mm_space_t *mmu_space_clone_cow(mm_space_t *parent, uintptr_t stack_copy_start);
 void        mmu_space_destroy(mm_space_t *space);
 void        mmu_activate_space(mm_space_t *space);

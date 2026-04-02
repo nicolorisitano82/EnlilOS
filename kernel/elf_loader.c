@@ -556,6 +556,11 @@ static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
         elf_set_error("mm_space esauriti");
         return -1;
     }
+    if (mmu_space_map_signal_trampoline(space) < 0) {
+        elf_set_error("map signal trampoline fallita");
+        mmu_space_destroy(space);
+        return -1;
+    }
 
     for (uint32_t i = 0U; i < ehdr.e_phnum; i++) {
         uintptr_t seg_va;
@@ -1229,6 +1234,10 @@ static int elf_load_path_exec_dynamic(const char *path,
     if (!space) {
         elf_set_error("mm_space esauriti");
         goto fail_free_objects;
+    }
+    if (mmu_space_map_signal_trampoline(space) < 0) {
+        elf_set_error("map signal trampoline fallita");
+        goto fail;
     }
 
     if (elf_load_vfs_object(space, path, &next_dyn_base, &objects[0]) < 0)

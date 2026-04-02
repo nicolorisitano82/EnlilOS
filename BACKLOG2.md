@@ -86,7 +86,7 @@ typedef struct mm_space {
 
 ---
 
-### ⬜ M8-03 · Signal Handling
+### ✅ M8-03 · Signal Handling
 **Priorità:** ALTA
 
 Segnali POSIX minimali, compatibili con musl libc (M11-01).
@@ -100,6 +100,9 @@ Segnali POSIX minimali, compatibili con musl libc (M11-01).
 - Maschera segnali: `sigmask` in `sched_tcb_t`, modificata da `sigprocmask()`
 - `kill(pid, sig)`: syscall nr 62 — deposita segnale pendente nel TCB target
 - Consegna segnale: al rientro da ogni eccezione/IRQ, prima di ERET → controlla `pending_signals`
+- Implementato: `sigaction`, `sigprocmask`, `sigreturn`, `kill`, trampoline EL0 condiviso,
+  consegna asincrona su return-to-user e routing `CTRL+C` console → `SIGINT`
+- Implementato: `SIGCHLD` minimo su exit del figlio, demo `/SIGDEMO.ELF` e self-test `signal-core`
 
 **RT constraint:** i task con `TASK_HARD_RT` possono bloccare tutti i segnali tranne
 `SIGKILL`. Nessun handler utente viene invocato dentro il tick RT.

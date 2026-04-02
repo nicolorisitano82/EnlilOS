@@ -20,6 +20,7 @@
 #include "mmu.h"
 #include "pmm.h"
 #include "sched.h"
+#include "syscall.h"
 #include "uart.h"
 
 extern void *memcpy(void *dst, const void *src, size_t n);
@@ -64,6 +65,7 @@ struct mm_space {
 static struct mm_space kernel_space;
 static struct mm_space space_pool[MMU_MAX_SPACES];
 static mm_space_t     *current_space = &kernel_space;
+static uint64_t        signal_tramp_pa;
 
 /* ── Barriere inline ────────────────────────────────────────────────── */
 
@@ -85,6 +87,26 @@ static inline void isb(void)
 static inline void tlbi_vmalle1(void)
 {
     __asm__ volatile("tlbi vmalle1" ::: "memory");
+}
+
+static void invalidate_icache_range(uintptr_t start, uintptr_t end)
+{
+    uint64_t ctr;
+    uint64_t line_size;
+    uint64_t mask;
+    uintptr_t addr;
+
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    line_size = 4UL << (ctr & 0xFU);
+    mask = line_size - 1UL;
+
+    addr = start & ~(uintptr_t)mask;
+    while (addr < end) {
+        __asm__ volatile("ic ivau, %0" :: "r"(addr) : "memory");
+        addr += line_size;
+    }
+    dsb_ish();
+    isb();
 }
 
 /* Invalida I-cache e D-cache — necessario prima di abilitare la MMU */
@@ -348,6 +370,48 @@ static int map_user_pages_raw(mm_space_t *space, uintptr_t va, uint64_t pa,
 
     dsb_ish();
     isb();
+    return 0;
+}
+
+int mmu_space_map_signal_trampoline(mm_space_t *space)
+{
+    static const uint32_t sigtramp_code[] = {
+        0xD2800268U, /* movz x8, #SYS_SIGRETURN */
+        0xD4000001U, /* svc #0 */
+        0xD4200000U, /* brk #0 */
+    };
+    uintptr_t page_va;
+    int       first_map = 0;
+    uint64_t *pte;
+
+    if (!space || !space->in_use)
+        return -1;
+
+    page_va = MMU_USER_SIGTRAMP_VA & PAGE_MASK;
+    if (mmu_lookup_pte(space, page_va, &pte, NULL) == 0)
+        return 0;
+
+    if (signal_tramp_pa == 0ULL) {
+        signal_tramp_pa = phys_alloc_page();
+        if (signal_tramp_pa == 0ULL)
+            return -1;
+        memset((void *)(uintptr_t)signal_tramp_pa, 0, PAGE_SIZE);
+        memcpy((void *)(uintptr_t)signal_tramp_pa,
+               sigtramp_code, sizeof(sigtramp_code));
+        clean_dcache_range(signal_tramp_pa, signal_tramp_pa + PAGE_SIZE);
+        invalidate_icache_range(signal_tramp_pa, signal_tramp_pa + PAGE_SIZE);
+        first_map = 1;
+    }
+
+    if (!first_map)
+        phys_retain_page(signal_tramp_pa);
+
+    if (map_user_pages_raw(space, page_va, signal_tramp_pa, 1U,
+                           MMU_PROT_USER_R | MMU_PROT_USER_X) < 0) {
+        phys_free_page(signal_tramp_pa);
+        return -1;
+    }
+
     return 0;
 }
 

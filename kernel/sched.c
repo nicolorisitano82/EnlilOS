@@ -11,6 +11,7 @@
 
 #include "sched.h"
 #include "mmu.h"
+#include "signal.h"
 #include "timer.h"
 #include "pmm.h"
 #include "uart.h"
@@ -320,6 +321,7 @@ void sched_init(void)
     kern->ticks_left = SCHED_TICK_QUANTUM;
     /* sp = 0: non è ancora stato salvato; sched_context_switch lo salverà */
     current_task = kern;
+    signal_task_init(kern, 0U);
 
     uart_puts("[SCHED]   task 'kernel' (pid=0, prio=");
     pr_dec(kern->priority);
@@ -336,6 +338,7 @@ void sched_init(void)
     idle->state     = TCB_STATE_READY;
     idle->flags     = TCB_FLAG_KERNEL | TCB_FLAG_IDLE;
     idle->ticks_left = 0xFF; /* quantum illimitato per l'idle */
+    signal_task_init(idle, 0U);
 
     uint8_t *idle_top = idle_stack + TASK_STACK_SIZE;
     task_setup_stack(idle, idle_top, (sched_fn)NULL); /* entry = NULL: trampoline gestisce */
@@ -397,6 +400,7 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
     ctx->mm = mmu_kernel_space();
     ctx->kernel_stack_pa = stack_pa;
     ctx->is_user = 0U;
+    signal_task_init(t, 0U);
 
     task_setup_stack(t, stack_top, entry);
 
@@ -459,6 +463,8 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->auxv            = auxv;
     ctx->is_user         = 1U;
     ctx->resume_from_frame = 0U;
+    signal_task_init(t, (current_task && sched_task_is_user(current_task)) ?
+                        current_task->pid : 0U);
 
     task_setup_stack(t, stack_top, (sched_fn)0);
 
@@ -831,8 +837,10 @@ void sched_task_bootstrap(uint64_t entry_reg)
 
 void sched_task_exit(void)
 {
-    if (current_task)
+    if (current_task) {
+        signal_task_exit(current_task);
         current_task->state = TCB_STATE_ZOMBIE;
+    }
 
     schedule();
     while (1) __asm__ volatile("wfe");

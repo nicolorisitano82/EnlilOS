@@ -1165,6 +1165,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
         bootcli_push_line("dyndemo   lancia un PIE con PT_INTERP + DT_NEEDED");
         bootcli_push_line("forkdemo  lancia un ELF che verifica fork() + COW");
+        bootcli_push_line("sigdemo   lancia un ELF che verifica signal + SIGCHLD");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
@@ -1357,6 +1358,16 @@ static void bootcli_execute_command(void)
         } else {
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "fork demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "sigdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/SIGDEMO.ELF", "/SIGDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "signal demo lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }

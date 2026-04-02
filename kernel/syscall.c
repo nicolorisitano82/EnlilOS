@@ -346,10 +346,7 @@ static uint64_t sys_read(uint64_t args[6])
 static uint64_t sys_exit(uint64_t args[6])
 {
     (void)args;
-    if (current_task) {
-        current_task->state = TCB_STATE_ZOMBIE;
-        schedule();
-    }
+    sched_task_exit();
     return 0;   /* unreachable */
 }
 
@@ -593,6 +590,7 @@ static uint64_t sys_execve(uint64_t args[6])
     if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
         mmu_space_destroy(old_mm);
 
+    signal_task_reset_for_exec(current_task);
     task_brk[task_idx()] = 0ULL;
     memset(frame->x, 0, sizeof(frame->x));
     frame->x[0] = image.argc;
@@ -645,6 +643,7 @@ static uint64_t sys_fork(uint64_t args[6])
     child_idx = (int)(child->pid % SCHED_MAX_TASKS);
     fd_clone_task_table(child_idx, parent_idx);
     task_brk[child_idx] = task_brk[parent_idx];
+    signal_task_fork(child, current_task);
 
     return (uint64_t)child->pid;
 }
@@ -686,6 +685,8 @@ static uint64_t sys_waitpid(uint64_t args[6])
         : (uint64_t)-1ULL;
 
     while (t->state != TCB_STATE_ZOMBIE) {
+        if (signal_has_unblocked_pending(current_task))
+            return ERR(EINTR);
         if (timer_now_ms() >= deadline)
             return ERR(EAGAIN);
         sched_yield();
@@ -837,6 +838,96 @@ static uint64_t sys_spawn(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_sigaction(uint64_t args[6])
+{
+    int               sig = (int)args[0];
+    uintptr_t         act_uva = (uintptr_t)args[1];
+    uintptr_t         old_uva = (uintptr_t)args[2];
+    sigaction_t       act;
+    sigaction_t       old;
+    sigaction_t      *act_ptr = NULL;
+    sigaction_t      *old_ptr = NULL;
+    int               rc;
+
+    if (act_uva != 0U) {
+        rc = user_copy_bytes(act_uva, &act, sizeof(act));
+        if (rc < 0)
+            return ERR(-rc);
+        act_ptr = &act;
+    }
+    if (old_uva != 0U)
+        old_ptr = &old;
+
+    rc = signal_sigaction_current(sig, act_ptr, old_ptr);
+    if (rc < 0)
+        return ERR(-rc);
+    if (old_ptr) {
+        rc = user_store_bytes(old_uva, &old, sizeof(old));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0;
+}
+
+static uint64_t sys_sigprocmask(uint64_t args[6])
+{
+    int        how = (int)args[0];
+    uintptr_t  set_uva = (uintptr_t)args[1];
+    uintptr_t  old_uva = (uintptr_t)args[2];
+    uint64_t   set_mask = 0ULL;
+    uint64_t   old_mask = 0ULL;
+    uint64_t  *set_ptr = NULL;
+    uint64_t  *old_ptr = NULL;
+    int        rc;
+
+    if (set_uva != 0U) {
+        rc = user_copy_bytes(set_uva, &set_mask, sizeof(set_mask));
+        if (rc < 0)
+            return ERR(-rc);
+        set_ptr = &set_mask;
+    }
+    if (old_uva != 0U)
+        old_ptr = &old_mask;
+
+    rc = signal_sigprocmask_current(how, set_ptr, old_ptr);
+    if (rc < 0)
+        return ERR(-rc);
+    if (old_ptr) {
+        rc = user_store_bytes(old_uva, &old_mask, sizeof(old_mask));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0;
+}
+
+static uint64_t sys_sigreturn(uint64_t args[6])
+{
+    int rc;
+
+    (void)args;
+    if (!active_syscall_frame)
+        return ERR(EFAULT);
+
+    rc = signal_sigreturn_current(active_syscall_frame);
+    if (rc < 0)
+        return ERR(-rc);
+
+    active_syscall_replaced = 1U;
+    return 0;
+}
+
+static uint64_t sys_kill(uint64_t args[6])
+{
+    uint32_t pid = (uint32_t)args[0];
+    int      sig = (int)args[1];
+    int      rc;
+
+    rc = signal_send_pid(pid, sig);
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -852,6 +943,7 @@ static uint64_t sys_enosys(uint64_t args[6])
 void syscall_init(void)
 {
     /* 1. Porta su line discipline + VFS bootstrap */
+    signal_init();
     tty_init();
     vfs_init();
 
@@ -925,8 +1017,20 @@ void syscall_init(void)
     syscall_table[SYS_SPAWN] = (syscall_entry_t){
         sys_spawn, 0, "spawn"
     };
+    syscall_table[SYS_SIGACTION] = (syscall_entry_t){
+        sys_sigaction, 0, "sigaction"
+    };
+    syscall_table[SYS_SIGPROCMASK] = (syscall_entry_t){
+        sys_sigprocmask, SYSCALL_FLAG_RT, "sigprocmask"
+    };
+    syscall_table[SYS_SIGRETURN] = (syscall_entry_t){
+        sys_sigreturn, SYSCALL_FLAG_RT, "sigreturn"
+    };
+    syscall_table[SYS_KILL] = (syscall_entry_t){
+        sys_kill, SYSCALL_FLAG_RT, "kill"
+    };
 
-    uart_puts("[SYSCALL] 16 syscall base/UX registrate\n");
+    uart_puts("[SYSCALL] 20 syscall base/UX/signal registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

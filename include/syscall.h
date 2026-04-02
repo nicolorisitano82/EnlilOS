@@ -15,6 +15,7 @@
 
 #include "types.h"
 #include "exception.h"
+#include "signal.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -34,6 +35,10 @@
 #define SYS_GETDENTS        14
 #define SYS_TASK_SNAPSHOT   15
 #define SYS_SPAWN           16
+#define SYS_SIGACTION       17
+#define SYS_SIGPROCMASK     18
+#define SYS_SIGRETURN       19
+#define SYS_KILL            62
 
 /* Range ANE (M3-03): 100–119 */
 #define SYS_ANE_FIRST       100
@@ -45,6 +50,7 @@
 
 #define EPERM               1
 #define ENOENT              2
+#define ESRCH               3
 #define ECHILD              10
 #define EAGAIN              11
 #define EINTR               4
