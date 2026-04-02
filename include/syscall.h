@@ -17,6 +17,7 @@
 #include "exception.h"
 #include "signal.h"
 #include "mreact.h"
+#include "ksem.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -44,6 +45,16 @@
 #define SYS_MREACT_CANCEL         82
 #define SYS_MREACT_SUBSCRIBE_ALL  83
 #define SYS_MREACT_SUBSCRIBE_ANY  84
+#define SYS_KSEM_CREATE           85
+#define SYS_KSEM_OPEN             86
+#define SYS_KSEM_CLOSE            87
+#define SYS_KSEM_UNLINK           88
+#define SYS_KSEM_POST             89
+#define SYS_KSEM_WAIT             90
+#define SYS_KSEM_TIMEDWAIT        91
+#define SYS_KSEM_TRYWAIT          92
+#define SYS_KSEM_GETVALUE         93
+#define SYS_KSEM_ANON             94
 #define SYS_KILL            62
 
 /* Range ANE (M3-03): 100–119 */
@@ -76,6 +87,7 @@
 #define ENOTEMPTY           39
 #define EIO                 5
 #define ENOSYS              38
+#define ETIMEDOUT           110
 
 #define ERR(e)  ((uint64_t)(-(int64_t)(e)))
 

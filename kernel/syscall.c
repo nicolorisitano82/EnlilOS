@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "elf_loader.h"
 #include "kheap.h"
+#include "ksem.h"
 #include "mreact.h"
 #include "mmu.h"
 #include "sched.h"
@@ -604,6 +605,7 @@ static uint64_t sys_execve(uint64_t args[6])
     }
 
     mreact_task_cleanup(current_task);
+    ksem_task_cleanup(current_task);
     mmu_activate_space(image.space);
     if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
         mmu_space_destroy(old_mm);
@@ -1015,6 +1017,136 @@ static uint64_t sys_mreact_subscribe_any(uint64_t args[6])
     return sys_mreact_subscribe_group(args, 0);
 }
 
+static uint64_t sys_ksem_create(uint64_t args[6])
+{
+    char   name[KSEM_NAME_MAX];
+    ksem_t handle = KSEM_INVALID;
+    int    rc;
+
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr((uintptr_t)args[0], name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = ksem_create_current(name, (uint32_t)args[1], (uint32_t)args[2], &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_ksem_open(uint64_t args[6])
+{
+    char   name[KSEM_NAME_MAX];
+    ksem_t handle = KSEM_INVALID;
+    int    rc;
+
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr((uintptr_t)args[0], name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = ksem_open_current(name, (uint32_t)args[1], &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_ksem_close(uint64_t args[6])
+{
+    int rc = ksem_close_current((ksem_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_unlink(uint64_t args[6])
+{
+    char name[KSEM_NAME_MAX];
+    int  rc;
+
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr((uintptr_t)args[0], name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = ksem_unlink_current(name);
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_post(uint64_t args[6])
+{
+    int rc = ksem_post_current((ksem_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_wait(uint64_t args[6])
+{
+    int rc = ksem_wait_current((ksem_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_timedwait(uint64_t args[6])
+{
+    int rc = ksem_timedwait_current((ksem_t)(uint32_t)args[0], args[1]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_trywait(uint64_t args[6])
+{
+    int rc = ksem_trywait_current((ksem_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_getvalue(uint64_t args[6])
+{
+    int32_t value = 0;
+    int     rc;
+
+    if ((uintptr_t)args[1] == 0U)
+        return ERR(EFAULT);
+
+    rc = ksem_getvalue_current((ksem_t)(uint32_t)args[0], &value);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = user_store_bytes((uintptr_t)args[1], &value, sizeof(value));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ksem_anon(uint64_t args[6])
+{
+    ksem_t handle = KSEM_INVALID;
+    int    rc;
+
+    rc = ksem_anon_current((uint32_t)args[0], 0U, &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -1032,6 +1164,7 @@ void syscall_init(void)
     /* 1. Porta su line discipline + VFS bootstrap */
     signal_init();
     mreact_init();
+    ksem_init();
     tty_init();
     vfs_init();
 
@@ -1132,8 +1265,38 @@ void syscall_init(void)
     syscall_table[SYS_MREACT_SUBSCRIBE_ANY] = (syscall_entry_t){
         sys_mreact_subscribe_any, 0, "mreact_subscribe_any"
     };
+    syscall_table[SYS_KSEM_CREATE] = (syscall_entry_t){
+        sys_ksem_create, 0, "ksem_create"
+    };
+    syscall_table[SYS_KSEM_OPEN] = (syscall_entry_t){
+        sys_ksem_open, 0, "ksem_open"
+    };
+    syscall_table[SYS_KSEM_CLOSE] = (syscall_entry_t){
+        sys_ksem_close, SYSCALL_FLAG_RT, "ksem_close"
+    };
+    syscall_table[SYS_KSEM_UNLINK] = (syscall_entry_t){
+        sys_ksem_unlink, 0, "ksem_unlink"
+    };
+    syscall_table[SYS_KSEM_POST] = (syscall_entry_t){
+        sys_ksem_post, SYSCALL_FLAG_RT, "ksem_post"
+    };
+    syscall_table[SYS_KSEM_WAIT] = (syscall_entry_t){
+        sys_ksem_wait, SYSCALL_FLAG_RT, "ksem_wait"
+    };
+    syscall_table[SYS_KSEM_TIMEDWAIT] = (syscall_entry_t){
+        sys_ksem_timedwait, SYSCALL_FLAG_RT, "ksem_timedwait"
+    };
+    syscall_table[SYS_KSEM_TRYWAIT] = (syscall_entry_t){
+        sys_ksem_trywait, SYSCALL_FLAG_RT, "ksem_trywait"
+    };
+    syscall_table[SYS_KSEM_GETVALUE] = (syscall_entry_t){
+        sys_ksem_getvalue, SYSCALL_FLAG_RT, "ksem_getvalue"
+    };
+    syscall_table[SYS_KSEM_ANON] = (syscall_entry_t){
+        sys_ksem_anon, 0, "ksem_anon"
+    };
 
-    uart_puts("[SYSCALL] 25 syscall base/UX/signal/mreact registrate\n");
+    uart_puts("[SYSCALL] 35 syscall base/UX/signal/mreact/ksem registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

@@ -62,6 +62,7 @@ C_SRCS   = kernel/main.c \
            kernel/selftest.c \
            kernel/ext4.c \
            kernel/mreact.c \
+           kernel/ksem.c \
            kernel/vfs.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \

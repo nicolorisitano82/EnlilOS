@@ -279,8 +279,15 @@ user/mreact_demo.c      — demo EL0 che attende su word mappata con `mmap()`
 
 ---
 
-### ⬜ M8-06 · Semafori Kernel Nativi (`ksem`)
+### ✅ M8-06 · Semafori Kernel Nativi (`ksem`)
 **Priorità:** ALTA
+
+**Stato attuale:** implementata v1 con pool statici (`ksem`, waiter, handle ref),
+syscall EL0 `85–94`, named semaphore + anon, `post/wait/timedwait/trywait/getvalue`,
+cleanup su `exit/exec/signal`, PI best-effort riusando il donation slot dello scheduler
+e selftest end-to-end `ksem-core`. Il wait contended e' bounded/cooperativo
+(`sched_yield()` + deadline su `timer_now_ms()`), quindi il contratto RT e' gia'
+usabile ma il timer-wheel dedicato resta un margine di miglioramento futuro.
 
 > **Distinzione architetturale:** EnlilOS prevede due livelli di semafori.
 > **Livello 1 — `ksem` (questa milestone):** primitiva kernel nativa con syscall proprie,
@@ -404,7 +411,7 @@ int sem_getvalue(sem_t *s, int *v) { return ksem_getvalue(s->_handle, v); }
 ```
 kernel/ksem.c       — pool, create/open/close/unlink, post/wait/timedwait/trywait
 include/ksem.h      — strutture pubbliche, costanti
-kernel/main.c       — ksem_init() registra syscall 85-94 al boot
+kernel/syscall.c    — ksem_init() + syscall 85-94 al boot
 ```
 
 **Dipende da:** M3-01 (syscall dispatcher), M2-03 (sched_block/unblock), M2-02 (timer per timedwait)

@@ -13,6 +13,7 @@
 #include "ext4.h"
 #include "gpu.h"
 #include "kdebug.h"
+#include "ksem.h"
 #include "microkernel.h"
 #include "mmu.h"
 #include "sched.h"
@@ -553,6 +554,161 @@ static volatile uint32_t ipc_test_hog_release;
 static volatile uint32_t ipc_test_server_effprio;
 static volatile uint64_t ipc_test_reply_value;
 
+static volatile uint32_t ksem_test_holder_ready;
+static volatile uint32_t ksem_test_holder_release;
+static volatile uint32_t ksem_test_waiter_ok;
+static volatile int32_t  ksem_test_waiter_rc;
+static volatile uint32_t ksem_test_hog_release;
+
+static void selftest_ksem_holder_task(void)
+{
+    static const char sem_name[] = "/selftest-ksem-rt";
+    ksem_t handle = KSEM_INVALID;
+
+    if (ksem_open_current(sem_name, 0U, &handle) == 0) {
+        if (ksem_wait_current(handle) == 0) {
+            ksem_test_holder_ready = 1U;
+            while (!ksem_test_holder_release)
+                sched_yield();
+            (void)ksem_post_current(handle);
+        }
+        (void)ksem_close_current(handle);
+    }
+}
+
+static void selftest_ksem_waiter_task(void)
+{
+    static const char sem_name[] = "/selftest-ksem-rt";
+    ksem_t handle = KSEM_INVALID;
+    int    rc = -ENOENT;
+
+    if (ksem_open_current(sem_name, 0U, &handle) == 0) {
+        rc = ksem_timedwait_current(handle, 500000000ULL);
+        if (rc == 0) {
+            ksem_test_waiter_ok = 1U;
+            (void)ksem_post_current(handle);
+        }
+        (void)ksem_close_current(handle);
+    }
+
+    ksem_test_waiter_rc = rc;
+}
+
+static void selftest_ksem_hog_task(void)
+{
+    while (!ksem_test_hog_release)
+        __asm__ volatile("" ::: "memory");
+}
+
+static int selftest_case_ksem(void)
+{
+    static const char case_name[] = "ksem-core";
+    static const char sem_name[] = "/selftest-ksem-rt";
+    sched_tcb_t *holder = NULL;
+    sched_tcb_t *waiter = NULL;
+    sched_tcb_t *hog = NULL;
+    ksem_t       main_handle = KSEM_INVALID;
+    ksem_t       anon_handle = KSEM_INVALID;
+    int32_t      value = -1;
+    uint64_t     deadline;
+    int          rc;
+
+    (void)ksem_unlink_current(sem_name);
+    rc = ksem_create_current(sem_name, 1U, KSEM_SHARED | KSEM_RT, &main_handle);
+    ST_CHECK(case_name, rc == 0, "create named ksem fallita");
+
+    rc = ksem_getvalue_current(main_handle, &value);
+    ST_CHECK(case_name, rc == 0 && value == 1, "getvalue iniziale inatteso");
+
+    rc = ksem_trywait_current(main_handle);
+    ST_CHECK(case_name, rc == 0, "trywait iniziale fallita");
+    rc = ksem_getvalue_current(main_handle, &value);
+    ST_CHECK(case_name, rc == 0 && value == 0, "value dopo trywait inatteso");
+    rc = ksem_post_current(main_handle);
+    ST_CHECK(case_name, rc == 0, "post iniziale fallita");
+
+    ksem_test_holder_ready = 0U;
+    ksem_test_holder_release = 0U;
+    ksem_test_waiter_ok = 0U;
+    ksem_test_waiter_rc = 0;
+    ksem_test_hog_release = 0U;
+
+    holder = sched_task_create("ksem-holder", selftest_ksem_holder_task, PRIO_HIGH);
+    ST_CHECK(case_name, holder != NULL, "creazione holder task fallita");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (!ksem_test_holder_ready && timer_now_ms() < deadline)
+        sched_yield();
+    ST_CHECK(case_name, ksem_test_holder_ready != 0U,
+             "holder non ha acquisito il semaforo");
+    holder->priority = PRIO_LOW;
+
+    hog = sched_task_create("ksem-hog", selftest_ksem_hog_task, PRIO_NORMAL);
+    ST_CHECK(case_name, hog != NULL, "creazione hog task fallita");
+    waiter = sched_task_create("ksem-waiter", selftest_ksem_waiter_task, PRIO_KERNEL);
+    ST_CHECK(case_name, waiter != NULL, "creazione waiter task fallita");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (sched_task_effective_priority(holder) != PRIO_KERNEL &&
+           timer_now_ms() < deadline)
+        sched_yield();
+
+    if (sched_task_effective_priority(holder) != PRIO_KERNEL) {
+        ksem_test_holder_release = 1U;
+        ksem_test_hog_release = 1U;
+        ST_CHECK(case_name, 0, "priority inheritance non applicata");
+    }
+
+    ksem_test_holder_release = 1U;
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (!ksem_test_waiter_ok && timer_now_ms() < deadline)
+        sched_yield();
+
+    ksem_test_hog_release = 1U;
+    ST_CHECK(case_name, ksem_test_waiter_ok != 0U,
+             "waiter non ha acquisito il semaforo");
+    ST_CHECK(case_name, ksem_test_waiter_rc == 0,
+             "timedwait waiter non ha ritornato 0");
+
+    deadline = timer_now_ms() + 1000ULL;
+    while (((holder && sched_task_find(holder->pid) &&
+             sched_task_find(holder->pid)->state != TCB_STATE_ZOMBIE) ||
+            (waiter && sched_task_find(waiter->pid) &&
+             sched_task_find(waiter->pid)->state != TCB_STATE_ZOMBIE) ||
+            (hog && sched_task_find(hog->pid) &&
+             sched_task_find(hog->pid)->state != TCB_STATE_ZOMBIE)) &&
+           timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = ksem_getvalue_current(main_handle, &value);
+    ST_CHECK(case_name, rc == 0 && value == 1,
+             "value finale del semaforo RT inatteso");
+
+    rc = ksem_unlink_current(sem_name);
+    ST_CHECK(case_name, rc == 0, "unlink named ksem fallita");
+    rc = ksem_open_current(sem_name, 0U, &anon_handle);
+    ST_CHECK(case_name, rc == -ENOENT, "open dopo unlink non ha dato ENOENT");
+
+    rc = ksem_close_current(main_handle);
+    ST_CHECK(case_name, rc == 0, "close named ksem fallita");
+
+    rc = ksem_anon_current(0U, 0U, &anon_handle);
+    ST_CHECK(case_name, rc == 0, "create anon ksem fallita");
+    rc = ksem_trywait_current(anon_handle);
+    ST_CHECK(case_name, rc == -EAGAIN, "trywait anon non ha dato EAGAIN");
+    rc = ksem_timedwait_current(anon_handle, 2000000ULL);
+    ST_CHECK(case_name, rc == -ETIMEDOUT,
+             "timedwait anon non ha dato ETIMEDOUT");
+    rc = ksem_post_current(anon_handle);
+    ST_CHECK(case_name, rc == 0, "post anon fallita");
+    rc = ksem_wait_current(anon_handle);
+    ST_CHECK(case_name, rc == 0, "wait anon dopo post fallita");
+    rc = ksem_close_current(anon_handle);
+    ST_CHECK(case_name, rc == 0, "close anon ksem fallita");
+    return 0;
+}
+
 static void selftest_ipc_server_task(void)
 {
     ipc_message_t req;
@@ -694,6 +850,7 @@ int selftest_run_all(void)
         { "fork-cow",   selftest_case_fork   },
         { "signal-core", selftest_case_signal },
         { "mreact-core", selftest_case_mreact },
+        { "ksem-core",  selftest_case_ksem   },
         { "ipc-sync",   selftest_case_ipc_sync },
         { "kdebug-core", kdebug_selftest_run },
         { "gpu-stack",  gpu_selftest_run     },

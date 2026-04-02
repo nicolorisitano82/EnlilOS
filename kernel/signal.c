@@ -4,6 +4,7 @@
 
 #include "signal.h"
 
+#include "ksem.h"
 #include "mreact.h"
 #include "mmu.h"
 #include "pmm.h"
@@ -177,6 +178,7 @@ static void signal_terminate_current(void)
     if (!current_task)
         return;
 
+    ksem_task_cleanup(current_task);
     mreact_task_cleanup(current_task);
     signal_task_exit(current_task);
     current_task->state = TCB_STATE_ZOMBIE;
