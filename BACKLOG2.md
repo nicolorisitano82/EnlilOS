@@ -136,9 +136,10 @@ sigaction_t signal_table[64];    /* handler per i 64 segnali standard */
 
 ---
 
-### ⬜ M8-05 · mreact — Reactive Memory Subscriptions
+### ✅ M8-05 · mreact — Reactive Memory Subscriptions
 **Priorità:** ALTA
 **Originalità:** primitiva non presente in nessun OS esistente (Linux, XNU, Windows NT, seL4, Fuchsia, Plan 9)
+**Stato attuale:** implementata v1 con backend cooperativo in kernel (`mreact_wait()` valuta il predicato e cede la CPU con `sched_yield()`), syscall EL0 `80–84`, demo user-space e selftest end-to-end.
 
 **Problema che risolve:** eliminare l'intera classe dei polling loop su shared memory.
 Oggi ogni OS costringe i task a scegliere tra:
@@ -187,55 +188,24 @@ kernel-guaranteed uguale al tempo tra la write e il ciclo IRQ successivo.
 
 #### Implementazione kernel
 
-**Meccanismo base — write-protect + Data Abort:**
+**Backend v1 implementato:**
 
-1. Al `mreact_subscribe()`: il kernel **write-protegge** la pagina fisica (`PTE` → R/O)
-   e inserisce la subscription in una hash table `mreact_table[]` indicizzata sulla page frame
-2. Alla prima write alla pagina: **Data Abort** (exception EL1) — il kernel riceve il control
-3. Kernel evalua il predicato sul valore scritto: O(1) per tutti i predicati (confronto intero)
-4. **Predicato vero:** chiama `sched_unblock(subscriber_tcb)` — il subscriber è pronto nel tick successivo
-5. **Predicato falso:** esegue la write in modo trasparente (`str` via kernel), re-protegge, task scrittore riprende senza accorgersi
-6. Flag `ONE_SHOT`: dopo il wakeup la pagina torna R/W e la subscription viene rimossa
-7. Flag `PERSISTENT`: la pagina resta write-protected — ogni write passa per il kernel
+1. `mreact_subscribe()` registra una o piu' subscription nel pool statico kernel
+2. `mreact_wait()` blocca il task chiamante con timeout bounded
+3. `mreact_wait()` valuta i predicati nel kernel sul relativo `mm_space`
+4. se la condizione non e' ancora vera, la syscall cede la CPU con `sched_yield()` e riprova
+5. `ONE_SHOT`, `PERSISTENT`, `LEVEL`, `EDGE`, `subscribe_all()` e `subscribe_any()` sono supportati
 
-**Ottimizzazione MREACT_SAMPLE(N):**
-Per indirizzi ad alta frequenza di scrittura (es. contatori, timestap), la write-protection
-ha overhead eccessivo. Con `MREACT_SAMPLE(N)` il kernel installa invece un **hardware
-watchpoint PMU** (`DBGWVR`/`DBGWCR` AArch64) in modalità sample: il PMU conta N write
-e genera un interrupt al N-esimo, il kernel valuta il predicato, poi re-arma.
-Costo: 0 overhead sulle N-1 write tra un campionamento e l'altro.
+**Profilo di latenza v1:**
+- nessun polling in user-space
+- nessuna evaluation nel contesto hard-IRQ
+- costo kernel bounded dal numero massimo di handle/subscription del pool statico
+- latenza legata al prossimo slice/switch di scheduler, non ancora al solo tick IRQ
 
-**Strutture:**
-```c
-typedef struct {
-    void          *addr;
-    size_t         size;          /* 1, 2, 4, 8 byte — allineato */
-    mreact_pred_t  pred;
-    uint64_t       value;
-    uint32_t       flags;
-} mreact_sub_t;
-
-/* Entry interna nella hash table kernel */
-typedef struct mreact_entry {
-    mreact_sub_t       sub;
-    sched_tcb_t       *waiter;    /* task bloccato in mreact_wait */
-    uint32_t           handle;    /* handle opaco ritornato a user-space */
-    struct mreact_entry *next;    /* collision chain, pool statico */
-} mreact_entry_t;
-
-/* Hash table globale: indicizzata su (phys_page >> 12) & 0xFF */
-#define MREACT_TABLE_SIZE  256
-static mreact_entry_t *mreact_table[MREACT_TABLE_SIZE];
-static mreact_entry_t  mreact_pool[MAX_MREACT_SUBS];  /* pool statico, zero kmalloc */
-```
-
-**`mreact_wait` RT-safe:** blocca il task con `sched_block()` + timeout via timer wheel.
-WCET = O(1): lookup handle → check già-soddisfatto → block. Il kernel sblocca il waiter
-nel Data Abort handler, che gira nello stesso tick IRQ della write — latenza ≤ 1ms.
-
-**`mreact_subscribe_all` / `mreact_subscribe_any`:** composizione di N subscription con
-semantica AND (all) o OR (any). Il kernel sveglia il waiter quando tutte/almeno-una delle
-condizioni sono soddisfatte. Implementato con un contatore atomico nel pool (zero allocazione).
+**Ottimizzazione rinviata:**
+Il design originario con `write-protect + Data Abort` e `MREACT_SAMPLE(N)` via PMU/watchpoint
+resta valido come evoluzione successiva del backend, ma non e' necessario per usare gia' l'API
+EL0 e il modello di programmazione di `mreact`.
 
 ---
 
@@ -296,12 +266,15 @@ mreact_wait(h, deadline);
 
 **Struttura file:**
 ```
-kernel/mreact.c         — implementazione: hash table, Data Abort hook, wait/cancel
+kernel/mreact.c         — implementazione v1: pool statico, predicati, wait/cancel
 include/mreact.h        — strutture pubbliche, predicati, flag
-kernel/exception.c      — Data Abort handler esteso: chiama mreact_on_write()
+kernel/syscall.c        — syscall 80–84 + integrazione con mmap/exec/cleanup task
+kernel/mmu.c            — mmap anonimo EL0 nel window user
+kernel/selftest.c       — selftest end-to-end `mreact-core`
+user/mreact_demo.c      — demo EL0 che attende su word mappata con `mmap()`
 ```
 
-**Dipende da:** M3-01 (syscall dispatcher), M2-03 (sched_block/unblock), M1-02 (MMU — write-protect PTE)
+**Dipende da:** M3-01 (syscall dispatcher), M2-03 (sched_block/unblock), M6-01 (user-space + MMU task-private)
 **Potenziato da:** M7-01 (IPC RT — mreact come alternativa a IPC per shared-memory pattern), M9-01 (capability — la subscription diventa una capability revocabile)
 
 ---

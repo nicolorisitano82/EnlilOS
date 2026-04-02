@@ -213,6 +213,8 @@ void        mmu_activate_space(mm_space_t *space);
  */
 int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
                                 size_t size, uint32_t prot);
+int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
+                                  uint32_t prot, uintptr_t *start_out);
 
 /*
  * Traduce un VA user di 'space' in un puntatore kernel valido (identity-mapped

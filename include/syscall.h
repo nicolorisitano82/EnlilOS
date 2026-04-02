@@ -16,6 +16,7 @@
 #include "types.h"
 #include "exception.h"
 #include "signal.h"
+#include "mreact.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -38,6 +39,11 @@
 #define SYS_SIGACTION       17
 #define SYS_SIGPROCMASK     18
 #define SYS_SIGRETURN       19
+#define SYS_MREACT_SUBSCRIBE      80
+#define SYS_MREACT_WAIT           81
+#define SYS_MREACT_CANCEL         82
+#define SYS_MREACT_SUBSCRIBE_ALL  83
+#define SYS_MREACT_SUBSCRIBE_ANY  84
 #define SYS_KILL            62
 
 /* Range ANE (M3-03): 100–119 */

@@ -730,6 +730,33 @@ int mmu_map_user_region(mm_space_t *space, uintptr_t start,
     return 0;
 }
 
+int mmu_map_user_anywhere(mm_space_t *space, size_t size,
+                          uint32_t prot, uintptr_t *start_out)
+{
+    uintptr_t start;
+    size_t    aligned;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+
+    aligned = (size + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    if (aligned == 0U)
+        return -1;
+
+    start = (space->mmap_base + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    if (start < MMU_USER_BASE || start + aligned < start ||
+        start + aligned > MMU_USER_SIGTRAMP_VA)
+        return -1;
+
+    if (mmu_map_user_region(space, start, aligned, prot) < 0)
+        return -1;
+
+    space->mmap_base = start + aligned;
+    if (start_out)
+        *start_out = start;
+    return 0;
+}
+
 void *mmu_space_resolve_ptr(mm_space_t *space, uintptr_t va, size_t size)
 {
     uintptr_t end = va + size;

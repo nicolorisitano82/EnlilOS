@@ -61,6 +61,7 @@ C_SRCS   = kernel/main.c \
            kernel/string.c \
            kernel/selftest.c \
            kernel/ext4.c \
+           kernel/mreact.c \
            kernel/vfs.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \
@@ -78,7 +79,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
@@ -191,6 +192,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		DYNDEMO.ELF=user/dynamic_demo.elf \
 		FORKDEMO.ELF=user/fork_demo.elf \
 		SIGDEMO.ELF=user/signal_demo.elf \
+		MREACTDEMO.ELF=user/mreact_demo.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf

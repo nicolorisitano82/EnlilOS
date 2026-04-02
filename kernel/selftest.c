@@ -14,6 +14,7 @@
 #include "gpu.h"
 #include "kdebug.h"
 #include "microkernel.h"
+#include "mmu.h"
 #include "sched.h"
 #include "signal.h"
 #include "syscall.h"
@@ -470,6 +471,80 @@ static int selftest_case_signal(void)
     return 0;
 }
 
+static int selftest_case_mreact(void)
+{
+    static const char case_name[] = "mreact-core";
+    uint32_t          pid = 0U;
+    uint64_t          deadline;
+    sched_tcb_t      *task;
+    mm_space_t       *space;
+    volatile uint32_t *cell;
+    vfs_file_t        file;
+    char              buf[16];
+    ssize_t           n;
+    int               rc;
+
+    rc = vfs_unlink("/data/MREACT.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup MREACT.TXT fallita");
+    rc = vfs_unlink("/data/MREACT.READY");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup MREACT.READY fallita");
+
+    rc = elf64_spawn_path("/MREACTDEMO.ELF", "/MREACTDEMO.ELF", PRIO_KERNEL, &pid);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, pid != 0U, "pid mreact demo nullo");
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task mreact demo non trovata");
+
+        rc = vfs_open("/data/MREACT.READY", O_RDONLY, &file);
+        if (rc == 0) {
+            (void)vfs_close(&file);
+            break;
+        }
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, rc == 0, "timeout attesa MREACT.READY");
+
+    space = sched_task_space(task);
+    ST_CHECK(case_name, space != NULL, "mm_space mreact nulla");
+    rc = mmu_space_prepare_write(space, MMU_USER_BASE, sizeof(uint32_t));
+    ST_CHECK(case_name, rc == 0, "prepare_write target mreact fallita");
+
+    cell = (volatile uint32_t *)mmu_space_resolve_ptr(space, MMU_USER_BASE,
+                                                      sizeof(uint32_t));
+    ST_CHECK(case_name, cell != NULL, "resolve_ptr target mreact fallita");
+    *cell = 42U;
+
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        task = sched_task_find(pid);
+        ST_CHECK(case_name, task != NULL, "task mreact demo non trovata");
+        if (task->state == TCB_STATE_ZOMBIE)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa mreact demo");
+
+    rc = vfs_open("/data/MREACT.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open MREACT.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read MREACT.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, "ok\n"), "contenuto MREACT.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_unlink("/data/MREACT.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink MREACT.TXT fallita");
+    rc = vfs_unlink("/data/MREACT.READY");
+    ST_CHECK(case_name, rc == 0, "unlink MREACT.READY fallita");
+    return 0;
+}
+
 static volatile uint32_t ipc_test_port_id;
 static volatile uint32_t ipc_test_server_waiting;
 static volatile uint32_t ipc_test_server_ok;
@@ -618,6 +693,7 @@ int selftest_run_all(void)
         { "elf-dynamic", selftest_case_dynelf },
         { "fork-cow",   selftest_case_fork   },
         { "signal-core", selftest_case_signal },
+        { "mreact-core", selftest_case_mreact },
         { "ipc-sync",   selftest_case_ipc_sync },
         { "kdebug-core", kdebug_selftest_run },
         { "gpu-stack",  gpu_selftest_run     },

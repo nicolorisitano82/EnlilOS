@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "mreact.h"
 #include "mmu.h"
 #include "signal.h"
 #include "timer.h"
@@ -838,6 +839,7 @@ void sched_task_bootstrap(uint64_t entry_reg)
 void sched_task_exit(void)
 {
     if (current_task) {
+        mreact_task_cleanup(current_task);
         signal_task_exit(current_task);
         current_task->state = TCB_STATE_ZOMBIE;
     }

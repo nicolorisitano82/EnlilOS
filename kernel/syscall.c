@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "elf_loader.h"
 #include "kheap.h"
+#include "mreact.h"
 #include "mmu.h"
 #include "sched.h"
 #include "timer.h"
@@ -206,6 +207,17 @@ static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
     }
 
     return 0;
+}
+
+static uint32_t sys_mmap_prot_to_mmu(uint32_t prot)
+{
+    uint32_t mmu_prot = MMU_PROT_USER_R;
+
+    if (prot & PROT_WRITE)
+        mmu_prot |= MMU_PROT_USER_W;
+    if (prot & PROT_EXEC)
+        mmu_prot |= MMU_PROT_USER_X;
+    return mmu_prot;
 }
 
 static int exec_copy_push_string(exec_copy_t *copy, uintptr_t user_ptr,
@@ -427,47 +439,49 @@ static uint64_t sys_fstat(uint64_t args[6])
  * Syscall 7 — mmap
  *
  * args: addr(hint), length, prot, flags, fd, offset
- * Solo MAP_ANONYMOUS supportato. MMU identity-mapped → PA == VA.
- * Usa il buddy allocator per allocare pagine fisiche contigue.
+ * Solo MAP_ANONYMOUS supportato. Alloca un nuovo range user-space
+ * nel window alto e ritorna un vero VA EL0.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_mmap(uint64_t args[6])
 {
-    /* uint64_t addr_hint = args[0]; (ignorato) */
-    uint64_t length = args[1];
-    /* uint32_t prot  = (uint32_t)args[2]; */
-    uint32_t flags  = (uint32_t)args[3];
-    /* int      mapfd = (int)args[4]; */
-    /* uint64_t off   = args[5]; */
+    uint64_t    length = args[1];
+    uint32_t    prot   = (uint32_t)args[2];
+    uint32_t    flags  = (uint32_t)args[3];
+    uint64_t    pages;
+    size_t      aligned;
+    uintptr_t   user_va;
+    mm_space_t *space;
 
-    if (length == 0)                return MAP_FAILED_VA;
-    if (!(flags & MAP_ANONYMOUS))   return MAP_FAILED_VA;
+    (void)args[0];
+    (void)args[4];
+    (void)args[5];
 
-    /* Calcola ordine buddy (pagine = ceiling(length / 4096)) */
-    uint64_t pages = (length + 4095ULL) / 4096ULL;
-    if (pages > 256) return MAP_FAILED_VA;  /* max 1MB per chiamata */
+    if (!current_task || !sched_task_is_user(current_task))
+        return MAP_FAILED_VA;
+    if (length == 0ULL || !(flags & MAP_ANONYMOUS))
+        return MAP_FAILED_VA;
 
-    uint32_t order = 0;
-    uint64_t p = pages;
-    while (p > 1) { p >>= 1; order++; }
-    if ((1ULL << order) < pages) order++;
-    if (order > 10) order = 10;
+    pages = (length + PAGE_SIZE - 1ULL) / PAGE_SIZE;
+    if (pages == 0ULL || pages > 256ULL)
+        return MAP_FAILED_VA;
 
-    uint64_t pa = phys_alloc_pages(order);
-    if (pa == 0) return MAP_FAILED_VA;
+    aligned = (size_t)pages * PAGE_SIZE;
+    space = sched_task_space(current_task);
+    if (!space)
+        return MAP_FAILED_VA;
 
-    /* Zero-fill: evita leakage di dati kernel in user-space */
-    uint8_t *ptr = (uint8_t *)(uintptr_t)pa;
-    uint64_t alloc_bytes = (1ULL << order) * 4096ULL;
-    for (uint64_t i = 0; i < alloc_bytes; i++) ptr[i] = 0;
+    if (mmu_map_user_anywhere(space, aligned, sys_mmap_prot_to_mmu(prot), &user_va) < 0)
+        return MAP_FAILED_VA;
 
-    return pa;  /* identity map: PA == VA */
+    return (uint64_t)user_va;
 }
 
 /* ════════════════════════════════════════════════════════════════════
  * Syscall 8 — munmap
  *
  * args: addr, length
- * Rilascia le pagine al buddy allocator.
+ * Il free puntuale dei range user-space e' rinviato: il backing viene
+ * comunque rilasciato alla distruzione dello mm_space.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_munmap(uint64_t args[6])
 {
@@ -475,6 +489,9 @@ static uint64_t sys_munmap(uint64_t args[6])
     uint64_t length = args[1];
 
     if (addr == 0 || length == 0) return ERR(EINVAL);
+    if (current_task && sched_task_is_user(current_task) &&
+        addr >= MMU_USER_BASE && addr < MMU_USER_LIMIT)
+        return ERR(ENOSYS);
 
     uint64_t pages = (length + 4095ULL) / 4096ULL;
     uint32_t order = 0;
@@ -586,6 +603,7 @@ static uint64_t sys_execve(uint64_t args[6])
         return ERR(EIO);
     }
 
+    mreact_task_cleanup(current_task);
     mmu_activate_space(image.space);
     if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
         mmu_space_destroy(old_mm);
@@ -928,6 +946,75 @@ static uint64_t sys_kill(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_mreact_subscribe(uint64_t args[6])
+{
+    mreact_sub_t    sub;
+    mreact_handle_t handle = 0U;
+    int             rc;
+
+    sub.addr = (void *)(uintptr_t)args[0];
+    sub.size = (size_t)args[1];
+    sub.pred = (mreact_pred_t)(uint32_t)args[2];
+    sub.value = args[3];
+    sub.flags = (uint32_t)args[4];
+    sub._pad = 0U;
+
+    rc = mreact_subscribe_current(&sub, 1U, 1, sub.flags, &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_mreact_wait(uint64_t args[6])
+{
+    int rc = mreact_wait_current((mreact_handle_t)(uint32_t)args[0], args[1]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_mreact_cancel(uint64_t args[6])
+{
+    int rc = mreact_cancel_current((mreact_handle_t)(uint32_t)args[0]);
+
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_mreact_subscribe_group(uint64_t args[6], int require_all)
+{
+    uintptr_t       subs_uva = (uintptr_t)args[0];
+    uint32_t        count = (uint32_t)args[1];
+    uint32_t        flags = (uint32_t)args[2];
+    mreact_sub_t    subs[MREACT_MAX_SUBS];
+    mreact_handle_t handle = 0U;
+    int             rc;
+
+    if (!subs_uva || count == 0U || count > MREACT_MAX_SUBS)
+        return ERR(EINVAL);
+
+    rc = user_copy_bytes(subs_uva, subs, (size_t)count * sizeof(subs[0]));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = mreact_subscribe_current(subs, count, require_all, flags, &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_mreact_subscribe_all(uint64_t args[6])
+{
+    return sys_mreact_subscribe_group(args, 1);
+}
+
+static uint64_t sys_mreact_subscribe_any(uint64_t args[6])
+{
+    return sys_mreact_subscribe_group(args, 0);
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -944,6 +1031,7 @@ void syscall_init(void)
 {
     /* 1. Porta su line discipline + VFS bootstrap */
     signal_init();
+    mreact_init();
     tty_init();
     vfs_init();
 
@@ -1029,8 +1117,23 @@ void syscall_init(void)
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"
     };
+    syscall_table[SYS_MREACT_SUBSCRIBE] = (syscall_entry_t){
+        sys_mreact_subscribe, 0, "mreact_subscribe"
+    };
+    syscall_table[SYS_MREACT_WAIT] = (syscall_entry_t){
+        sys_mreact_wait, SYSCALL_FLAG_RT, "mreact_wait"
+    };
+    syscall_table[SYS_MREACT_CANCEL] = (syscall_entry_t){
+        sys_mreact_cancel, SYSCALL_FLAG_RT, "mreact_cancel"
+    };
+    syscall_table[SYS_MREACT_SUBSCRIBE_ALL] = (syscall_entry_t){
+        sys_mreact_subscribe_all, 0, "mreact_subscribe_all"
+    };
+    syscall_table[SYS_MREACT_SUBSCRIBE_ANY] = (syscall_entry_t){
+        sys_mreact_subscribe_any, 0, "mreact_subscribe_any"
+    };
 
-    uart_puts("[SYSCALL] 20 syscall base/UX/signal registrate\n");
+    uart_puts("[SYSCALL] 25 syscall base/UX/signal/mreact registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 
