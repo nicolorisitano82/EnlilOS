@@ -608,7 +608,12 @@ static void nsh_cmd_exec(const char *arg)
         return;
     }
 
-    rc = sys_spawn_path(path, &pid, 128U);
+    /*
+     * exec e' sincrono: la shell attende il figlio con waitpid().
+     * Se il figlio parte a priorita' troppo bassa puo' restare affamato
+     * dal parent in polling. Lo lanciamo almeno alla stessa classe della nsh.
+     */
+    rc = sys_spawn_path(path, &pid, 32U);
     if (rc < 0) {
         nsh_print_error("exec spawn", rc);
         return;

@@ -16,11 +16,14 @@
  */
 
 #include "cap.h"
+#include "mmu.h"
+#include "pmm.h"
 #include "sched.h"
 #include "syscall.h"
 #include "uart.h"
 #include "types.h"
 
+extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int value, size_t n);
 
 /* ════════════════════════════════════════════════════════════════════
@@ -39,7 +42,42 @@ static cap_t cap_make_token(uint32_t pid)
 {
     uint64_t cntpct;
     __asm__ volatile("mrs %0, cntpct_el0" : "=r"(cntpct));
-    return cntpct ^ ((uint64_t)pid << 32) ^ cap_salt ^ (uint64_t)pid;
+    return (cntpct ^ ((uint64_t)pid << 32) ^ cap_salt ^ (uint64_t)pid) &
+           0x7FFFFFFFFFFFFFFFULL;
+}
+
+static int cap_store_user(uintptr_t uva, const void *src, size_t size)
+{
+    mm_space_t    *space;
+    const uint8_t *in = (const uint8_t *)src;
+    size_t         copied = 0U;
+
+    if (size == 0U)
+        return 0;
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EFAULT;
+
+    space = sched_task_space(current_task);
+    while (copied < size) {
+        uintptr_t cur = uva + copied;
+        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
+        size_t    chunk = PAGE_SIZE - page_off;
+        void     *dst;
+
+        if (chunk > size - copied)
+            chunk = size - copied;
+        if (mmu_space_prepare_write(space, cur, chunk) < 0)
+            return -EFAULT;
+
+        dst = mmu_space_resolve_ptr(space, cur, chunk);
+        if (!dst)
+            return -EFAULT;
+
+        memcpy(dst, in + copied, chunk);
+        copied += chunk;
+    }
+
+    return 0;
 }
 
 /* O(CAP_POOL_SIZE) — trova entry valida con token corrispondente. */
@@ -221,7 +259,11 @@ uint64_t sys_cap_revoke(uint64_t args[6])
     if (!e)
         return ERR(EINVAL);
 
+    if (!cap_table_has(cur->pid, token))
+        return ERR(EPERM);
     if (e->owner_pid != cur->pid)
+        return ERR(EPERM);
+    if ((e->rights & CAP_RIGHT_REVOKE) == 0U)
         return ERR(EPERM);
 
     /* Invalida nel pool. */
@@ -282,7 +324,9 @@ uint64_t sys_cap_derive(uint64_t args[6])
 uint64_t sys_cap_query(uint64_t args[6])
 {
     cap_t       token = args[0];
-    cap_info_t *ubuf  = (cap_info_t *)(uintptr_t)args[1];
+    uintptr_t   ubuf  = (uintptr_t)args[1];
+    cap_info_t  info;
+    int         rc;
 
     if (!ubuf)
         return ERR(EFAULT);
@@ -298,10 +342,14 @@ uint64_t sys_cap_query(uint64_t args[6])
     if (!cap_table_has(cur->pid, token))
         return ERR(EPERM);
 
-    ubuf->type      = e->type;
-    ubuf->owner_pid = e->owner_pid;
-    ubuf->rights    = e->rights;
-    ubuf->object    = e->object;
+    info.type      = e->type;
+    info.owner_pid = e->owner_pid;
+    info.rights    = e->rights;
+    info.object    = e->object;
+
+    rc = cap_store_user(ubuf, &info, sizeof(info));
+    if (rc < 0)
+        return ERR(-rc);
 
     return 0;
 }

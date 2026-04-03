@@ -312,18 +312,36 @@ syscall_entry_t syscall_table[SYSCALL_MAX];
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_write(uint64_t args[6])
 {
-    int         fd    = (int)args[0];
-    const char *buf   = (const char *)(uintptr_t)args[1];
-    uint64_t    count = args[2];
+    int          fd       = (int)args[0];
+    uintptr_t    buf_uva  = (uintptr_t)args[1];
+    const void  *src      = (const void *)(uintptr_t)args[1];
+    void        *bounce   = NULL;
+    uint64_t     count    = args[2];
+    int          copy_rc;
 
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
-    if (!buf) return ERR(EFAULT);
+    if (!src) return ERR(EFAULT);
     if (!count) return 0;
     if (count > 4096) count = 4096;
     if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
-    ssize_t rc = vfs_write(&e->file, buf, count);
+    if (current_task && sched_task_is_user(current_task)) {
+        bounce = kmalloc((uint32_t)count);
+        if (!bounce)
+            return ERR(ENOMEM);
+
+        copy_rc = user_copy_bytes(buf_uva, bounce, (size_t)count);
+        if (copy_rc < 0) {
+            kfree(bounce);
+            return ERR(-copy_rc);
+        }
+        src = bounce;
+    }
+
+    ssize_t rc = vfs_write(&e->file, src, count);
+    if (bounce)
+        kfree(bounce);
     if (rc < 0) return ERR((int)-rc);
     return (uint64_t)rc;
 }
@@ -336,18 +354,37 @@ static uint64_t sys_write(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_read(uint64_t args[6])
 {
-    int      fd  = (int)args[0];
-    char    *buf = (char *)(uintptr_t)args[1];
-    uint64_t cnt = args[2];
+    int       fd      = (int)args[0];
+    uintptr_t buf_uva = (uintptr_t)args[1];
+    void     *dst     = (void *)(uintptr_t)args[1];
+    void     *bounce  = NULL;
+    uint64_t  cnt     = args[2];
+    int       copy_rc;
 
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
-    if (!buf) return ERR(EFAULT);
+    if (!dst) return ERR(EFAULT);
     if (cnt == 0) return 0;
     if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
     if (cnt > 4096) cnt = 4096;
-    ssize_t rc = vfs_read(&e->file, buf, cnt);
+    if (current_task && sched_task_is_user(current_task)) {
+        bounce = kmalloc((uint32_t)cnt);
+        if (!bounce)
+            return ERR(ENOMEM);
+        dst = bounce;
+    }
+
+    ssize_t rc = vfs_read(&e->file, dst, cnt);
+    if (rc > 0 && bounce) {
+        copy_rc = user_store_bytes(buf_uva, bounce, (size_t)rc);
+        if (copy_rc < 0) {
+            kfree(bounce);
+            return ERR(-copy_rc);
+        }
+    }
+    if (bounce)
+        kfree(bounce);
     if (rc < 0) return ERR((int)-rc);
     return (uint64_t)rc;
 }
@@ -373,17 +410,26 @@ static uint64_t sys_exit(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_open(uint64_t args[6])
 {
-    const char *path  = (const char *)(uintptr_t)args[0];
-    uint16_t    oflags = (uint16_t)args[1];
-    int         idx = task_idx();
+    uintptr_t   path_uva = (uintptr_t)args[0];
+    const char *path     = (const char *)(uintptr_t)args[0];
+    const char *path_arg = path;
+    char        path_buf[EXEC_MAX_PATH];
+    uint16_t    oflags   = (uint16_t)args[1];
+    int         idx      = task_idx();
     int         rc;
 
     if (!path) return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path_arg = path_buf;
+    }
 
     int fd = fd_alloc();
     if (fd < 0) return ERR(ENFILE);
 
-    rc = fd_bind_path(&fd_tables[idx][fd], path, oflags);
+    rc = fd_bind_path(&fd_tables[idx][fd], path_arg, oflags);
     if (rc < 0) return ERR(-rc);
 
     return (uint64_t)fd;
@@ -425,16 +471,27 @@ static uint64_t sys_close(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_fstat(uint64_t args[6])
 {
-    int     fd  = (int)args[0];
-    stat_t *buf = (stat_t *)(uintptr_t)args[1];
+    int       fd      = (int)args[0];
+    uintptr_t buf_uva = (uintptr_t)args[1];
+    stat_t   *buf     = (stat_t *)(uintptr_t)args[1];
+    stat_t    st;
+    int       rc;
 
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
     if (!buf) return ERR(EFAULT);
     if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
-    int rc = vfs_stat(&e->file, buf);
+    if (current_task && sched_task_is_user(current_task))
+        buf = &st;
+
+    rc = vfs_stat(&e->file, buf);
     if (rc < 0) return ERR(-rc);
+    if (buf == &st) {
+        rc = user_store_bytes(buf_uva, &st, sizeof(st));
+        if (rc < 0)
+            return ERR(-rc);
+    }
     return 0;
 }
 
@@ -728,13 +785,25 @@ static uint64_t sys_waitpid(uint64_t args[6])
 static uint64_t sys_clock_gettime(uint64_t args[6])
 {
     /* clock_id: CLOCK_REALTIME=0, CLOCK_MONOTONIC=1 — entrambi usano CNTPCT */
-    timespec_t *ts = (timespec_t *)(uintptr_t)args[1];
+    uintptr_t   ts_uva = (uintptr_t)args[1];
+    timespec_t *ts     = (timespec_t *)(uintptr_t)args[1];
+    timespec_t  local_ts;
+    int         rc;
 
     uint64_t ns = timer_now_ns();
 
     if (ts) {
+        if (current_task && sched_task_is_user(current_task))
+            ts = &local_ts;
+
         ts->tv_sec  = (int64_t)(ns / 1000000000ULL);
         ts->tv_nsec = (int64_t)(ns % 1000000000ULL);
+
+        if (ts == &local_ts) {
+            rc = user_store_bytes(ts_uva, &local_ts, sizeof(local_ts));
+            if (rc < 0)
+                return ERR(-rc);
+        }
     }
 
     return 0;
