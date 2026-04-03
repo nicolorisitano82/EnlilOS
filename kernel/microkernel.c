@@ -432,6 +432,20 @@ int mk_port_destroy(uint32_t port_id)
     return 0;
 }
 
+int mk_port_rebind(uint32_t port_id, uint32_t owner_tid)
+{
+    port_t *p = mk_port_by_id(port_id);
+
+    if (!p)
+        return -ENOENT;
+    if (p->active_client_tid != 0U || p->pending_valid ||
+        p->reply_valid || p->waiting_tid != 0U)
+        return -EBUSY;
+
+    p->owner_tid = owner_tid;
+    return 0;
+}
+
 port_t *mk_port_lookup(const char *name)
 {
     for (uint32_t i = 0U; i < MAX_PORTS; i++) {

@@ -66,6 +66,19 @@
 #define SYS_KMON_BROADCAST        111
 #define SYS_KILL            129   /* Linux AArch64 standard */
 
+/* Port / IPC server bootstrap (M9-02) */
+#define SYS_PORT_LOOKUP     140
+#define SYS_IPC_WAIT        141
+#define SYS_IPC_REPLY       142
+
+/* Bootstrap VFS backend per vfsd (M9-02 v1) */
+#define SYS_VFS_BOOT_OPEN      150
+#define SYS_VFS_BOOT_READ      151
+#define SYS_VFS_BOOT_WRITE     152
+#define SYS_VFS_BOOT_READDIR   153
+#define SYS_VFS_BOOT_STAT      154
+#define SYS_VFS_BOOT_CLOSE     155
+
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
 #define SYS_CAP_SEND        61

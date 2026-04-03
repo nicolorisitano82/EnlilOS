@@ -794,7 +794,7 @@ history, plugin system — shell di default al boot
 
 ---
 
-### ⬜ M9-01 · Capability System
+### ✅ M9-01 · Capability System
 **Priorità:** CRITICA — base per tutta la sicurezza dei server
 
 - Ogni risorsa (porta IPC, buffer GPU, file descriptor, mapping MMU) è rappresentata
@@ -804,6 +804,14 @@ history, plugin system — shell di default al boot
 - `cap_revoke(cap)`: invalida il token — tutti i detentori perdono accesso
 - `cap_derive(cap, rights_mask)`: crea capability figlia con diritti ristretti
 - Implementazione: token = `CNTPCT_EL0 ^ (pid << 32) ^ random_salt` al momento della creazione
+- Implementato ora: backend kernel statico con `cap_pool[256]`, `cap_table[pid][64]`,
+  syscall `cap_alloc/cap_send/cap_revoke/cap_derive/cap_query`, enforcement di owner e rights,
+  copia sicura verso user-space per `cap_query()`, token mascherati a 63 bit per ABI EL0 signed-safe,
+  demo `/CAPDEMO.ELF` e validazione runtime da `runelf` e `nsh exec`
+- Nota RT/onesta: `cap_revoke()` non e' O(1), ma bounded su pool statico
+  (`SCHED_MAX_TASKS * MAX_CAPS_PER_TASK`); resta comunque accettabile per il profilo previsto
+- Restano per le milestone server successive: uso esteso di `CAP_MMIO`, `CAP_FD`, `CAP_GPU_BUF`
+  e trasferimento capability come meccanismo primario tra server user-space
 
 **Numeri syscall (range 60–79):**
 
@@ -811,13 +819,13 @@ history, plugin system — shell di default al boot
 |----|------|---------|-------|
 | 60 | `cap_alloc` | No | `(uint32_t type, uint64_t rights) → cap_t` |
 | 61 | `cap_send` | Sì | `(ipc_port_t dst, cap_t c) → int` |
-| 62 | `cap_revoke` | Sì — O(1) | `(cap_t c) → int` |
+| 62 | `cap_revoke` | Sì — bounded | `(cap_t c) → int` |
 | 63 | `cap_derive` | No | `(cap_t src, uint64_t mask) → cap_t` |
-| 64 | `cap_query` | Sì — O(1) | `(cap_t c, cap_info_t *out) → int` |
+| 64 | `cap_query` | Sì — bounded | `(cap_t c, cap_info_t *out) → int` |
 
 ---
 
-### ⬜ M9-02 · VFS Server in User-Space
+### ✅ M9-02 · VFS Server in User-Space (bootstrap v1)
 **Priorità:** ALTA (migra il VFS kernel di M5-02 fuori dal kernel)
 
 Il VFS kernel di M5-02 è una soluzione di bootstrap: corretto ma monolitico.
@@ -831,6 +839,20 @@ M9-02 lo sostituisce con un server user-space ELF separato.
 
 **Passaggio graduale:** M5-02/M5-03 restano attivi finché `vfsd` non è stabile;
 poi `vfs_kernel_ops` viene rimosso dal kernel e sostituito con chiamate IPC al server.
+
+**Implementato ora (v1 bootstrap):**
+- server `user-space` reale `/VFSD.ELF`, avviato al boot e bindato alla porta microkernel `vfs`
+- protocollo IPC dedicato per `open/read/write/readdir/stat/close`
+- syscall minime lato server: `port_lookup`, `ipc_wait`, `ipc_reply`
+- bridge kernel-side: i syscall file-oriented dei task EL0 usano `vfsd`, mentre il kernel
+  mantiene ancora il backend VFS bootstrap come appoggio interno
+- validato a runtime: `nsh` esegue `ls`, `cat /BOOT.TXT`, `cd /data`, `ls`, `cat /data/MREACT.TXT`
+  passando attraverso `vfsd`
+
+**Resta a M9-03/M9-04:**
+- rimozione del backend ext4/blocco dal kernel
+- mount dinamico reale tra server distinti (`vfsd` ↔ `blkd`)
+- namespace privati e gestione mount completamente lato server
 
 ---
 
@@ -2397,11 +2419,11 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ---
 
-## Prossimi tre step consigliati (appena M7 è completo)
+## Prossimi tre step consigliati
 
-1. **M8-01** fork() + COW MMU — sblocca shell POSIX e qualsiasi programma che usa fork
-2. **M9-01** Capability System — base di sicurezza per tutta l'architettura server
-3. **M11-01** musl libc — porta subito; senza libc ogni programma C reale è inutilizzabile
+1. **M9-02** VFS Server (`vfsd`) — primo vero spostamento di una grossa superficie kernel in user-space
+2. **M9-03** Block Server (`blkd`) — completa la migrazione storage sopra capability + IPC
+3. **M11-01** musl libc — dopo i server base, sblocca userland C reale senza wrapper ad hoc
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2449,7 +2471,7 @@ Senza questa fase tutto il kernel è un blob monolitico non sicuro.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 7 | **M9-01** Capability System | Base di sicurezza per tutti i server successivi. Prima di muovere qualsiasi driver fuori dal kernel |
+| 7 | **M9-01** Capability System | Gia' implementata v1 nel kernel; base di sicurezza pronta prima di muovere driver e VFS fuori dal kernel |
 | 8 | **M9-02** VFS Server (`vfsd`) | Migra il VFS kernel di M5-02 in user-space. Dipendenza critica di audio, USB, procfs |
 | 9 | **M9-03** Block Server (`blkd`) | Migra il driver virtio-blk. Dipende da M9-02 e M9-01 |
 | 10 | **M14-01** procfs / sysfs | Dipende da vfsd. Utile subito per ispezionare lo stato del sistema durante lo sviluppo |

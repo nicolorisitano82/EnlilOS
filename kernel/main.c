@@ -100,6 +100,45 @@ static volatile uint32_t bootcli_heartbeat;
 #define BOOTCLI_MODE_UI    0U
 #define BOOTCLI_MODE_TERM  1U
 
+static void boot_launch_vfsd(void)
+{
+    uint32_t pid = 0U;
+    port_t  *port;
+    int      rc;
+
+    if (elf64_spawn_path("/VFSD.ELF", "/VFSD.ELF", PRIO_NORMAL, &pid) < 0) {
+        uart_puts("[VFSD] Spawn fallita, resto su VFS bootstrap in-kernel\n");
+        return;
+    }
+
+    port = mk_port_lookup("vfs");
+    if (!port) {
+        uart_puts("[VFSD] Porta 'vfs' non trovata\n");
+        return;
+    }
+
+    rc = mk_port_rebind(port->port_id, pid);
+    if (rc < 0) {
+        uart_puts("[VFSD] Rebind porta fallita\n");
+        return;
+    }
+    (void)mk_port_set_budget(port->port_id, timer_cntfrq() / 200ULL); /* 5ms */
+
+    uart_puts("[VFSD] User-space server pronto: pid=");
+    {
+        char buf[12];
+        int  len = 0;
+        uint32_t v = pid;
+
+        if (v == 0U) uart_putc('0');
+        else {
+            while (v) { buf[len++] = (char)('0' + (v % 10U)); v /= 10U; }
+            while (len > 0) uart_putc(buf[--len]);
+        }
+    }
+    uart_puts(" port=vfs\n");
+}
+
 static uint32_t bootcli_strlen(const char *s)
 {
     uint32_t len = 0U;
@@ -1573,6 +1612,7 @@ static void bootcli_init(void)
     bootcli_push_line("Prova anche: pwd, cd /data, ls, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
+    bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
     bootcli_push_line("M7-02: usa 'nsh' per aprire la shell ELF statica 80x25.");
     if (bootcli_graphics_mode) {
@@ -1770,6 +1810,7 @@ void kernel_main(void)
     mk_task_create("mem-server", TASK_TYPE_SERVER, 0);
     mk_task_create("blk-server", TASK_TYPE_SERVER, 0);
     mk_task_create("vfs-server", TASK_TYPE_SERVER, 0);
+    boot_launch_vfsd();
 
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 

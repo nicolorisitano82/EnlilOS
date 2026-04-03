@@ -121,6 +121,7 @@ int         mk_ipc_reply(uint32_t port_id, uint32_t type,
 
 uint32_t    mk_port_create(uint32_t owner_tid, const char *name);
 int         mk_port_destroy(uint32_t port_id);
+int         mk_port_rebind(uint32_t port_id, uint32_t owner_tid);
 port_t     *mk_port_lookup(const char *name);
 int         mk_port_set_budget(uint32_t port_id, uint64_t budget_cycles);
 int         mk_port_get_stats(uint32_t port_id, port_stats_t *out);

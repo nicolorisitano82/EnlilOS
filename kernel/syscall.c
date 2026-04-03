@@ -19,6 +19,7 @@
 #include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
+#include "microkernel.h"
 #include "mmu.h"
 #include "sched.h"
 #include "timer.h"
@@ -27,6 +28,7 @@
 #include "uart.h"
 #include "types.h"
 #include "vfs.h"
+#include "vfs_ipc.h"
 
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int value, size_t n);
@@ -39,12 +41,21 @@ extern void *memset(void *dst, int value, size_t n);
 
 #define FD_TYPE_FREE    0
 #define FD_TYPE_VFS     1
+#define FD_TYPE_VFSD    2
+
+#define VFSD_HANDLE_MAX 64U
+
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  _pad0[3];
+    vfs_file_t file;
+} vfs_srv_handle_t;
 
 typedef struct {
     uint8_t  type;
     uint8_t  _pad0;
     uint16_t flags;
-    uint32_t _pad1;
+    uint32_t remote_handle;
     vfs_file_t file;
 } fd_entry_t;
 
@@ -53,6 +64,7 @@ typedef struct {
  * Tutti i task partono con 0/1/2 preimpostati come CONSOLE.
  */
 static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
+static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
 
 /*
  * Program break per task (indirizzato come sopra).
@@ -109,6 +121,7 @@ static void fd_clear(fd_entry_t *e)
 {
     e->type = FD_TYPE_FREE;
     e->flags = 0;
+    e->remote_handle = 0U;
     e->file.mount = NULL;
     e->file.node_id = 0;
     e->file.flags = 0;
@@ -134,6 +147,263 @@ static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
     e->type  = FD_TYPE_VFS;
     e->flags = flags;
     return 0;
+}
+
+static int fd_bind_remote(fd_entry_t *e, uint32_t handle, uint16_t flags)
+{
+    if (!e || handle == 0U)
+        return -EINVAL;
+
+    fd_clear(e);
+    e->type = FD_TYPE_VFSD;
+    e->flags = flags;
+    e->remote_handle = handle;
+    return 0;
+}
+
+static int vfs_srv_task_slot(void)
+{
+    if (!current_task)
+        return -1;
+    return (int)(current_task->pid % SCHED_MAX_TASKS);
+}
+
+static int vfs_srv_owner_ok(void)
+{
+    port_t *port;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+
+    port = mk_port_lookup("vfs");
+    return (port && port->owner_tid == current_task->pid) ? 1 : 0;
+}
+
+static vfs_srv_handle_t *vfs_srv_handle_get(uint32_t handle)
+{
+    int slot;
+
+    if (handle == 0U || handle > VFSD_HANDLE_MAX)
+        return NULL;
+
+    slot = vfs_srv_task_slot();
+    if (slot < 0)
+        return NULL;
+
+    return vfs_srv_tables[slot][handle - 1U].in_use ?
+           &vfs_srv_tables[slot][handle - 1U] : NULL;
+}
+
+static uint32_t vfs_srv_handle_alloc(const vfs_file_t *file)
+{
+    int slot;
+
+    if (!file)
+        return 0U;
+
+    slot = vfs_srv_task_slot();
+    if (slot < 0)
+        return 0U;
+
+    for (uint32_t i = 0U; i < VFSD_HANDLE_MAX; i++) {
+        vfs_srv_handle_t *h = &vfs_srv_tables[slot][i];
+
+        if (h->in_use)
+            continue;
+
+        memset(h, 0, sizeof(*h));
+        h->in_use = 1U;
+        h->file = *file;
+        return i + 1U;
+    }
+
+    return 0U;
+}
+
+static void vfs_srv_handle_free(uint32_t handle)
+{
+    vfs_srv_handle_t *h = vfs_srv_handle_get(handle);
+
+    if (!h)
+        return;
+
+    memset(h, 0, sizeof(*h));
+}
+
+static int vfsd_proxy_available(void)
+{
+    port_t *port;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+
+    port = mk_port_lookup("vfs");
+    if (!port || port->owner_tid == 0U)
+        return 0;
+    if (port->owner_tid == current_task->pid)
+        return 0;
+    return 1;
+}
+
+static int vfsd_proxy_call(const vfsd_request_t *req, vfsd_response_t *resp)
+{
+    port_t        *port;
+    ipc_message_t  reply;
+    int            rc;
+
+    if (!req || !resp)
+        return -EFAULT;
+
+    port = mk_port_lookup("vfs");
+    if (!port || port->owner_tid == 0U)
+        return -ENOENT;
+
+    rc = mk_ipc_call(port->port_id, IPC_MSG_VFS_REQ, req, sizeof(*req), &reply);
+    if (rc < 0)
+        return rc;
+    if (reply.msg_type != IPC_MSG_VFS_RESP || reply.msg_len < sizeof(*resp))
+        return -EIO;
+
+    memcpy(resp, reply.payload, sizeof(*resp));
+    return 0;
+}
+
+static int vfsd_proxy_open(const char *path, uint32_t flags, uint32_t *handle_out)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!path || !handle_out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_OPEN;
+    req.flags = flags;
+    for (size_t i = 0U; i + 1U < sizeof(req.u.path) && path[i] != '\0'; i++)
+        req.u.path[i] = path[i];
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    if (resp.handle <= 0)
+        return -EIO;
+
+    *handle_out = (uint32_t)resp.handle;
+    return 0;
+}
+
+static ssize_t vfsd_proxy_read(uint32_t handle, void *dst, size_t count)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!dst)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_READ;
+    req.handle = (int32_t)handle;
+    req.count = (count > VFSD_IO_BYTES) ? VFSD_IO_BYTES : (uint32_t)count;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    if (resp.data_len > VFSD_IO_BYTES)
+        return -EIO;
+
+    memcpy(dst, resp.u.data, resp.data_len);
+    return (ssize_t)resp.data_len;
+}
+
+static ssize_t vfsd_proxy_write(uint32_t handle, const void *src, size_t count)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!src)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_WRITE;
+    req.handle = (int32_t)handle;
+    req.count = (count > VFSD_IO_BYTES) ? VFSD_IO_BYTES : (uint32_t)count;
+    memcpy(req.u.data, src, req.count);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    return (ssize_t)resp.data_len;
+}
+
+static int vfsd_proxy_readdir(uint32_t handle, vfs_dirent_t *out)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_READDIR;
+    req.handle = (int32_t)handle;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+
+    *out = resp.u.dirent;
+    return 0;
+}
+
+static int vfsd_proxy_stat(uint32_t handle, stat_t *out)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_STAT;
+    req.handle = (int32_t)handle;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+
+    *out = resp.u.st;
+    return 0;
+}
+
+static int vfsd_proxy_close(uint32_t handle)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_CLOSE;
+    req.handle = (int32_t)handle;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
 }
 
 static int user_copy_bytes(uintptr_t uva, void *dst, size_t size)
@@ -324,7 +594,6 @@ static uint64_t sys_write(uint64_t args[6])
     if (!src) return ERR(EFAULT);
     if (!count) return 0;
     if (count > 4096) count = 4096;
-    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
     if (current_task && sched_task_is_user(current_task)) {
         bounce = kmalloc((uint32_t)count);
@@ -339,7 +608,18 @@ static uint64_t sys_write(uint64_t args[6])
         src = bounce;
     }
 
-    ssize_t rc = vfs_write(&e->file, src, count);
+    ssize_t rc;
+
+    if (e->type == FD_TYPE_VFSD) {
+        rc = vfsd_proxy_write(e->remote_handle, src, (size_t)count);
+    } else if (e->type == FD_TYPE_VFS) {
+        rc = vfs_write(&e->file, src, count);
+    } else {
+        if (bounce)
+            kfree(bounce);
+        return ERR(EBADF);
+    }
+
     if (bounce)
         kfree(bounce);
     if (rc < 0) return ERR((int)-rc);
@@ -365,7 +645,6 @@ static uint64_t sys_read(uint64_t args[6])
     if (!e) return ERR(EBADF);
     if (!dst) return ERR(EFAULT);
     if (cnt == 0) return 0;
-    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
     if (cnt > 4096) cnt = 4096;
     if (current_task && sched_task_is_user(current_task)) {
@@ -375,7 +654,18 @@ static uint64_t sys_read(uint64_t args[6])
         dst = bounce;
     }
 
-    ssize_t rc = vfs_read(&e->file, dst, cnt);
+    ssize_t rc;
+
+    if (e->type == FD_TYPE_VFSD) {
+        rc = vfsd_proxy_read(e->remote_handle, dst, (size_t)cnt);
+    } else if (e->type == FD_TYPE_VFS) {
+        rc = vfs_read(&e->file, dst, cnt);
+    } else {
+        if (bounce)
+            kfree(bounce);
+        return ERR(EBADF);
+    }
+
     if (rc > 0 && bounce) {
         copy_rc = user_store_bytes(buf_uva, bounce, (size_t)rc);
         if (copy_rc < 0) {
@@ -429,7 +719,16 @@ static uint64_t sys_open(uint64_t args[6])
     int fd = fd_alloc();
     if (fd < 0) return ERR(ENFILE);
 
-    rc = fd_bind_path(&fd_tables[idx][fd], path_arg, oflags);
+    if (vfsd_proxy_available()) {
+        uint32_t remote_handle = 0U;
+
+        rc = vfsd_proxy_open(path_arg, oflags, &remote_handle);
+        if (rc < 0)
+            return ERR(-rc);
+        rc = fd_bind_remote(&fd_tables[idx][fd], remote_handle, oflags);
+    } else {
+        rc = fd_bind_path(&fd_tables[idx][fd], path_arg, oflags);
+    }
     if (rc < 0) return ERR(-rc);
 
     return (uint64_t)fd;
@@ -457,6 +756,9 @@ static uint64_t sys_close(uint64_t args[6])
     if (e->type == FD_TYPE_VFS) {
         int rc = vfs_close(&e->file);
         if (rc < 0) return ERR(-rc);
+    } else if (e->type == FD_TYPE_VFSD) {
+        int rc = vfsd_proxy_close(e->remote_handle);
+        if (rc < 0) return ERR(-rc);
     }
 
     fd_clear(e);
@@ -480,12 +782,17 @@ static uint64_t sys_fstat(uint64_t args[6])
     fd_entry_t *e = fd_get(fd);
     if (!e) return ERR(EBADF);
     if (!buf) return ERR(EFAULT);
-    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
 
     if (current_task && sched_task_is_user(current_task))
         buf = &st;
 
-    rc = vfs_stat(&e->file, buf);
+    if (e->type == FD_TYPE_VFSD)
+        rc = vfsd_proxy_stat(e->remote_handle, buf);
+    else if (e->type == FD_TYPE_VFS)
+        rc = vfs_stat(&e->file, buf);
+    else
+        return ERR(EBADF);
+
     if (rc < 0) return ERR(-rc);
     if (buf == &st) {
         rc = user_store_bytes(buf_uva, &st, sizeof(st));
@@ -825,14 +1132,20 @@ static uint64_t sys_getdents(uint64_t args[6])
 
     if (!e) return ERR(EBADF);
     if (!buf_uva) return ERR(EFAULT);
-    if (e->type != FD_TYPE_VFS) return ERR(EBADF);
     if (max_entries == 0U) return 0;
     if (max_entries > 64U) max_entries = 64U;
 
     while (copied < max_entries) {
         vfs_dirent_t  ent;
         sys_dirent_t  out;
-        int           rc = vfs_readdir(&e->file, &ent);
+        int           rc;
+
+        if (e->type == FD_TYPE_VFSD)
+            rc = vfsd_proxy_readdir(e->remote_handle, &ent);
+        else if (e->type == FD_TYPE_VFS)
+            rc = vfs_readdir(&e->file, &ent);
+        else
+            return ERR(EBADF);
 
         if (rc == -ENOENT)
             break;
@@ -1287,6 +1600,234 @@ static uint64_t sys_kmon_broadcast(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_port_lookup(uint64_t args[6])
+{
+    char   name[TASK_NAME_LEN];
+    port_t *port;
+    int     rc;
+
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr((uintptr_t)args[0], name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+
+    port = mk_port_lookup(name);
+    if (!port)
+        return ERR(ENOENT);
+    return (uint64_t)port->port_id;
+}
+
+static uint64_t sys_ipc_wait(uint64_t args[6])
+{
+    uintptr_t     msg_uva = (uintptr_t)args[1];
+    ipc_message_t msg;
+    int           rc;
+
+    if (!msg_uva)
+        return ERR(EFAULT);
+
+    rc = mk_ipc_wait((uint32_t)args[0], &msg);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = user_store_bytes(msg_uva, &msg, sizeof(msg));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_ipc_reply(uint64_t args[6])
+{
+    uint32_t port_id = (uint32_t)args[0];
+    uint32_t type = (uint32_t)args[1];
+    uintptr_t data_uva = (uintptr_t)args[2];
+    uint32_t len = (uint32_t)args[3];
+    uint8_t  payload[IPC_MSG_MAX_SIZE];
+    int      rc;
+
+    if (len > IPC_MSG_MAX_SIZE)
+        len = IPC_MSG_MAX_SIZE;
+    if (len > 0U) {
+        if (!data_uva)
+            return ERR(EFAULT);
+        rc = user_copy_bytes(data_uva, payload, len);
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    rc = mk_ipc_reply(port_id, type, (len > 0U) ? payload : NULL, len);
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_vfs_boot_open(uint64_t args[6])
+{
+    char       path[VFSD_IO_BYTES];
+    vfs_file_t file;
+    uint32_t   handle;
+    int        rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr((uintptr_t)args[0], path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfs_open(path, (uint32_t)args[1], &file);
+    if (rc < 0)
+        return ERR(-rc);
+
+    handle = vfs_srv_handle_alloc(&file);
+    if (handle == 0U) {
+        (void)vfs_close(&file);
+        return ERR(ENFILE);
+    }
+
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_vfs_boot_read(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    uintptr_t         buf_uva = (uintptr_t)args[1];
+    uint32_t          count = (uint32_t)args[2];
+    uint8_t           bounce[VFSD_IO_BYTES];
+    ssize_t           rc;
+    int               copy_rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    if (count > VFSD_IO_BYTES)
+        count = VFSD_IO_BYTES;
+
+    rc = vfs_read(&h->file, bounce, count);
+    if (rc < 0)
+        return ERR((int)-rc);
+    if (rc == 0)
+        return 0;
+
+    copy_rc = user_store_bytes(buf_uva, bounce, (size_t)rc);
+    if (copy_rc < 0)
+        return ERR(-copy_rc);
+    return (uint64_t)rc;
+}
+
+static uint64_t sys_vfs_boot_write(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    uintptr_t         buf_uva = (uintptr_t)args[1];
+    uint32_t          count = (uint32_t)args[2];
+    uint8_t           bounce[VFSD_IO_BYTES];
+    int               copy_rc;
+    ssize_t           rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    if (count > VFSD_IO_BYTES)
+        count = VFSD_IO_BYTES;
+
+    copy_rc = user_copy_bytes(buf_uva, bounce, count);
+    if (copy_rc < 0)
+        return ERR(-copy_rc);
+
+    rc = vfs_write(&h->file, bounce, count);
+    if (rc < 0)
+        return ERR((int)-rc);
+    return (uint64_t)rc;
+}
+
+static uint64_t sys_vfs_boot_readdir(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    uintptr_t         buf_uva = (uintptr_t)args[1];
+    vfs_dirent_t      ent;
+    int               rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    rc = vfs_readdir(&h->file, &ent);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = user_store_bytes(buf_uva, &ent, sizeof(ent));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_vfs_boot_stat(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    uintptr_t         buf_uva = (uintptr_t)args[1];
+    stat_t            st;
+    int               rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    rc = vfs_stat(&h->file, &st);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = user_store_bytes(buf_uva, &st, sizeof(st));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_vfs_boot_close(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    int               rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    rc = vfs_close(&h->file);
+    if (rc < 0)
+        return ERR(-rc);
+
+    vfs_srv_handle_free((uint32_t)args[0]);
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -1322,6 +1863,7 @@ void syscall_init(void)
     /* 3. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
     for (int i = 0; i < SCHED_MAX_TASKS; i++)
         task_brk[i] = 0;
+    memset(vfs_srv_tables, 0, sizeof(vfs_srv_tables));
 
     /* 4. Riempi la tabella con ENOSYS */
     for (int i = 0; i < SYSCALL_MAX; i++) {
@@ -1390,6 +1932,33 @@ void syscall_init(void)
     };
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"
+    };
+    syscall_table[SYS_PORT_LOOKUP] = (syscall_entry_t){
+        sys_port_lookup, SYSCALL_FLAG_RT, "port_lookup"
+    };
+    syscall_table[SYS_IPC_WAIT] = (syscall_entry_t){
+        sys_ipc_wait, 0, "ipc_wait"
+    };
+    syscall_table[SYS_IPC_REPLY] = (syscall_entry_t){
+        sys_ipc_reply, 0, "ipc_reply"
+    };
+    syscall_table[SYS_VFS_BOOT_OPEN] = (syscall_entry_t){
+        sys_vfs_boot_open, 0, "vfs_boot_open"
+    };
+    syscall_table[SYS_VFS_BOOT_READ] = (syscall_entry_t){
+        sys_vfs_boot_read, 0, "vfs_boot_read"
+    };
+    syscall_table[SYS_VFS_BOOT_WRITE] = (syscall_entry_t){
+        sys_vfs_boot_write, 0, "vfs_boot_write"
+    };
+    syscall_table[SYS_VFS_BOOT_READDIR] = (syscall_entry_t){
+        sys_vfs_boot_readdir, 0, "vfs_boot_readdir"
+    };
+    syscall_table[SYS_VFS_BOOT_STAT] = (syscall_entry_t){
+        sys_vfs_boot_stat, 0, "vfs_boot_stat"
+    };
+    syscall_table[SYS_VFS_BOOT_CLOSE] = (syscall_entry_t){
+        sys_vfs_boot_close, 0, "vfs_boot_close"
     };
     syscall_table[SYS_MREACT_SUBSCRIBE] = (syscall_entry_t){
         sys_mreact_subscribe, 0, "mreact_subscribe"
@@ -1475,7 +2044,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 47 syscall base/UX/signal/mreact/ksem/kmon/cap registrate\n");
+    uart_puts("[SYSCALL] 56 syscall base/UX/ipc/vfsd/signal/mreact/ksem/kmon/cap registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 
