@@ -47,6 +47,8 @@ typedef struct {
     uint8_t     is_user;
     uint8_t     resume_from_frame;
     uint8_t     _pad[6];
+    int32_t     exit_code;
+    uint32_t    _pad2;
     exception_frame_t start_frame;
 } sched_task_ctx_t;
 
@@ -262,6 +264,7 @@ static sched_tcb_t *task_alloc(void)
     task_ctx[slot].auxv            = 0ULL;
     task_ctx[slot].is_user         = 0U;
     task_ctx[slot].resume_from_frame = 0U;
+    task_ctx[slot].exit_code       = 0;
     memset(&task_ctx[slot].start_frame, 0, sizeof(task_ctx[slot].start_frame));
     donated_priority[slot]         = 0xFFU;
     return t;
@@ -590,9 +593,28 @@ static void schedule_locked(uint64_t flags)
     current_task = next;
     mmu_activate_space(sched_task_space(next));
 
-    irq_restore(flags);
+    /*
+     * IRQ rimangono DISABILITATI durante sched_context_switch per evitare che
+     * un timer IRQ scatti tra irq_restore e sched_context_switch, causando una
+     * chiamata rientrante a schedule() che corrompe next->sp (PC=0, x30=0).
+     *
+     * Dopo sched_context_switch si abilita INCONDIZIONATAMENTE l'IRQ (daifclr).
+     *
+     * Non si usa irq_restore(flags) perché il task ripreso potrebbe avere
+     * flags=I=1 (era bloccato dentro un syscall handler dove gli IRQ erano già
+     * disabilitati dall'HW all'ingresso dell'eccezione). Ripristinare I=1
+     * causerebbe l'esecuzione del task con gli IRQ mascherati → timer_now_ms()
+     * non avanza → busy-wait senza timeout → hang.
+     *
+     * Per i task al primo avvio: sched_context_switch fa `ret` a
+     * task_entry_trampoline che abilita gli IRQ lui stesso; questa riga
+     * non viene mai raggiunta per quei task.
+     * Per i task vettored da vectors.S: dopo che schedule() ritorna, vectors.S
+     * esegue `eret` che ripristina SPSR_EL1 (con I=0 dell'esecuzione normale),
+     * quindi gli IRQ vengono comunque riabilitati dall'eret.
+     */
     sched_context_switch(prev, next);
-    __asm__ volatile("" ::: "memory");
+    __asm__ volatile("msr daifclr, #2" ::: "memory"); /* abilita IRQ */
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -818,6 +840,17 @@ int sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
     return 0;
 }
 
+int sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+
+    if (!ctx || !out)
+        return -1;
+
+    *out = ctx->exit_code;
+    return 0;
+}
+
 void sched_task_bootstrap(uint64_t entry_reg)
 {
     sched_task_ctx_t *ctx = ctx_of(current_task);
@@ -841,9 +874,13 @@ void sched_task_bootstrap(uint64_t entry_reg)
     sched_task_exit();
 }
 
-void sched_task_exit(void)
+void sched_task_exit_with_code(int32_t code)
 {
+    sched_task_ctx_t *ctx = ctx_of(current_task);
+
     if (current_task) {
+        if (ctx)
+            ctx->exit_code = code;
         kmon_task_cleanup(current_task);
         ksem_task_cleanup(current_task);
         mreact_task_cleanup(current_task);
@@ -853,6 +890,11 @@ void sched_task_exit(void)
 
     schedule();
     while (1) __asm__ volatile("wfe");
+}
+
+void sched_task_exit(void)
+{
+    sched_task_exit_with_code(0);
 }
 
 /* ══════════════════════════════════════════════════════════════════

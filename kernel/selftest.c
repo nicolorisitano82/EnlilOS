@@ -96,6 +96,38 @@ static void st_log_fail(const char *case_name, const char *detail)
     uart_puts("\n");
 }
 
+static const char *st_task_state_name(uint8_t state)
+{
+    switch (state) {
+    case TCB_STATE_RUNNING: return "RUNNING";
+    case TCB_STATE_READY:   return "READY";
+    case TCB_STATE_BLOCKED: return "BLOCKED";
+    case TCB_STATE_ZOMBIE:  return "ZOMBIE";
+    default:                return "UNKNOWN";
+    }
+}
+
+static void st_log_task_diag(const char *case_name, const sched_tcb_t *task)
+{
+    int32_t code = 0;
+
+    uart_puts("[SELFTEST] DIAG ");
+    uart_puts(case_name);
+    uart_puts(": state=");
+    uart_puts(task ? st_task_state_name(task->state) : "NULL");
+    if (task && task->state == TCB_STATE_ZOMBIE &&
+        sched_task_get_exit_code(task, &code) == 0) {
+        uart_puts(" exit=");
+        if (code < 0) {
+            uart_putc('-');
+            st_put_u32((uint32_t)(-code));
+        } else {
+            st_put_u32((uint32_t)code);
+        }
+    }
+    uart_puts("\n");
+}
+
 #define ST_CHECK(case_name, cond, detail) \
     do { \
         if (!(cond)) { \
@@ -103,6 +135,64 @@ static void st_log_fail(const char *case_name, const char *detail)
             return -1; \
         } \
     } while (0)
+
+static int st_spawn_user_task(const char *case_name, const char *path,
+                              uint8_t priority, uint32_t *pid_out)
+{
+    uint32_t pid = 0U;
+    int      rc;
+
+    rc = elf64_spawn_path(path, path, priority, &pid);
+    if (rc < 0) {
+        st_log_fail(case_name, elf64_last_error());
+        return -1;
+    }
+    if (pid == 0U) {
+        st_log_fail(case_name, "pid task user nullo");
+        return -1;
+    }
+
+    if (pid_out)
+        *pid_out = pid;
+    return 0;
+}
+
+static sched_tcb_t *st_wait_task_state(uint32_t pid, uint8_t state,
+                                       uint64_t timeout_ms)
+{
+    uint64_t     deadline = timer_now_ms() + timeout_ms;
+    sched_tcb_t *task;
+
+    do {
+        task = sched_task_find(pid);
+        if (task && task->state == state)
+            return task;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    return sched_task_find(pid);
+}
+
+static int st_expect_exit_code(const char *case_name, uint32_t pid, int32_t expected)
+{
+    sched_tcb_t *task;
+    int32_t      code = 0;
+
+    task = sched_task_find(pid);
+    if (!task) {
+        st_log_fail(case_name, "task non trovata per verifica exit code");
+        return -1;
+    }
+    if (sched_task_get_exit_code(task, &code) < 0) {
+        st_log_fail(case_name, "lettura exit code fallita");
+        return -1;
+    }
+    if (code != expected) {
+        st_log_fail(case_name, "exit code inatteso");
+        return -1;
+    }
+    return 0;
+}
 
 static int selftest_case_rootfs(void)
 {
@@ -160,6 +250,33 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
              "/NSH.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/NSH.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/EXEC2.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /EXEC2.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /EXEC2.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/EXEC2.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/EXEC2.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/CAPDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /CAPDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /CAPDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/CAPDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/CAPDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/VFSD.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /VFSD.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /VFSD.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/VFSD.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/VFSD.ELF ha size zero");
     (void)vfs_close(&file);
     return 0;
 }
@@ -306,75 +423,102 @@ static int selftest_case_elf(void)
 {
     static const char case_name[] = "elf-loader";
     uint32_t pid = 0U;
-    uint64_t deadline;
     sched_tcb_t *task;
-    int rc;
 
-    rc = elf64_spawn_path("/DEMO.ELF", "/DEMO.ELF", PRIO_KERNEL, &pid);
-    ST_CHECK(case_name, rc == 0, elf64_last_error());
-    ST_CHECK(case_name, pid != 0U, "pid demo ELF nullo");
+    if (st_spawn_user_task(case_name, "/DEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
 
-    deadline = timer_now_ms() + 2000ULL;
-    do {
-        task = sched_task_find(pid);
-        ST_CHECK(case_name, task != NULL, "task ELF non trovata");
-        if (task->state == TCB_STATE_ZOMBIE)
-            return 0;
-        sched_yield();
-    } while (timer_now_ms() < deadline);
-
-    ST_CHECK(case_name, 0, "timeout attesa task ELF");
-    return -1;
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "task ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa task ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code demo inatteso");
+    return 0;
 }
 
 static int selftest_case_execve(void)
 {
     static const char case_name[] = "execve";
     uint32_t pid = 0U;
-    uint64_t deadline;
     sched_tcb_t *task;
-    int rc;
 
-    rc = elf64_spawn_path("/EXEC1.ELF", "/EXEC1.ELF", PRIO_KERNEL, &pid);
-    ST_CHECK(case_name, rc == 0, elf64_last_error());
-    ST_CHECK(case_name, pid != 0U, "pid execve demo nullo");
+    if (st_spawn_user_task(case_name, "/EXEC1.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
 
-    deadline = timer_now_ms() + 2000ULL;
-    do {
-        task = sched_task_find(pid);
-        ST_CHECK(case_name, task != NULL, "task execve non trovata");
-        if (task->state == TCB_STATE_ZOMBIE)
-            return 0;
-        sched_yield();
-    } while (timer_now_ms() < deadline);
-
-    ST_CHECK(case_name, 0, "timeout attesa execve");
-    return -1;
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "task execve non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa execve");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code execve inatteso");
+    return 0;
 }
 
 static int selftest_case_dynelf(void)
 {
     static const char case_name[] = "elf-dynamic";
     uint32_t pid = 0U;
-    uint64_t deadline;
     sched_tcb_t *task;
-    int rc;
 
-    rc = elf64_spawn_path("/DYNDEMO.ELF", "/DYNDEMO.ELF", PRIO_KERNEL, &pid);
+    if (st_spawn_user_task(case_name, "/DYNDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "task dynamic ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa dynamic ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code dynamic ELF inatteso");
+    return 0;
+}
+
+static int selftest_case_init_elf(void)
+{
+    static const char case_name[] = "init-elf";
+    elf_image_t image = {0};
+    int         rc;
+
+    rc = elf64_load_from_path("/INIT.ELF", "/INIT.ELF", &image);
     ST_CHECK(case_name, rc == 0, elf64_last_error());
-    ST_CHECK(case_name, pid != 0U, "pid dynamic demo nullo");
+    ST_CHECK(case_name, image.space != NULL, "space INIT.ELF nulla");
+    ST_CHECK(case_name, image.entry != 0U, "entry INIT.ELF nulla");
+    ST_CHECK(case_name, image.user_sp != 0U, "user_sp INIT.ELF nullo");
+    elf64_unload_image(&image);
+    return 0;
+}
 
-    deadline = timer_now_ms() + 2000ULL;
-    do {
-        task = sched_task_find(pid);
-        ST_CHECK(case_name, task != NULL, "task dynamic ELF non trovata");
-        if (task->state == TCB_STATE_ZOMBIE)
-            return 0;
-        sched_yield();
-    } while (timer_now_ms() < deadline);
+static int selftest_case_nsh_elf(void)
+{
+    static const char case_name[] = "nsh-elf";
+    elf_image_t image = {0};
+    int         rc;
 
-    ST_CHECK(case_name, 0, "timeout attesa dynamic ELF");
-    return -1;
+    rc = elf64_load_from_path("/NSH.ELF", "/NSH.ELF", &image);
+    ST_CHECK(case_name, rc == 0, elf64_last_error());
+    ST_CHECK(case_name, image.space != NULL, "space NSH.ELF nulla");
+    ST_CHECK(case_name, image.entry != 0U, "entry NSH.ELF nulla");
+    ST_CHECK(case_name, image.user_sp != 0U, "user_sp NSH.ELF nullo");
+    elf64_unload_image(&image);
+    return 0;
+}
+
+static int selftest_case_exec_target(void)
+{
+    static const char case_name[] = "exec-target";
+    uint32_t    pid = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, "/EXEC2.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "task EXEC2.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa EXEC2.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code EXEC2.ELF inatteso");
+    return 0;
 }
 
 static int selftest_case_fork(void)
@@ -409,6 +553,8 @@ static int selftest_case_fork(void)
 
     ST_CHECK(case_name, task && task->state == TCB_STATE_ZOMBIE,
              "timeout attesa fork demo");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code fork demo inatteso");
 
     rc = vfs_open("/data/FORK.TXT", O_RDONLY, &file);
     ST_CHECK(case_name, rc == 0, "open FORK.TXT fallita");
@@ -455,8 +601,12 @@ static int selftest_case_signal(void)
         sched_yield();
     } while (timer_now_ms() < deadline);
 
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
     ST_CHECK(case_name, task && task->state == TCB_STATE_ZOMBIE,
              "timeout attesa signal demo");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code signal demo inatteso");
 
     rc = vfs_open("/data/SIGNAL.TXT", O_RDONLY, &file);
     ST_CHECK(case_name, rc == 0, "open SIGNAL.TXT fallita");
@@ -508,6 +658,8 @@ static int selftest_case_mreact(void)
         sched_yield();
     } while (timer_now_ms() < deadline);
 
+    if (rc != 0)
+        st_log_task_diag(case_name, task);
     ST_CHECK(case_name, rc == 0, "timeout attesa MREACT.READY");
 
     space = sched_task_space(task);
@@ -529,8 +681,12 @@ static int selftest_case_mreact(void)
         sched_yield();
     } while (timer_now_ms() < deadline);
 
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
     ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
              "timeout attesa mreact demo");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code mreact demo inatteso");
 
     rc = vfs_open("/data/MREACT.TXT", O_RDONLY, &file);
     ST_CHECK(case_name, rc == 0, "open MREACT.TXT fallita");
@@ -544,6 +700,55 @@ static int selftest_case_mreact(void)
     ST_CHECK(case_name, rc == 0, "unlink MREACT.TXT fallita");
     rc = vfs_unlink("/data/MREACT.READY");
     ST_CHECK(case_name, rc == 0, "unlink MREACT.READY fallita");
+    return 0;
+}
+
+static int selftest_case_cap(void)
+{
+    static const char case_name[] = "cap-core";
+    uint32_t    pid = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, "/CAPDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "task CAPDEMO.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa CAPDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code CAPDEMO inatteso");
+    return 0;
+}
+
+static int selftest_case_vfsd(void)
+{
+    static const char case_name[] = "vfsd-core";
+    port_t      *port;
+    sched_tcb_t *owner;
+    vfs_file_t   file;
+    stat_t       st;
+    int          rc;
+
+    port = mk_port_lookup("vfs");
+    ST_CHECK(case_name, port != NULL, "porta vfs non trovata");
+    ST_CHECK(case_name, port->owner_tid != 0U, "owner della porta vfs nullo");
+
+    owner = sched_task_find(port->owner_tid);
+    ST_CHECK(case_name, owner != NULL, "task owner della porta vfs non trovato");
+    ST_CHECK(case_name, sched_task_is_user(owner) == 1,
+             "owner della porta vfs non e' un task user");
+    ST_CHECK(case_name, owner->state != TCB_STATE_ZOMBIE,
+             "task vfsd risulta zombie");
+
+    rc = vfs_open("/VFSD.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /VFSD.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /VFSD.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/VFSD.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/VFSD.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -655,7 +860,6 @@ static int selftest_case_ksem(void)
         sched_yield();
     ST_CHECK(case_name, ksem_test_holder_ready != 0U,
              "holder non ha acquisito il semaforo");
-    holder->priority = PRIO_LOW;
 
     hog = sched_task_create("ksem-hog", selftest_ksem_hog_task, PRIO_NORMAL);
     ST_CHECK(case_name, hog != NULL, "creazione hog task fallita");
@@ -729,8 +933,7 @@ static void selftest_kmon_holder_task(void)
         uart_puts("[SELFTEST] kmon-holder acquired\n");
         kmon_test_holder_effprio = sched_task_effective_priority(current_task);
         kmon_test_holder_ready = 1U;
-        while (!kmon_test_holder_release)
-            sched_yield();
+        sched_block();
         (void)kmon_exit_current((kmon_t)kmon_test_handle);
         uart_puts("[SELFTEST] kmon-holder exited\n");
     }
@@ -824,7 +1027,6 @@ static int selftest_case_kmon(void)
              "priority ceiling non applicato");
     uart_puts("[SELFTEST] kmon phase holder-ready\n");
 
-    holder->priority = PRIO_LOW;
     enterer = sched_task_create("kmon-enter", selftest_kmon_enter_task, PRIO_KERNEL);
     ST_CHECK(case_name, enterer != NULL, "creazione enter waiter fallita");
 
@@ -837,20 +1039,13 @@ static int selftest_case_kmon(void)
     uart_puts("[SELFTEST] kmon phase pi-ok\n");
 
     kmon_test_holder_release = 1U;
+    sched_unblock(holder);
     deadline = timer_now_ms() + 1000ULL;
     while (!kmon_test_enter_ok && timer_now_ms() < deadline)
         sched_yield();
     ST_CHECK(case_name, kmon_test_enter_ok != 0U,
              "enter waiter non ha acquisito il monitor");
     uart_puts("[SELFTEST] kmon phase enter-ok\n");
-
-    deadline = timer_now_ms() + 1000ULL;
-    while (((holder && sched_task_find(holder->pid) &&
-             sched_task_find(holder->pid)->state != TCB_STATE_ZOMBIE) ||
-            (enterer && sched_task_find(enterer->pid) &&
-             sched_task_find(enterer->pid)->state != TCB_STATE_ZOMBIE)) &&
-           timer_now_ms() < deadline)
-        sched_yield();
 
     waiter = sched_task_create("kmon-waiter", selftest_kmon_waiter_task, PRIO_HIGH);
     ST_CHECK(case_name, waiter != NULL, "creazione cond waiter fallita");
@@ -959,7 +1154,7 @@ static int selftest_case_ipc_sync(void)
 
     ipc_test_port_id = mk_port_create(server->pid, "ipc-selftest");
     ST_CHECK(case_name, ipc_test_port_id != 0U, "mk_port_create fallita");
-    rc = mk_port_set_budget((uint32_t)ipc_test_port_id, timer_cntfrq() / 125ULL);
+    rc = mk_port_set_budget((uint32_t)ipc_test_port_id, timer_cntfrq() / 50ULL);
     ST_CHECK(case_name, rc == 0, "mk_port_set_budget fallita");
 
     deadline = timer_now_ms() + 2000ULL;
@@ -1026,12 +1221,17 @@ static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
     { "ext4-core",   selftest_case_ext4      },
+    { "vfsd-core",   selftest_case_vfsd      },
     { "elf-loader",  selftest_case_elf       },
+    { "init-elf",    selftest_case_init_elf  },
+    { "nsh-elf",     selftest_case_nsh_elf   },
     { "execve",      selftest_case_execve    },
+    { "exec-target", selftest_case_exec_target },
     { "elf-dynamic", selftest_case_dynelf    },
     { "fork-cow",    selftest_case_fork      },
     { "signal-core", selftest_case_signal    },
     { "mreact-core", selftest_case_mreact    },
+    { "cap-core",    selftest_case_cap       },
     { "ksem-core",   selftest_case_ksem      },
     { "kmon-core",   selftest_case_kmon      },
     { "ipc-sync",    selftest_case_ipc_sync  },
