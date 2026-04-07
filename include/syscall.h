@@ -80,6 +80,12 @@
 #define SYS_VFS_BOOT_STAT      154
 #define SYS_VFS_BOOT_CLOSE     155
 
+/* Bootstrap Block backend per blkd (M9-03 v1) */
+#define SYS_BLK_BOOT_READ      156
+#define SYS_BLK_BOOT_WRITE     157
+#define SYS_BLK_BOOT_FLUSH     158
+#define SYS_BLK_BOOT_SECTORS   159
+
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
 #define SYS_CAP_SEND        61

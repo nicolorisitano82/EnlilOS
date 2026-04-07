@@ -27,6 +27,8 @@
 #include "pmm.h"
 #include "uart.h"
 #include "types.h"
+#include "blk.h"
+#include "blk_ipc.h"
 #include "vfs.h"
 #include "vfs_ipc.h"
 
@@ -65,6 +67,18 @@ typedef struct {
  */
 static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
 static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
+
+/* Owner check per blkd: solo il server proprietario della porta "block" può usare le blk_boot_* */
+static int blk_srv_owner_ok(void)
+{
+    port_t *port;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+
+    port = mk_port_lookup("block");
+    return (port && port->owner_tid == current_task->pid) ? 1 : 0;
+}
 
 /*
  * Program break per task (indirizzato come sopra).
@@ -1896,6 +1910,79 @@ static uint64_t sys_vfs_boot_close(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * Block server bootstrap syscall (M9-03 v1)
+ *
+ * Accesso diretto al driver virtio-blk da parte del server user-space blkd.
+ * Solo il processo proprietario della porta IPC "block" può chiamarle.
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* SYS_BLK_BOOT_READ (156): args[0]=sector, args[1]=count, args[2]=buf_uva */
+static uint64_t sys_blk_boot_read(uint64_t args[6])
+{
+    uint64_t  sector = args[0];
+    uint32_t  count  = (uint32_t)args[1];
+    uintptr_t buf_va = (uintptr_t)args[2];
+    int       rc;
+
+    if (!blk_srv_owner_ok())
+        return ERR(EPERM);
+    if (count == 0U || count > BLKD_MAX_SECTORS)
+        return ERR(EINVAL);
+    if (buf_va == 0U)
+        return ERR(EFAULT);
+
+    rc = blk_read_sync(sector, (void *)buf_va, count);
+    if (rc != BLK_OK)
+        return ERR(EIO);
+    return 0;
+}
+
+/* SYS_BLK_BOOT_WRITE (157): args[0]=sector, args[1]=count, args[2]=buf_uva */
+static uint64_t sys_blk_boot_write(uint64_t args[6])
+{
+    uint64_t  sector = args[0];
+    uint32_t  count  = (uint32_t)args[1];
+    uintptr_t buf_va = (uintptr_t)args[2];
+    int       rc;
+
+    if (!blk_srv_owner_ok())
+        return ERR(EPERM);
+    if (count == 0U || count > BLKD_MAX_SECTORS)
+        return ERR(EINVAL);
+    if (buf_va == 0U)
+        return ERR(EFAULT);
+
+    rc = blk_write_sync(sector, (const void *)buf_va, count);
+    if (rc != BLK_OK)
+        return ERR(EIO);
+    return 0;
+}
+
+/* SYS_BLK_BOOT_FLUSH (158): nessun argomento */
+static uint64_t sys_blk_boot_flush(uint64_t args[6])
+{
+    int rc;
+
+    (void)args;
+    if (!blk_srv_owner_ok())
+        return ERR(EPERM);
+
+    rc = blk_flush_sync();
+    if (rc != BLK_OK)
+        return ERR(EIO);
+    return 0;
+}
+
+/* SYS_BLK_BOOT_SECTORS (159): ritorna capacity in settori */
+static uint64_t sys_blk_boot_sectors(uint64_t args[6])
+{
+    (void)args;
+    if (!blk_srv_owner_ok())
+        return ERR(EPERM);
+    return blk_sector_count();
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_enosys(uint64_t args[6])
@@ -2030,6 +2117,18 @@ void syscall_init(void)
     syscall_table[SYS_VFS_BOOT_CLOSE] = (syscall_entry_t){
         sys_vfs_boot_close, 0, "vfs_boot_close"
     };
+    syscall_table[SYS_BLK_BOOT_READ] = (syscall_entry_t){
+        sys_blk_boot_read, 0, "blk_boot_read"
+    };
+    syscall_table[SYS_BLK_BOOT_WRITE] = (syscall_entry_t){
+        sys_blk_boot_write, 0, "blk_boot_write"
+    };
+    syscall_table[SYS_BLK_BOOT_FLUSH] = (syscall_entry_t){
+        sys_blk_boot_flush, 0, "blk_boot_flush"
+    };
+    syscall_table[SYS_BLK_BOOT_SECTORS] = (syscall_entry_t){
+        sys_blk_boot_sectors, SYSCALL_FLAG_RT, "blk_boot_sectors"
+    };
     syscall_table[SYS_MREACT_SUBSCRIBE] = (syscall_entry_t){
         sys_mreact_subscribe, 0, "mreact_subscribe"
     };
@@ -2114,7 +2213,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 57 syscall base/UX/ipc/vfsd/signal/mreact/ksem/kmon/cap registrate\n");
+    uart_puts("[SYSCALL] 61 syscall base/UX/ipc/vfsd/blkd/signal/mreact/ksem/kmon/cap registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

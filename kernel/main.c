@@ -139,6 +139,45 @@ static void boot_launch_vfsd(void)
     uart_puts(" port=vfs\n");
 }
 
+static void boot_launch_blkd(void)
+{
+    uint32_t pid = 0U;
+    port_t  *port;
+    int      rc;
+
+    if (elf64_spawn_path("/BLKD.ELF", "/BLKD.ELF", PRIO_LOW, &pid) < 0) {
+        uart_puts("[BLKD] Spawn fallita, blocco rimane in-kernel\n");
+        return;
+    }
+
+    port = mk_port_lookup("block");
+    if (!port) {
+        uart_puts("[BLKD] Porta 'block' non trovata\n");
+        return;
+    }
+
+    rc = mk_port_rebind(port->port_id, pid);
+    if (rc < 0) {
+        uart_puts("[BLKD] Rebind porta fallita\n");
+        return;
+    }
+    (void)mk_port_set_budget(port->port_id, timer_cntfrq() / 100ULL); /* 10ms */
+
+    uart_puts("[BLKD] User-space block server pronto: pid=");
+    {
+        char buf[12];
+        int  len = 0;
+        uint32_t v = pid;
+
+        if (v == 0U) uart_putc('0');
+        else {
+            while (v) { buf[len++] = (char)('0' + (v % 10U)); v /= 10U; }
+            while (len > 0) uart_putc(buf[--len]);
+        }
+    }
+    uart_puts(" port=block\n");
+}
+
 static uint32_t bootcli_strlen(const char *s)
 {
     uint32_t len = 0U;
@@ -1811,6 +1850,7 @@ void kernel_main(void)
     mk_task_create("blk-server", TASK_TYPE_SERVER, 0);
     mk_task_create("vfs-server", TASK_TYPE_SERVER, 0);
     boot_launch_vfsd();
+    boot_launch_blkd();
 
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 

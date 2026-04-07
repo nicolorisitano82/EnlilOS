@@ -9,6 +9,7 @@
 
 #include "selftest.h"
 #include "blk.h"
+#include "blk_ipc.h"
 #include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
@@ -752,6 +753,44 @@ static int selftest_case_vfsd(void)
     return 0;
 }
 
+static int selftest_case_blkd(void)
+{
+    static const char case_name[] = "blkd-core";
+    port_t      *port;
+    sched_tcb_t *owner;
+    vfs_file_t   file;
+    stat_t       st;
+    int          rc;
+
+    /* 1. Porta "block" deve essere registrata e appartenere a un task user-space */
+    port = mk_port_lookup("block");
+    ST_CHECK(case_name, port != NULL, "porta block non trovata");
+    ST_CHECK(case_name, port->owner_tid != 0U, "owner porta block nullo");
+
+    owner = sched_task_find(port->owner_tid);
+    ST_CHECK(case_name, owner != NULL, "task owner porta block non trovato");
+    ST_CHECK(case_name, sched_task_is_user(owner) == 1,
+             "owner porta block non e' un task user-space");
+    ST_CHECK(case_name, owner->state != TCB_STATE_ZOMBIE,
+             "blkd risulta zombie");
+
+    /* 2. BLKD.ELF deve essere presente e non vuoto nell'initrd */
+    rc = vfs_open("/BLKD.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /BLKD.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /BLKD.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/BLKD.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/BLKD.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    /* 3. Il driver blocco resta funzionale (blk_is_ready, blk_sector_count) */
+    ST_CHECK(case_name, blk_is_ready() != 0, "driver blk non pronto");
+    ST_CHECK(case_name, blk_sector_count() > 0ULL, "blk_sector_count zero");
+
+    return 0;
+}
+
 static volatile uint32_t ipc_test_port_id;
 static volatile uint32_t ipc_test_server_waiting;
 static volatile uint32_t ipc_test_server_ok;
@@ -1222,6 +1261,7 @@ static const selftest_case_t selftest_cases[] = {
     { "vfs-devfs",   selftest_case_devfs     },
     { "ext4-core",   selftest_case_ext4      },
     { "vfsd-core",   selftest_case_vfsd      },
+    { "blkd-core",   selftest_case_blkd     },
     { "elf-loader",  selftest_case_elf       },
     { "init-elf",    selftest_case_init_elf  },
     { "nsh-elf",     selftest_case_nsh_elf   },
