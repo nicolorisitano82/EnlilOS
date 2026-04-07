@@ -20,6 +20,8 @@
 
 #include "ext4.h"
 #include "blk.h"
+#include "kmon.h"
+#include "sched.h"
 #include "timer.h"
 #include "uart.h"
 
@@ -318,6 +320,21 @@ typedef struct {
 
 static ext4_state_t g_ext4;
 static ext4_journal_txn_t g_ext4_txn;
+static kmon_t g_ext4_open_lock = KMON_INVALID;
+
+static int ext4_open_lock_enter(void)
+{
+    if (g_ext4_open_lock == KMON_INVALID)
+        return 0;
+    return kmon_enter_current(g_ext4_open_lock);
+}
+
+static void ext4_open_lock_exit(int lock_rc)
+{
+    if (g_ext4_open_lock == KMON_INVALID || lock_rc < 0)
+        return;
+    (void)kmon_exit_current(g_ext4_open_lock);
+}
 
 static void e_memcpy(void *dst, const void *src, size_t n)
 {
@@ -3017,6 +3034,7 @@ static int ext4_open_vfs(const vfs_mount_t *mount, const char *relpath,
     ext4_inode_t inode;
     uint32_t     ino;
     uint32_t     access = (flags & 0x3U);
+    int          lock_rc;
     int          rc;
 
     if (!out) return -EFAULT;
@@ -3024,22 +3042,33 @@ static int ext4_open_vfs(const vfs_mount_t *mount, const char *relpath,
     if (ext4_internal_journal_path(relpath))
         return -ENOENT;
 
+    lock_rc = ext4_open_lock_enter();
+    if (lock_rc < 0)
+        return lock_rc;
+
     rc = ext4_lookup_path(relpath, &ino, &inode);
     if (rc < 0) {
         if (rc == -ENOENT && (flags & O_CREAT) != 0U)
-            return ext4_create_file(relpath, flags, mount, out);
-        return rc;
+            rc = ext4_create_file(relpath, flags, mount, out);
+        goto out;
     }
     if (ext4_inode_is_dir(&inode) &&
-        (access == O_WRONLY || access == O_RDWR))
-        return -EISDIR;
+        (access == O_WRONLY || access == O_RDWR)) {
+        rc = -EISDIR;
+        goto out;
+    }
     if ((flags & O_TRUNC) != 0U) {
-        if (!(access == O_WRONLY || access == O_RDWR))
-            return -EINVAL;
-        if (ext4_inode_is_dir(&inode))
-            return -EISDIR;
+        if (!(access == O_WRONLY || access == O_RDWR)) {
+            rc = -EINVAL;
+            goto out;
+        }
+        if (ext4_inode_is_dir(&inode)) {
+            rc = -EISDIR;
+            goto out;
+        }
         rc = ext4_truncate_inode(ino, &inode, 0ULL);
-        if (rc < 0) return rc;
+        if (rc < 0)
+            goto out;
     }
 
     out->mount     = mount;
@@ -3049,7 +3078,11 @@ static int ext4_open_vfs(const vfs_mount_t *mount, const char *relpath,
     out->size_hint = ext4_inode_size(&inode);
     out->dir_index = 0U;
     out->cookie    = (uintptr_t)inode.i_mode;
-    return 0;
+    rc = 0;
+
+out:
+    ext4_open_lock_exit(lock_rc);
+    return rc;
 }
 
 static ssize_t ext4_read_vfs(vfs_file_t *file, void *buf, size_t count)
@@ -3286,6 +3319,12 @@ int ext4_mount(void)
         ext4_reset_state();
         ext4_set_error("virtio-blk assente");
         return -EIO;
+    }
+
+    if (g_ext4_open_lock == KMON_INVALID && current_task) {
+        rc = kmon_create_current(PRIO_HIGH, KMON_HOARE, &g_ext4_open_lock);
+        if (rc < 0)
+            return rc;
     }
 
     if (g_ext4.mounted)

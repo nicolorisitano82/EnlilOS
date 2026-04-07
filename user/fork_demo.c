@@ -3,6 +3,7 @@
  */
 
 #include "syscall.h"
+#include "user_svc.h"
 
 typedef unsigned long  u64;
 typedef signed long    s64;
@@ -11,53 +12,22 @@ static volatile u64 g_counter = 1ULL;
 
 static long sys_call0(long nr)
 {
-    register long x0 asm("x0");
-    register long x8 asm("x8") = nr;
-
-    asm volatile("svc #0"
-                 : "=r"(x0)
-                 : "r"(x8)
-                 : "memory");
-    return x0;
+    return user_svc0(nr);
 }
 
 static long sys_call3(long nr, long a0, long a1, long a2)
 {
-    register long x0 asm("x0") = a0;
-    register long x1 asm("x1") = a1;
-    register long x2 asm("x2") = a2;
-    register long x8 asm("x8") = nr;
-
-    asm volatile("svc #0"
-                 : "+r"(x0)
-                 : "r"(x1), "r"(x2), "r"(x8)
-                 : "memory");
-    return x0;
+    return user_svc3(nr, a0, a1, a2);
 }
 
 static long sys_call4(long nr, long a0, long a1, long a2, long a3)
 {
-    register long x0 asm("x0") = a0;
-    register long x1 asm("x1") = a1;
-    register long x2 asm("x2") = a2;
-    register long x3 asm("x3") = a3;
-    register long x8 asm("x8") = nr;
-
-    asm volatile("svc #0"
-                 : "+r"(x0)
-                 : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
-                 : "memory");
-    return x0;
+    return user_svc4(nr, a0, a1, a2, a3);
 }
 
 static __attribute__((noreturn)) void sys_exit_now(long code)
 {
-    register long x0 asm("x0") = code;
-    register long x8 asm("x8") = SYS_EXIT;
-
-    asm volatile("svc #0" : : "r"(x0), "r"(x8) : "memory");
-    for (;;)
-        asm volatile("wfe");
+    user_svc_exit(code, SYS_EXIT);
 }
 
 static long sys_write_fd(long fd, const void *buf, u64 len)

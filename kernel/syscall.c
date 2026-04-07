@@ -91,6 +91,37 @@ typedef struct {
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
+static void syscall_uart_put_u64(uint64_t v)
+{
+    char buf[32];
+    int  len = 0;
+
+    if (v == 0ULL) {
+        uart_putc('0');
+        return;
+    }
+
+    while (v != 0ULL && len < (int)sizeof(buf)) {
+        buf[len++] = (char)('0' + (v % 10ULL));
+        v /= 10ULL;
+    }
+    while (len > 0)
+        uart_putc(buf[--len]);
+}
+
+static void syscall_uart_put_i64(int64_t v)
+{
+    uint64_t mag;
+
+    if (v < 0) {
+        uart_putc('-');
+        mag = (uint64_t)(-(v + 1LL)) + 1ULL;
+    } else {
+        mag = (uint64_t)v;
+    }
+    syscall_uart_put_u64(mag);
+}
+
 /* Indice nel fd_table per il task corrente */
 static inline int task_idx(void)
 {
@@ -249,6 +280,7 @@ static int vfsd_proxy_call(const vfsd_request_t *req, vfsd_response_t *resp)
 {
     port_t        *port;
     ipc_message_t  reply;
+    uint64_t       deadline_ms;
     int            rc;
 
     if (!req || !resp)
@@ -258,7 +290,14 @@ static int vfsd_proxy_call(const vfsd_request_t *req, vfsd_response_t *resp)
     if (!port || port->owner_tid == 0U)
         return -ENOENT;
 
-    rc = mk_ipc_call(port->port_id, IPC_MSG_VFS_REQ, req, sizeof(*req), &reply);
+    deadline_ms = timer_now_ms() + 1000ULL;
+    do {
+        rc = mk_ipc_call(port->port_id, IPC_MSG_VFS_REQ, req, sizeof(*req), &reply);
+        if (rc != -EBUSY && rc != -EAGAIN)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline_ms);
+
     if (rc < 0)
         return rc;
     if (reply.msg_type != IPC_MSG_VFS_RESP || reply.msg_len < sizeof(*resp))
@@ -687,9 +726,15 @@ static uint64_t sys_read(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_exit(uint64_t args[6])
 {
-    (void)args;
-    sched_task_exit();
+    sched_task_exit_with_code((int32_t)args[0]);
     return 0;   /* unreachable */
+}
+
+static uint64_t sys_yield(uint64_t args[6])
+{
+    (void)args;
+    sched_yield();
+    return 0;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1327,9 +1372,23 @@ static uint64_t sys_kill(uint64_t args[6])
     int      sig = (int)args[1];
     int      rc;
 
+    uart_puts("[SIGNAL] kill pid=");
+    syscall_uart_put_u64((uint64_t)pid);
+    uart_puts(" sig=");
+    syscall_uart_put_i64((int64_t)sig);
+    uart_puts("\n");
+
     rc = signal_send_pid(pid, sig);
-    if (rc < 0)
+    if (rc < 0) {
+        uart_puts("[SIGNAL] kill fail pid=");
+        syscall_uart_put_u64((uint64_t)pid);
+        uart_puts(" sig=");
+        syscall_uart_put_i64((int64_t)sig);
+        uart_puts(" rc=");
+        syscall_uart_put_i64((int64_t)rc);
+        uart_puts("\n");
         return ERR(-rc);
+    }
     return 0;
 }
 
@@ -1680,8 +1739,16 @@ static uint64_t sys_vfs_boot_open(uint64_t args[6])
         return ERR(-rc);
 
     rc = vfs_open(path, (uint32_t)args[1], &file);
-    if (rc < 0)
+    if (rc < 0) {
+        uart_puts("[VFSD] boot_open fail: ");
+        uart_puts(path);
+        uart_puts(" rc=");
+        syscall_uart_put_i64((int64_t)rc);
+        uart_puts(" flags=");
+        syscall_uart_put_u64((uint64_t)(uint32_t)args[1]);
+        uart_puts("\n");
         return ERR(-rc);
+    }
 
     handle = vfs_srv_handle_alloc(&file);
     if (handle == 0U) {
@@ -1930,6 +1997,9 @@ void syscall_init(void)
     syscall_table[SYS_SIGRETURN] = (syscall_entry_t){
         sys_sigreturn, SYSCALL_FLAG_RT, "sigreturn"
     };
+    syscall_table[SYS_YIELD] = (syscall_entry_t){
+        sys_yield, SYSCALL_FLAG_RT, "yield"
+    };
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"
     };
@@ -2044,7 +2114,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 56 syscall base/UX/ipc/vfsd/signal/mreact/ksem/kmon/cap registrate\n");
+    uart_puts("[SYSCALL] 57 syscall base/UX/ipc/vfsd/signal/mreact/ksem/kmon/cap registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

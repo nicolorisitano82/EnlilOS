@@ -1,0 +1,141 @@
+EnlilOS — Progress Log
+======================
+Aggiornato: 2026-04-06
+
+────────────────────────────────────────────────────────────────
+STATO GENERALE
+────────────────────────────────────────────────────────────────
+Target   : AArch64 (cortex-a72), QEMU virt, 512MB RAM
+Modello  : Microkernel (GNU Hurd-style), task kernel-space, IPC sincrono RT
+Output   : enlil.elf / enlil.bin
+Testbed  : enlil-selftest.elf (suite self-test separata)
+
+────────────────────────────────────────────────────────────────
+MILESTONE COMPLETATE
+────────────────────────────────────────────────────────────────
+
+BACKLOG 1 — Kernel Foundation (M1–M7)
+  ✅ M1-01  Exception Vector Table (EL1)
+  ✅ M1-02  MMU + Virtual Memory (4KB pages, 3 livelli)
+  ✅ M1-03  Physical Memory Allocator (buddy system)
+  ✅ M1-04  Kernel Heap (named typed caches)
+  ✅ M2-01  GIC-400 Interrupt Controller
+  ✅ M2-02  ARM Generic Timer — tick 1ms
+  ✅ M2-03  Scheduler RT Fixed-Priority Preemptive (256 livelli, bitmap O(1))
+  ✅ M3-01  Syscall Dispatcher (tabella 256 entry, O(1))
+  ✅ M3-02  Syscall Base (write/read/exit/open/close/fstat/mmap/brk/execve/fork/
+            waitpid/clock_gettime/getdents/task_snapshot/spawn)
+  ✅ M3-03  ANE Syscall Interface (range 100–119)
+  ✅ M3-04  GPU Syscall Interface (range 120–139)
+  ✅ M4-01  PL050 PS/2 Keyboard
+  ✅ M4-02  VirtIO Input
+  ✅ M4-03  Terminal Line Discipline
+  ✅ M4-04  Font UTF-8 completo
+  ✅ M4-05  Mouse Input (VirtIO / PS/2)
+  ✅ M5-01  VirtIO Block Device
+  ✅ M5-02  VFS Layer
+  ✅ M5-03  ext4 Mount & Read Path
+  ✅ M5-04  ext4 Write Path & Sync Policy
+  ✅ M5-04b ext4 Journal & Crash Consistency
+  ✅ M5-05  initrd / Ramdisk Bootstrap
+  ✅ M5b-01 GPU Driver (Virtio-GPU / AGX stub)
+  ✅ M5b-02 Scanout & Display Engine
+  ✅ M5b-03 GPU Memory Manager
+  ✅ M5b-04 2D Rendering Accelerato
+  ✅ M6-01  ELF64 Static Loader
+  ✅ M6-02  execve() completo
+  ✅ M6-03  ELF Dynamic Loader (ld_enlil.so)
+  ✅ M7-01  IPC Sincrono a Latenza Fissa (priority donation)
+  ✅ M7-02  Console e Shell Minimale (nsh)
+
+BACKLOG 2 — Process Model e Server Architecture (M8–M9)
+  ✅ M8-01  fork() + Copy-on-Write MMU
+  ✅ M8-03  Signal Handling (sigaction/sigreturn/kill, POSIX subset)
+  ✅ M8-05  mreact — Reactive Memory Subscriptions (syscall 80–84)
+  ✅ M8-06  Semafori Kernel Nativi ksem (syscall 85–94)
+  ✅ M8-07  Monitor Kernel kmon (syscall 95–99/110–111)
+             fix: sched_block/unblock vs polling; uso produzione in ext4_open_vfs
+  ✅ M8-07b Infrastruttura syscall e user-space:
+             - include/user_svc.h  — wrapper SVC condivisi per tutti i demo EL0
+             - SYS_YIELD = 20      — yield cooperativo da EL0
+             - SYS_KILL = 134      — numero corretto nell'ABI EnlilOS
+             - exit code dal TCB   — sched_task_exit_with_code(code)
+             - vfsd proxy retry    — loop 1s su EBUSY/EAGAIN
+  ✅ M9-01  Capability System (syscall 60–64, cap_pool[256], cap_table[pid][64])
+             selftest automatico: cap-core
+  ✅ M9-02  VFS Server in User-Space — vfsd bootstrap v1
+             selftest automatico: vfsd-core
+
+────────────────────────────────────────────────────────────────
+IN LAVORAZIONE / PARZIALI
+────────────────────────────────────────────────────────────────
+  🟡 M8-04  Process Groups, Sessions, Job Control (pgid/sid nel TCB)
+             non critica finché non si lavora su arksh interattiva
+
+────────────────────────────────────────────────────────────────
+PROSSIME PRIORITÀ (ordine consigliato)
+────────────────────────────────────────────────────────────────
+  1. M11-01  musl libc — sblocca M8-08 (arksh), M11-02 (pthread), tutto il porting
+  2. M9-03   blkd — Block Server in user-space (dipende da M9-01)
+  3. M9-04   Namespace & Mount Dinamico
+  4. M8-08   Porting arksh (dipende da musl + pipe/dup/termios)
+  5. M14-02  Crash Reporter + KGDB
+  6. M11-02  POSIX Threading (pthread)
+
+────────────────────────────────────────────────────────────────
+TABELLA SYSCALL (assegnazioni stabili)
+────────────────────────────────────────────────────────────────
+  1   write          11  fork           80  mreact_subscribe
+  2   read           12  waitpid        81  mreact_wait
+  3   exit           13  clock_gettime  82  mreact_cancel
+  4   open           14  getdents       83  mreact_subscribe_all
+  5   close          15  task_snapshot  84  mreact_subscribe_any
+  6   fstat          16  spawn          85  ksem_create
+  7   mmap           17  sigaction      86  ksem_open
+  8   munmap         18  sigprocmask    87  ksem_close
+  9   brk            19  sigreturn      88  ksem_unlink
+  10  execve         20  yield          89  ksem_post
+                                        90  ksem_wait
+  60  cap_alloc                         91  ksem_timedwait
+  61  cap_send                          92  ksem_trywait
+  62  cap_revoke                        93  ksem_getvalue
+  63  cap_derive                        94  ksem_anon
+  64  cap_query
+                     95  kmon_create   100–119  ANE
+                     96  kmon_destroy  110  kmon_signal
+                     97  kmon_enter    111  kmon_broadcast
+                     98  kmon_exit     120–139  GPU
+                     99  kmon_wait     134  kill
+
+  140 port_lookup   150  vfs_boot_open   154  vfs_boot_stat
+  141 ipc_wait      151  vfs_boot_read   155  vfs_boot_close
+  142 ipc_reply     152  vfs_boot_write
+                    153  vfs_boot_readdir
+
+  Pianificati (non ancora implementati):
+  21  tcgetattr     23  isatty
+  22  tcsetattr
+
+────────────────────────────────────────────────────────────────
+FILE CHIAVE
+────────────────────────────────────────────────────────────────
+  kernel/sched.c       — scheduler FPP, fork COW, exit code
+  kernel/syscall.c     — dispatcher + tutti gli handler
+  kernel/selftest.c    — suite test (vfs-rootfs, ext4-core, elf-loader,
+                         fork-cow, signal-core, mreact-core, cap-core,
+                         vfsd-core, ksem-core, kmon-core, ipc-sync, ...)
+  kernel/mreact.c      — backend reactive subscriptions
+  kernel/ksem.c        — semafori kernel nativi
+  kernel/kmon.c        — monitor kernel Mesa-style
+  kernel/cap.c         — capability system
+  include/user_svc.h   — wrapper SVC per tutti i programmi EL0
+  user/vfsd.c          — VFS server user-space (M9-02 v1)
+  user/nsh.c           — shell minimale di recovery
+
+────────────────────────────────────────────────────────────────
+GIT
+────────────────────────────────────────────────────────────────
+  ultimo commit : cf30183  Implement user-space VFS server bootstrap
+  branch        : main
+  working tree  : 14 file modificati non ancora committati
+                  (M8-07b infra + selftest espansi + backlog aggiornato)

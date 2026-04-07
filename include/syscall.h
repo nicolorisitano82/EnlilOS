@@ -42,6 +42,7 @@
 #define SYS_SIGACTION       17
 #define SYS_SIGPROCMASK     18
 #define SYS_SIGRETURN       19
+#define SYS_YIELD           20
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -64,7 +65,7 @@
 #define SYS_KMON_WAIT             99
 #define SYS_KMON_SIGNAL           110
 #define SYS_KMON_BROADCAST        111
-#define SYS_KILL            129   /* Linux AArch64 standard */
+#define SYS_KILL            134
 
 /* Port / IPC server bootstrap (M9-02) */
 #define SYS_PORT_LOOKUP     140

@@ -198,6 +198,7 @@ int         sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
                                    uintptr_t entry, uintptr_t user_sp,
                                    uintptr_t argc, uintptr_t argv,
                                    uintptr_t envp, uintptr_t auxv);
+int         sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out);
 
 /* Helper del trampoline assembly */
 void sched_task_bootstrap(uint64_t entry_reg);
@@ -205,6 +206,7 @@ void sched_enter_user(uint64_t argc, uint64_t argv,
                       uint64_t envp, uint64_t auxv,
                       uint64_t user_sp, uint64_t entry);
 void sched_resume_user_frame(const exception_frame_t *frame);
+void sched_task_exit_with_code(int32_t code);
 void sched_task_exit(void);
 
 /* Trampoline assembly — non chiamare direttamente */

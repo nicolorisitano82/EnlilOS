@@ -11,7 +11,11 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(perl -i -pe 's/\\\\btask_t\\\\b/sched_tcb_t/g; s/\\\\btask_fn\\\\b/sched_fn/g' /Users/nicolo/nros/kernel/sched.c)"
+      "Bash(perl -i -pe 's/\\\\btask_t\\\\b/sched_tcb_t/g; s/\\\\btask_fn\\\\b/sched_fn/g' /Users/nicolo/nros/kernel/sched.c)",
+      "Bash(grep -n \"NROS\\\\|nros\\\\.elf\\\\|nros\\\\.bin\" /Users/nicolo/nros/kernel/main.c /Users/nicolo/nros/include/*.h /Users/nicolo/nros/Makefile)",
+      "Bash(git stash:*)",
+      "Bash(git pull:*)",
+      "Bash(git push:*)"
     ]
   }
 }

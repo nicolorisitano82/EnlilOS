@@ -98,7 +98,7 @@ Segnali POSIX minimali, compatibili con musl libc (M11-01).
 - Segnali asincroni supportati: `SIGINT`, `SIGTERM`, `SIGCHLD`, `SIGALRM`
 - `SIGKILL` / `SIGSTOP`: non intercettabili, implementati direttamente nel kernel
 - Maschera segnali: `sigmask` in `sched_tcb_t`, modificata da `sigprocmask()`
-- `kill(pid, sig)`: syscall nr 62 — deposita segnale pendente nel TCB target
+- `kill(pid, sig)`: syscall nr 134 — deposita segnale pendente nel TCB target
 - Consegna segnale: al rientro da ogni eccezione/IRQ, prima di ERET → controlla `pending_signals`
 - Implementato: `sigaction`, `sigprocmask`, `sigreturn`, `kill`, trampoline EL0 condiviso,
   consegna asincrona su return-to-user e routing `CTRL+C` console → `SIGINT`
@@ -419,28 +419,32 @@ kernel/syscall.c    — ksem_init() + syscall 85-94 al boot
 
 ---
 
-### 🟡 M8-07 · Monitor Kernel (`kmon`)
+### ✅ M8-07 · Monitor Kernel (`kmon`)
 **Priorità:** ALTA (dipende da M8-06)
 
-**Stato reale:** implementazione v1 presente nel kernel; selftest dedicato `kmon-core`
-disponibile, ma il path `wait/signal` e' ancora sensibile al timing sotto QEMU e va
-stabilizzato prima di considerare la milestone completamente chiusa.
+**Stato:** implementazione stabile. La race condition nel selftest `kmon-core` è stata
+corretta: il task holder ora usa `sched_block()` invece del polling `sched_yield()`,
+e il signaler chiama `sched_unblock(holder)` esplicitamente. La priority-inheritance
+è verificabile abbassando la priorità del holder a `PRIO_LOW` prima del block.
+Il monitor è ora usato in produzione in `kernel/ext4.c` (`g_ext4_open_lock`) per
+serializzare accessi concorrenti a `ext4_open_vfs`.
 
-**Profilo v1 implementato:**
+**Profilo implementato:**
 - monitor kernel con handle opaco `kmon_t`
 - mutex implicito con owner tracking, recursion check e priority ceiling / donation best-effort
 - fino a 8 condition queue per monitor
 - `wait`, `signal`, `broadcast`, `timedwait`
 - cleanup automatico dei waiter su `exit`, `execve` e terminazione task
 - integrazione completa nel dispatcher syscall
+- lock kmon in `ext4_open_vfs` — primo uso produzione nel kernel
 
-**Semantica v1:**
+**Semantica:**
 - `enter/exit` fanno lock/unlock del monitor in kernel
 - `wait(cond)` rilascia il lock e parcheggia il task sulla condition
 - `signal(cond)` e `broadcast(cond)` spostano i waiter dalla condition alla `enter_q`
 - il lock torna al prossimo waiter su `kmon_exit()`
-- il profilo stabile attuale e' quindi **Mesa-style / signal-and-continue**
-- il flag `KMON_HOARE` resta esposto come ABI, ma l'handoff Hoare stretto e' rinviato a una revisione successiva
+- profilo **Mesa-style / signal-and-continue**
+- il flag `KMON_HOARE` resta esposto come ABI, ma l'handoff Hoare stretto è rinviato a una revisione successiva
 
 **Syscall effettive registrate:**
 
@@ -457,12 +461,12 @@ stabilizzato prima di considerare la milestone completamente chiusa.
 **Nota ABI:** `100-109` restano riservate all'ANE, quindi `signal` e `broadcast`
 sono state collocate a `110-111`.
 
-**Copertura test:**
-- contesa su `enter()` con donation/ceiling
+**Copertura test (`selftest kmon-core`):**
+- contesa su `enter()` con donation/ceiling (holder a PRIO_LOW, waiter a PRIO_HIGH)
+- holder bloccato con `sched_block()`, sbloccato con `sched_unblock()` — nessun polling
 - `wait/signal` su condition queue
 - `timedwait` con ritorno `-ETIMEDOUT`
 - distruzione del monitor dopo drain dei waiter
-- esecuzione mirata da boot console tramite `selftest kmon-core`
 
 **Struttura file:**
 ```
@@ -471,13 +475,46 @@ kernel/kmon.c        — pool monitor/waiter, enter/exit, wait/signal/broadcast
 kernel/syscall.c     — wrapper syscall + init al boot
 include/syscall.h    — numeri syscall 95-99 / 110-111
 kernel/selftest.c    — selftest kmon-core
-kernel/main.c        — comando boot console `selftest [nome]`
-include/selftest.h   — selftest_run_named()
+kernel/ext4.c        — g_ext4_open_lock: primo uso produzione
 ```
 
 **Dipende da:** M3-01, M2-03, M8-06
 **Sblocca:** M11-02 (pthread condvar/mutex lato libc), server user-space che vogliono
 serializzare richieste con PI kernel-side
+
+---
+
+### ✅ M8-07b · Infrastruttura Syscall e User-Space (complemento)
+**Priorità:** INFRASTRUTTURA — non è una milestone utente ma corregge e consolida
+
+Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
+
+**`SYS_YIELD = 20`** — nuova syscall `sched_yield()` da EL0
+- Path: `sys_call0(SYS_YIELD)` invoca `sched_yield()` nel kernel
+- Sostituisce il pattern `asm volatile("" ::: "memory")` nei demo user-space
+- Necessario per signal_demo, fork_demo e qualsiasi loop di attesa cooperativo in EL0
+
+**Exit code propagation** — `sys_exit(code)` porta il codice al TCB
+- `sched_task_exit_with_code(int32_t code)` salva il codice nel `sched_task_ctx_t`
+- `sched_task_get_exit_code()` permette ai selftest di verificarlo
+- Ogni demo EL0 può ora exit con codice diverso da 0 per segnalare fallimento
+
+**`include/user_svc.h`** — header condiviso per wrapper SVC da EL0
+- `user_svc0..6()` con clobber list completa (x9-x18, cc)
+- `user_svc_exit(code, nr)` — `__attribute__((noreturn))` + loop `wfe`
+- Elimina il codice duplicato in ogni demo; tutti i file user-space lo includono
+
+**Correzione `SYS_KILL = 134`** (era 129)
+- 129 era riservato (conflitto con range Linux che non usiamo, ma ambiguo)
+- 134 è stabile nell'ABI EnlilOS; il backlog M8-03 aggiornato di conseguenza
+
+**Retry su `vfsd_proxy_call()`**
+- Loop con deadline 1s su EBUSY/EAGAIN — tollera la finestra di avvio di vfsd
+- Necessario per i selftest che avviano vfsd e subito dopo fanno richieste VFS
+
+**Correzione numeri syscall M8-08c (termios)**
+- 19/20/21 erano già occupati da SYS_SIGRETURN/SYS_YIELD/futuro
+- Riassegnati: `tcgetattr` = 21, `tcsetattr` = 22, `isatty` = 23
 
 ---
 
@@ -588,8 +625,8 @@ Necessari per `cd`, variabili `$PATH`, `$HOME`, `$PWD`, ecc.
 Necessario per il REPL interattivo di arksh: syntax highlighting, autosuggestion,
 history con frecce, Ctrl+C/D/Z.
 
-**`tcgetattr(int fd, struct termios *t)` — syscall nr 19:**
-**`tcsetattr(int fd, int action, const struct termios *t)` — syscall nr 20:**
+**`tcgetattr(int fd, struct termios *t)` — syscall nr 21:**
+**`tcsetattr(int fd, int action, const struct termios *t)` — syscall nr 22:**
 
 Il kernel mantiene uno `struct termios` per ogni fd che punta alla console:
 
@@ -607,7 +644,7 @@ typedef struct {
 - Modalità **canonical** (default): line buffering, Backspace, Ctrl+C → SIGINT
 - Modalità **raw** (`~ICANON`): arksh la abilita per il REPL — ogni byte arriva subito,
   senza buffering di riga; cursor movement con sequenze ANSI
-- `isatty(fd)` — syscall nr 21: ritorna 1 se `fd` è connesso alla console, 0 altrimenti
+- `isatty(fd)` — syscall nr 23: ritorna 1 se `fd` è connesso alla console, 0 altrimenti
 
 **Sequenze ANSI necessarie per il REPL arksh:**
 - `\e[A`/`\e[B` — su/giù (history navigation)
@@ -812,6 +849,7 @@ history, plugin system — shell di default al boot
   (`SCHED_MAX_TASKS * MAX_CAPS_PER_TASK`); resta comunque accettabile per il profilo previsto
 - Restano per le milestone server successive: uso esteso di `CAP_MMIO`, `CAP_FD`, `CAP_GPU_BUF`
   e trasferimento capability come meccanismo primario tra server user-space
+- Selftest automatico `cap-core`: spawna `/CAPDEMO.ELF`, attende zombie, verifica exit code 0
 
 **Numeri syscall (range 60–79):**
 
@@ -840,7 +878,7 @@ M9-02 lo sostituisce con un server user-space ELF separato.
 **Passaggio graduale:** M5-02/M5-03 restano attivi finché `vfsd` non è stabile;
 poi `vfs_kernel_ops` viene rimosso dal kernel e sostituito con chiamate IPC al server.
 
-**Implementato ora (v1 bootstrap):**
+**Implementato (v1 bootstrap):**
 - server `user-space` reale `/VFSD.ELF`, avviato al boot e bindato alla porta microkernel `vfs`
 - protocollo IPC dedicato per `open/read/write/readdir/stat/close`
 - syscall minime lato server: `port_lookup`, `ipc_wait`, `ipc_reply`
@@ -848,6 +886,9 @@ poi `vfs_kernel_ops` viene rimosso dal kernel e sostituito con chiamate IPC al s
   mantiene ancora il backend VFS bootstrap come appoggio interno
 - validato a runtime: `nsh` esegue `ls`, `cat /BOOT.TXT`, `cd /data`, `ls`, `cat /data/MREACT.TXT`
   passando attraverso `vfsd`
+- selftest automatico `vfsd-core`: verifica porta `vfs` registrata, owner non zombie,
+  owner è task user-space, stat di `/VFSD.ELF` passante
+- proxy kernel con retry (1s deadline) su EBUSY/EAGAIN per la finestra di avvio del server
 
 **Resta a M9-03/M9-04:**
 - rimozione del backend ext4/blocco dal kernel
@@ -2639,7 +2680,19 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ```
 
 **Milestone bloccanti** (fermare tutto e risolvere prima di procedere):
-- M8-01 fork — senza fork nulla funziona
-- M9-01 capability — senza capability i server non sono sicuri
+- ~~M8-01 fork — senza fork nulla funziona~~ ✅ completata
+- ~~M9-01 capability — senza capability i server non sono sicuri~~ ✅ completata
 - M11-01 musl libc — senza libc nessun programma C gira
 - M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più
+
+**Stato FASE 1 e FASE 2 al 2026-04-06:**
+- ✅ M8-01 fork + COW
+- ✅ M8-03 signal handling
+- ✅ M8-05 mreact
+- ✅ M8-06 ksem
+- ✅ M8-07 kmon (race condition selftest corretta)
+- ✅ M9-01 capability system
+- ✅ M9-02 vfsd bootstrap v1
+- 🟡 M8-04 process groups (non critica per FASE 3)
+- ⬜ M9-03 blkd, M9-04 namespace
+- **Prossimo step:** FASE 3 — musl libc (M11-01) sblocca M8-08 arksh e tutto il porting POSIX
