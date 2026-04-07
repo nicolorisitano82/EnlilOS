@@ -1867,12 +1867,94 @@ Passaggio da operazioni 2D CPU-assisted a compute shader GPU nativi per il compo
 ### ⬜ M13-01 · EDF Scheduler (Earliest Deadline First)
 **Priorità:** MEDIA (alternativa configurabile al FPP di M2-03)
 
-- Aggiunge `deadline_abs_ns` al TCB (già presente come `deadline_ms` — estendere a ns)
-- Run queue EDF: min-heap a 256 entry con `deadline_abs_ns` come chiave
-- `sched_pick_next_edf()`: estrae il task con deadline minima — O(log N)
-- Schedulabilità: test RMS (`sum(Ci/Ti) <= n*(2^(1/n)-1)`) al momento dell'ammissione
-- Modalità configurabile a boot: `SCHED_FPP` (default, retrocompatibile) o `SCHED_EDF`
-- Sporatic server: task non-RT ottengono un budget Ci ogni periodo Ti (CBS — Constant Bandwidth Server)
+- Rinomina `deadline_ms` → `deadline_abs_ns` nel TCB (già a offset 40, stessa width uint64_t — nessun impatto su `sched_switch.S`)
+- Run queue EDF: min-heap a 32 entry (SCHED_MAX_TASKS) con `deadline_abs_ns` come chiave — O(log 32) = 5 confronti
+- `sched_pick_next_edf()`: estrae il task con deadline minima — costo equivalente al `bitmap_find_first()` FPP
+- Schedulabilità: test RMS (`sum(Ci/Ti) ≤ 1`) al momento dell'ammissione via `sched_task_set_rt(period_ns, wcet_ns)`
+- Modalità configurabile a boot: `SCHED_MODE_FPP` (default) / `SCHED_MODE_EDF` / `SCHED_MODE_FPP_NAS` / `SCHED_MODE_EDF_NAS`
+- CBS (Constant Bandwidth Server): task aperiodici (blkd, vfsd, NSH) ottengono budget Cs ogni periodo Ts; deadline rinnovata a ogni esaurimento
+- Tie-breaking su deadline uguale: PID crescente (deterministico)
+- Selftest `edf-core`: 3 task periodici con WCET noto, verifica zero miss in 1 secondo
+
+**Prerequisiti:** M2-03 (già completato)  
+**Dipende da:** nessun altro — può iniziare subito dopo M13-02
+
+**Riferimento architetturale:** `docs/STUDIO_SCHEDULER_EDF_NAS.md`
+
+---
+
+### ⬜ M13-04 · Neural-Assisted Scheduler — Profiler e FPP Advisor
+**Priorità:** MEDIA (lavoro parallelo a M13-01 / M13-03)
+
+Primo stadio del NAS (Neural-Assisted Scheduler): profiler lockless + advisor su FPP.
+Il NAS è un layer **adattivo** che opera fuori dal fast path: osserva il comportamento
+dei task e suggerisce aggiustamenti via `sched_task_donate_priority()`.
+Il kernel rimane deterministico; il NPU è un advisor, non un controller.
+
+**M13-04a — Profiler lockless (`kernel/sched_prof.c`)**
+
+- Ring buffer lock-free `prof_buf[256]` scritto in `sched_tick()` (O(1), 1 store atomico, no lock)
+- Per task: `runtime_ns`, `block_count`, `ipc_calls`, `miss_deadline`, `avg_wake_latency_us`
+- `prof_drain()`: API per il NAS task che restituisce snapshot aggregato su N tick
+- Overhead: < 0.1% CPU (misurabile con M13-03 WCET framework)
+
+**M13-04b — Feature extractor e NAS task**
+
+- NAS task kernel a `PRIO_LOW=200`, loop 100ms — mai nel fast path IRQ
+- Feature vector 16 × float16 per task (32 task = 512 float16 = 1 KB):
+  `runtime_ratio`, `block_rate`, `ipc_rate`, `wake_latency_us`, `miss_deadline_rate`,
+  `priority_norm`, `donated_prio_norm`, `flags_onehot`, `runtime_delta`, history T-1/T-2/T-3
+- Batch inference su ANE (DMA async, `ane_submit_inference()` + `ane_wait()`)
+- SW fallback NEON se ANE non disponibile
+
+**M13-04c — Modello TCN embedded**
+
+- Temporal Convolutional Network leggera (~8K parametri float16 = 16 KB)
+- Architettura: `Conv1D(k=3,f=32,d=1) → Conv1D(k=3,f=32,d=2) → LayerNorm → Linear(32→16) → Linear(16→4)`
+- Output per task: `delta_prio int8[-32,+32]`, `delta_quantum int8[-10,+10]`, `delta_budget int8[-5,+5]`, `confidence uint8`
+- Pesi embedded come array C (generati offline da training pipeline su trace QEMU)
+
+**M13-04d — Guardrail layer**
+
+- `TCB_FLAG_RT`: delta_prio ≥ 0 sempre scartato (task RT mai degradati)
+- `confidence < NAS_CONFIDENCE_MIN (128)`: suggerimento scartato
+- Donation resettata ogni 500ms se confidence rimane bassa (anti-starvation)
+- Applica via `sched_task_donate_priority()` — mai mutazione diretta `task->priority`
+- Selftest `nas-core`: verifica profiler drain, confidence gate, zero degradazione task FLAG_RT
+
+**Prerequisiti:** M2-03, M3-01 (syscall base), ANE stub (M3-03, già presente)  
+**Dipende da:** nessun altro — può procedere in parallelo a M13-01
+
+**Riferimento architetturale:** `docs/STUDIO_SCHEDULER_EDF_NAS.md`
+
+---
+
+### ⬜ M13-05 · Neural-Assisted Scheduler — Integrazione EDF
+**Priorità:** BASSA (dipende da M13-01 + M13-04)
+
+Secondo stadio del NAS: estende l'advisor per operare sui parametri EDF.
+Risolve il problema principale di EDF puro: la stima manuale di WCET (`Ci`).
+
+- **WCET adattivo**: EMA 95° percentile di `runtime_ns` → aggiorna `wcet_estimate_ns` per il test di ammissione CBS
+- **`deadline_slack_ns`**: il NAS può stringere/allargare la deadline percepita dall'heap EDF
+  (`deadline_eff = deadline_abs_ns - slack_ns`) senza mai posticipare la deadline reale
+- **CBS budget adattivo**: il NAS regola il budget Cs dei task aperiodici (blkd, vfsd, NSH) in base al carico osservato
+- Hard RT protetti: task `FLAG_RT` con deadline dichiarata esplicitamente → NAS solo osserva, non tocca
+- Modalità risultante: `SCHED_MODE_EDF_NAS` — scheduler ibrido deterministico + adattivo
+
+**Separazione formale delle responsabilità:**
+
+```
+Dominio EDF (hard RT, certificabile):
+  task FLAG_RT → deadline fissa, WCET dichiarato, test RMS, NAS bloccato da guardrail
+
+Dominio NAS (soft-RT e aperiodici, best-effort):
+  task user non-RT → WCET adattivo, CBS budget dinamico, deadline_slack suggerita dal NAS
+```
+
+**Prerequisiti:** M13-01 (EDF), M13-04 (NAS profiler + modello)
+
+**Riferimento architetturale:** `docs/STUDIO_SCHEDULER_EDF_NAS.md`
 
 ---
 
@@ -2438,6 +2520,8 @@ M12-01 → M12-02 (wm) → M12-03 (GPU shader compositor)
 M2-03 → M13-01 (EDF scheduler)
 M2-03 → M13-02 (SMP)
 M13-02 → M13-03 (WCET framework)
+M2-03 + M3-03 (ANE) → M13-04 (NAS profiler + FPP advisor)
+M13-01 + M13-04 → M13-05 (NAS-EDF integration)
 M9-02 → M14-01 (procfs/sysfs)
 M6-01 → M14-02 (crash reporter)
 M13-02 → M14-03 (power management)
@@ -2601,16 +2685,23 @@ terminali affiancati, il cursore del mouse sposta il focus.
 ---
 
 ## FASE 8 — Scheduler Avanzato e Multi-Core
-**Obiettivo:** sfruttare tutti i core disponibili e migliorare le garanzie RT.
+**Obiettivo:** sfruttare tutti i core disponibili, garanzie RT formali e adattività via NPU.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
 | 31 | **M13-02** SMP multi-core | Dipende solo da M2-03 (già fatto). Tutti e 4 i core QEMU attivi |
 | 32 | **M13-03** WCET Framework | Dipende da M13-02. Misura le performance in modo rigoroso |
-| 33 | **M13-01** EDF Scheduler | Dipende da M2-03. Alternativa a FPP per task con deadline esplicita |
+| 33a | **M13-01** EDF Scheduler | Dipende da M2-03. Garanzie RT formali, 100% utilization teorica |
+| 33b | **M13-04** NAS Profiler + FPP Advisor | Parallelo a M13-01. Profiler lockless + advisor NPU su priorità FPP |
+| 34 | **M13-05** NAS-EDF Integration | Dipende da M13-01 + M13-04. WCET adattivo, CBS dinamico, EDF+NAS |
 
-**Checkpoint FASE 8:** `nproc` ritorna 4, i task vengono distribuiti sui core, le
-statistiche WCET sono leggibili in `/proc/wcet`.
+**Checkpoint FASE 8:** SMP 4 core attivi, statistiche WCET in `/proc/wcet`,
+EDF operativo con test schedulabilità RMS, NAS riduce miss rate soft-RT del 15–30%.
+
+**Nota architetturale:** EDF e NAS sono complementari, non alternativi.
+EDF risponde a "chi esegue adesso?" (selezione deterministica).
+NAS risponde a "quanto peso dare a ciascuno?" (stima parametri adattiva).
+Vedere `docs/STUDIO_SCHEDULER_EDF_NAS.md` per l'analisi completa.
 
 ---
 
@@ -2648,7 +2739,7 @@ automaticamente in `/usb0`, tastiera USB funzionante come tastiera PS/2.
 | **M11-07a..d** Namespace (Mount/PID/UTS/Net) | Isolamento processi |
 | **M11-07e** OverlayFS | Image layering Docker |
 | **M11-07f** Cgroup v2 | Limite risorse per container |
-| **M13-01** EDF | Già in Fase 8 — opzionale se FPP è sufficiente |
+| **M13-01** EDF + **M13-04/05** NAS | Già in Fase 8 — EDF+NAS ibrido, opzionale se FPP è sufficiente |
 
 **Checkpoint FASE 10:** Docker AArch64 gira su EnlilOS, container isolati con
 limite memoria e CPU, `docker pull` scarica un'immagine e la esegue.
@@ -2672,7 +2763,7 @@ FASE 6  ──► Linux compat + Mach-O compat
    │
 FASE 7  ──► Wayland + WM + GPU compositor
    │
-FASE 8  ──► SMP + WCET + EDF
+FASE 8  ──► SMP + WCET + EDF + NAS (EDF+NAS scheduler ibrido)
    │
 FASE 9  ──► audio + USB (in parallelo)
    │
