@@ -31,7 +31,7 @@ kernel/        — tutti i moduli kernel (.c)
 kernel/sched_switch.S — context switch assembly
 include/       — header pubblici
 drivers/       — uart, keyboard, mouse, blk, framebuffer, ane/, gpu/
-user/          — programmi EL0 (demo, nsh, vfsd, ecc.)
+user/          — programmi EL0 (demo, nsh, vfsd, blkd, ecc.)
 tools/         — gen_ksyms.py e altri script di build
 ```
 
@@ -141,6 +141,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 134     kill
 140–142 IPC (port_lookup/ipc_wait/ipc_reply)
 150–155 VFS boot (vfs_boot_open/read/write/readdir/stat/close)
+156–159 BLK boot (blk_boot_read/write/flush/sectors) — solo owner porta "block"
 ```
 
 ### Wrapper EL0 (`include/user_svc.h`)
@@ -198,6 +199,25 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Usa syscall `vfs_boot_*` (150–155) per accedere al VFS kernel-side
 - Selftest `vfsd-core` verifica che il server risponda correttamente a open/read/stat
 - Bootstrap: spawned da `kernel/main.c` come primo task user-space
+
+---
+
+## Block server user-space (`blkd`)
+
+**File**: [user/blkd.c](user/blkd.c), [include/blk_ipc.h](include/blk_ipc.h)
+
+- Task EL0 con pid=5, porta IPC "block", priorità PRIO_LOW
+- Usa syscall `blk_boot_*` (156–159) per accedere al driver virtio-blk kernel-side
+- Guard `blk_srv_owner_ok()`: solo il processo owner della porta "block" può chiamarle
+- IPC payload compatto: `blkd_request_t` (16 B) + `blkd_response_t` (16 B)
+  → dati I/O non transitano nell'IPC, blkd usa buffer statico interno (`blkd_io_buf`)
+- Selftest `blkd-core` verifica: porta registrata, owner user-space, `blk_is_ready()`, capacità
+- Bootstrap: `boot_launch_blkd()` in `kernel/main.c`, chiamato dopo `boot_launch_vfsd()`
+
+### Pattern blk_boot_* vs vfs_boot_*
+Identico al pattern vfsd: le syscall `blk_boot_*` sono accessibili **solo** al task
+che possiede la porta "block" (verificato con `mk_port_lookup("block")->owner_tid`).
+Questo evita escalation di privilegi: un processo EL0 arbitrario non può leggere il disco raw.
 
 ---
 
@@ -271,26 +291,27 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 
 **File**: [kernel/selftest.c](kernel/selftest.c)
 
-19 test case in ordine:
+20 test case in ordine:
 1. `vfs-rootfs` — mount initrd, readdir, stat file
 2. `vfs-devfs` — devfs /dev/stdin /dev/stdout
 3. `ext4-core` — mount rw ext4, journal replay
 4. `vfsd-core` — VFS server user-space
-5. `elf-loader` — carica ELF statico in EL0
-6. `init-elf` — parse INIT.ELF
-7. `nsh-elf` — parse NSH.ELF
-8. `execve` — execve() completo
-9. `exec-target` — target execve con EXEC2.ELF
-10. `elf-dynamic` — carica ELF PIE con ld_enlil.so
-11. `fork-cow` — fork() + COW + output su file ext4
-12. `signal-core` — sigaction/sigreturn/kill
-13. `mreact-core` — reactive subscriptions
-14. `cap-core` — capability alloc/query/derive/revoke
-15. `ksem-core` — semafori RT + priority inheritance
-16. `kmon-core` — monitor + PI ceiling
-17. `ipc-sync` — IPC sincrono + priority donation
-18. `kdebug-core` — crash reporter + ksymtab
-19. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
+5. `blkd-core` — Block server user-space (porta "block", blk_is_ready, capacità)
+6. `elf-loader` — carica ELF statico in EL0
+7. `init-elf` — parse INIT.ELF
+8. `nsh-elf` — parse NSH.ELF
+9. `execve` — execve() completo
+10. `exec-target` — target execve con EXEC2.ELF
+11. `elf-dynamic` — carica ELF PIE con ld_enlil.so
+12. `fork-cow` — fork() + COW + output su file ext4
+13. `signal-core` — sigaction/sigreturn/kill
+14. `mreact-core` — reactive subscriptions
+15. `cap-core` — capability alloc/query/derive/revoke
+16. `ksem-core` — semafori RT + priority inheritance
+17. `kmon-core` — monitor + PI ceiling
+18. `ipc-sync` — IPC sincrono + priority donation
+19. `kdebug-core` — crash reporter + ksymtab
+20. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
 
 ### Helper macro
 ```c
@@ -307,15 +328,15 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-07)
 
-Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-02 sono completi.
+Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-03 sono completi.
 Vedere `progress.txt` per la lista dettagliata.
 
 **Prossime priorità**:
 1. M11-01 musl libc (sblocca pthread, arksh, porting)
-2. M9-03 blkd — Block Server in user-space
-3. M9-04 Namespace & Mount Dinamico
-4. M8-08 arksh (dipende da musl + pipe/dup/termios)
-5. M14-02 Crash Reporter + KGDB
+2. M9-04 Namespace & Mount Dinamico
+3. M8-08 arksh (dipende da musl + pipe/dup/termios)
+4. M14-02 Crash Reporter + KGDB
+5. M11-02 POSIX Threading (pthread)
 6. M11-02 POSIX Threading (pthread)
 
 ---

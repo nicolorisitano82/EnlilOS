@@ -1,6 +1,6 @@
 EnlilOS — Progress Log
 ======================
-Aggiornato: 2026-04-06
+Aggiornato: 2026-04-07
 
 ────────────────────────────────────────────────────────────────
 STATO GENERALE
@@ -65,6 +65,10 @@ BACKLOG 2 — Process Model e Server Architecture (M8–M9)
              selftest automatico: cap-core
   ✅ M9-02  VFS Server in User-Space — vfsd bootstrap v1
              selftest automatico: vfsd-core
+  ✅ M9-03  Block Server in User-Space — blkd v1
+             include/blk_ipc.h (16B req + 16B resp), SYS_BLK_BOOT_* (156-159)
+             boot_launch_blkd(), selftest automatico: blkd-core
+             total=20 pass=20 fail=0
 
 ────────────────────────────────────────────────────────────────
 IN LAVORAZIONE / PARZIALI
@@ -76,11 +80,10 @@ IN LAVORAZIONE / PARZIALI
 PROSSIME PRIORITÀ (ordine consigliato)
 ────────────────────────────────────────────────────────────────
   1. M11-01  musl libc — sblocca M8-08 (arksh), M11-02 (pthread), tutto il porting
-  2. M9-03   blkd — Block Server in user-space (dipende da M9-01)
-  3. M9-04   Namespace & Mount Dinamico
-  4. M8-08   Porting arksh (dipende da musl + pipe/dup/termios)
-  5. M14-02  Crash Reporter + KGDB
-  6. M11-02  POSIX Threading (pthread)
+  2. M9-04   Namespace & Mount Dinamico
+  3. M8-08   Porting arksh (dipende da musl + pipe/dup/termios)
+  4. M14-02  Crash Reporter + KGDB
+  5. M11-02  POSIX Threading (pthread)
 
 ────────────────────────────────────────────────────────────────
 TABELLA SYSCALL (assegnazioni stabili)
@@ -111,6 +114,8 @@ TABELLA SYSCALL (assegnazioni stabili)
   141 ipc_wait      151  vfs_boot_read   155  vfs_boot_close
   142 ipc_reply     152  vfs_boot_write
                     153  vfs_boot_readdir
+                    156  blk_boot_read   158  blk_boot_flush
+                    157  blk_boot_write  159  blk_boot_sectors
 
   Pianificati (non ancora implementati):
   21  tcgetattr     23  isatty
@@ -121,15 +126,17 @@ FILE CHIAVE
 ────────────────────────────────────────────────────────────────
   kernel/sched.c       — scheduler FPP, fork COW, exit code
   kernel/syscall.c     — dispatcher + tutti gli handler
-  kernel/selftest.c    — suite test (vfs-rootfs, ext4-core, elf-loader,
+  kernel/selftest.c    — suite test 20 casi (vfs-rootfs, ext4-core, elf-loader,
                          fork-cow, signal-core, mreact-core, cap-core,
-                         vfsd-core, ksem-core, kmon-core, ipc-sync, ...)
+                         vfsd-core, blkd-core, ksem-core, kmon-core, ipc-sync, ...)
   kernel/mreact.c      — backend reactive subscriptions
   kernel/ksem.c        — semafori kernel nativi
   kernel/kmon.c        — monitor kernel Mesa-style
   kernel/cap.c         — capability system
   include/user_svc.h   — wrapper SVC per tutti i programmi EL0
   user/vfsd.c          — VFS server user-space (M9-02 v1)
+  user/blkd.c          — Block server user-space (M9-03 v1)
+  include/blk_ipc.h    — protocollo IPC blkd (16B req/resp)
   user/nsh.c           — shell minimale di recovery
 
 ────────────────────────────────────────────────────────────────

@@ -897,7 +897,7 @@ poi `vfs_kernel_ops` viene rimosso dal kernel e sostituito con chiamate IPC al s
 
 ---
 
-### ⬜ M9-03 · Block Server in User-Space (`blkd`)
+### ✅ M9-03 · Block Server in User-Space (`blkd`)
 **Priorità:** ALTA (dipende da M9-01)
 
 Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un server:
@@ -2694,5 +2694,6 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M9-01 capability system
 - ✅ M9-02 vfsd bootstrap v1
 - 🟡 M8-04 process groups (non critica per FASE 3)
-- ⬜ M9-03 blkd, M9-04 namespace
+- ✅ M9-03 blkd
+- ⬜ M9-04 namespace
 - **Prossimo step:** FASE 3 — musl libc (M11-01) sblocca M8-08 arksh e tutto il porting POSIX
