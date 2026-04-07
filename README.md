@@ -24,7 +24,7 @@ Il backlog principale `BACKLOG.md` e' chiuso: il selftest QEMU corrente passa co
 ## Architettura
 
 Per una vista completa dell'architettura target del sistema, basata su `BACKLOG.md`,
-`BACKLOG2.md` e `BACKLOG3.md`, vedi [ARCHITETTURA_TARGET_ENLILOS.md](/Users/nicolo/nros/docs/ARCHITETTURA_TARGET_ENLILOS.md).
+`BACKLOG2.md` e `BACKLOG3.md`, vedi [ARCHITETTURA_TARGET_ENLILOS.md](docs/ARCHITETTURA_TARGET_ENLILOS.md).
 
 ```text
 +---------------------------------------------------------------+
@@ -245,4 +245,4 @@ Se guardi il backlog principale, il nucleo del sistema e' gia' oltre il bring-up
 - userspace EL0 con loader dinamico e `execve()` e' presente
 - shell `NSH` e IPC sincrono sono presenti
 
-Il path core descritto in [BACKLOG.md](/Users/nicolo/nros/BACKLOG.md) e' completato; il lavoro successivo continua nella roadmap estesa in [BACKLOG2.md](/Users/nicolo/nros/BACKLOG2.md).
+Il path core descritto in [BACKLOG.md](BACKLOG.md) e' completato; il lavoro successivo continua nella roadmap estesa in [BACKLOG2.md](BACKLOG2.md).
