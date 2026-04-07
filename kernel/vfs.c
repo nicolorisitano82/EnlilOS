@@ -12,6 +12,7 @@
 #include "blk.h"
 #include "ext4.h"
 #include "initrd.h"
+#include "procfs.h"
 #include "term80.h"
 #include "tty.h"
 #include "uart.h"
@@ -447,6 +448,10 @@ static void build_mount_table(void)
                            true, &placefs_ops, (uintptr_t)ext4_status());
         }
     }
+
+    /* === procfs (M14-01) === */
+    mount_register("/proc", "process-info", "procfs",
+                   true, procfs_vfs_ops(), 0U);
 }
 
 void vfs_init(void)

@@ -65,6 +65,7 @@ C_SRCS   = kernel/main.c \
            kernel/ksem.c \
            kernel/kmon.c \
            kernel/cap.c \
+           kernel/procfs.c \
            kernel/vfs.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \

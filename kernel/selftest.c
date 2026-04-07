@@ -10,6 +10,7 @@
 #include "selftest.h"
 #include "blk.h"
 #include "blk_ipc.h"
+#include "procfs.h"
 #include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
@@ -1256,6 +1257,58 @@ static int selftest_case_ipc_sync(void)
     return 0;
 }
 
+static int selftest_case_procfs(void)
+{
+    static const char case_name[] = "procfs-core";
+    static char       rbuf[512];
+    vfs_file_t        file;
+    stat_t            st;
+    ssize_t           n;
+    int               rc;
+
+    /* 1. /proc/ directory deve essere accessibile */
+    rc = vfs_open("/proc", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /proc fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFDIR, "/proc non e' una directory");
+    (void)vfs_close(&file);
+
+    /* 2. /proc/sched deve contenere "jiffies:" */
+    rc = vfs_open("/proc/sched", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/sched fallita");
+    n = vfs_read(&file, rbuf, sizeof(rbuf) - 1U);
+    ST_CHECK(case_name, n > 0, "/proc/sched lettura vuota");
+    rbuf[n] = '\0';
+    ST_CHECK(case_name, st_contains(rbuf, "jiffies:"), "/proc/sched senza 'jiffies:'");
+    ST_CHECK(case_name, st_contains(rbuf, "tasks:"),   "/proc/sched senza 'tasks:'");
+    (void)vfs_close(&file);
+
+    /* 3. /proc/0/status deve contenere "Name:" e "Pid:" */
+    rc = vfs_open("/proc/0/status", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/0/status fallita");
+    n = vfs_read(&file, rbuf, sizeof(rbuf) - 1U);
+    ST_CHECK(case_name, n > 0, "/proc/0/status lettura vuota");
+    rbuf[n] = '\0';
+    ST_CHECK(case_name, st_contains(rbuf, "Name:"),    "/proc/0/status senza 'Name:'");
+    ST_CHECK(case_name, st_contains(rbuf, "Pid:"),     "/proc/0/status senza 'Pid:'");
+    ST_CHECK(case_name, st_contains(rbuf, "Priority:"),"/proc/0/status senza 'Priority:'");
+    (void)vfs_close(&file);
+
+    /* 4. /proc/9999 deve ritornare ENOENT */
+    rc = vfs_open("/proc/9999", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == -ENOENT, "/proc/9999 non ritorna ENOENT");
+
+    /* 5. Scrittura su /proc/sched deve ritornare EROFS */
+    rc = vfs_open("/proc/sched", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/sched (per write test) fallita");
+    n = vfs_write(&file, "x", 1U);
+    ST_CHECK(case_name, n == -EROFS, "write su /proc/sched non ritorna EROFS");
+    (void)vfs_close(&file);
+
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1277,6 +1330,7 @@ static const selftest_case_t selftest_cases[] = {
     { "ipc-sync",    selftest_case_ipc_sync  },
     { "kdebug-core", kdebug_selftest_run     },
     { "gpu-stack",   gpu_selftest_run        },
+    { "procfs-core", selftest_case_procfs    },
 };
 
 int selftest_run_named(const char *name)

@@ -12,7 +12,7 @@
 #include "syscall.h"
 #include "types.h"
 
-#define VFS_MAX_MOUNTS   8U
+#define VFS_MAX_MOUNTS   10U
 #define VFS_NAME_MAX     32U
 
 typedef struct {
