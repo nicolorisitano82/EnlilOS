@@ -30,6 +30,7 @@
 #include "term80.h"
 #include "vfs.h"
 #include "cap.h"
+#include "vmm.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -1836,6 +1837,9 @@ void kernel_main(void)
     /* === Capability System (M9-01) === */
     cap_init();
     uart_puts("[CAP] Capability system inizializzato\n");
+
+    /* === Virtual Memory Area manager (M8-02) === */
+    vmm_init();
 
     /* === Fase 8: Microkernel === */
     mk_init();

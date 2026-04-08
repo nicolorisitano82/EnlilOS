@@ -29,9 +29,10 @@
  * è schedulato per la prima volta (x30 = task_entry_trampoline nel frame).
  *
  * Operazioni:
- *   1. Abilita IRQ (msr daifclr, #2) — erano disabilitati durante il switch
- *   2. Delega a sched_task_bootstrap(x19) che decide se entrare in un task
- *      kernel oppure salta a EL0 per il primo task user-space.
+ *   1. Delega a sched_task_bootstrap(x19) che decide se entrare in un task
+ *      kernel oppure saltare a EL0 per il primo task user-space.
+ *   2. sched_task_bootstrap abilita gli IRQ solo per il path kernel-task.
+ *      I task user-space arrivano a EL0 via ERET con SPSR_EL1 già corretto.
  *   3. Se il bootstrap ritorna → loop infinito sicuro (non dovrebbe)
  */
 
@@ -77,10 +78,6 @@ sched_context_switch:
 .global task_entry_trampoline
 .type   task_entry_trampoline, %function
 task_entry_trampoline:
-    /* Abilita IRQ: durante il context switch erano disabilitati.
-     * Da questo momento il task gira con IRQ abilitati. */
-    msr     daifclr, #2
-
     /* x19 = entry function kernel oppure 0 per task user-space.
      * Il bootstrap legge current_task e decide il percorso corretto. */
     mov     x0, x19

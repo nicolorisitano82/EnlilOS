@@ -11,6 +11,7 @@
 #include "blk.h"
 #include "blk_ipc.h"
 #include "procfs.h"
+#include "vmm.h"
 #include "elf_loader.h"
 #include "ext4.h"
 #include "gpu.h"
@@ -1309,6 +1310,90 @@ static int selftest_case_procfs(void)
     return 0;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * mmap-file (M8-02) — mmap() file-backed: MAP_PRIVATE + MAP_SHARED
+ *
+ * Dipende da ext4 (virtio-blk). Se il disco non è presente, skip.
+ *
+ * Flusso:
+ *   1. Crea /data/mmap_priv.dat con contenuto noto
+ *   2. Crea /data/mmap_shrd.dat con placeholder
+ *   3. Spawna MMAPDEMO.ELF (EL0) che fa mmap MAP_PRIVATE + MAP_SHARED + msync
+ *   4. Verifica exit code 0
+ *   5. Rilegge /data/mmap_shrd.dat e controlla che il contenuto sia aggiornato
+ * ═══════════════════════════════════════════════════════════════════ */
+static int selftest_case_mmap_file(void)
+{
+    static const char case_name[] = "mmap-file";
+    static const char priv_content[] = "MMAP_PRIVATE_OK";
+    static const char shrd_init[]    = "INITIAL_CONTENT_";
+    static const char shrd_expect[]  = "MMAP_SHARED_OK!";
+    static char       rbuf[32];
+
+    vfs_file_t  file;
+    stat_t      st;
+    ssize_t     n;
+    int         rc;
+    uint32_t    pid = 0U;
+    sched_tcb_t *task;
+
+    /* Skip se ext4 non è montato */
+    if (!blk_is_ready() || !ext4_is_mounted())
+        return 0;
+
+    /* 1. Crea /data/mmap_priv.dat */
+    rc = vfs_open("/data/mmap_priv.dat", O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open /data/mmap_priv.dat per scrittura");
+    n = vfs_write(&file, priv_content, st_strlen(priv_content));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(priv_content),
+             "write mmap_priv.dat");
+    (void)vfs_close(&file);
+
+    /* 2. Crea /data/mmap_shrd.dat — contenuto placeholder */
+    rc = vfs_open("/data/mmap_shrd.dat", O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open /data/mmap_shrd.dat per scrittura");
+    n = vfs_write(&file, shrd_init, st_strlen(shrd_init));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(shrd_init),
+             "write mmap_shrd.dat (init)");
+    (void)vfs_close(&file);
+
+    /* Flush sul disco prima di passare il file al task EL0 */
+    (void)vfs_sync();
+
+    /* 3. Spawna MMAPDEMO.ELF e attendi */
+    if (st_spawn_user_task(case_name, "/MMAPDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 3000ULL);
+    ST_CHECK(case_name, task != NULL, "task MMAPDEMO.ELF non trovato");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa MMAPDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "MMAPDEMO exit code non e' 0");
+
+    /* 4. Verifica che mmap_shrd.dat sia stato aggiornato via msync */
+    rc = vfs_open("/data/mmap_shrd.dat", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open mmap_shrd.dat per rilettura");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat mmap_shrd.dat");
+    ST_CHECK(case_name, st.st_size >= (uint64_t)st_strlen(shrd_expect),
+             "mmap_shrd.dat troppo piccolo dopo msync");
+
+    n = vfs_read(&file, rbuf, (uint32_t)st_strlen(shrd_expect));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(shrd_expect),
+             "read mmap_shrd.dat corta");
+    rbuf[n] = '\0';
+    ST_CHECK(case_name, st_contains(rbuf, shrd_expect),
+             "contenuto mmap_shrd.dat non aggiornato dopo msync");
+    (void)vfs_close(&file);
+
+    /* 5. Verifica struttura VMM — lookup e cleanup */
+    ST_CHECK(case_name, vmm_find(pid, 0UL) == NULL,
+             "vmm_find su pid zombie ritorna non-NULL");
+
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1331,6 +1416,7 @@ static const selftest_case_t selftest_cases[] = {
     { "kdebug-core", kdebug_selftest_run     },
     { "gpu-stack",   gpu_selftest_run        },
     { "procfs-core", selftest_case_procfs    },
+    { "mmap-file",   selftest_case_mmap_file },
 };
 
 int selftest_run_named(const char *name)

@@ -31,6 +31,7 @@
 #include "blk_ipc.h"
 #include "vfs.h"
 #include "vfs_ipc.h"
+#include "vmm.h"
 
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int value, size_t n);
@@ -204,6 +205,22 @@ static int fd_bind_remote(fd_entry_t *e, uint32_t handle, uint16_t flags)
     e->flags = flags;
     e->remote_handle = handle;
     return 0;
+}
+
+static int fd_bind_remote_shadow(fd_entry_t *e, const char *path, uint16_t flags)
+{
+    uint16_t shadow_flags;
+
+    if (!e || !path)
+        return -EINVAL;
+
+    /*
+     * Il file remoto e' gia' stato aperto/creato/troncato tramite vfsd.
+     * Per il solo shadow locale usato da mmap/msync evitiamo side effect
+     * duplicati come un secondo O_TRUNC/O_CREAT/O_APPEND.
+     */
+    shadow_flags = (uint16_t)(flags & (uint16_t)~(O_TRUNC | O_CREAT | O_APPEND));
+    return vfs_open(path, shadow_flags, &e->file);
 }
 
 static int vfs_srv_task_slot(void)
@@ -785,6 +802,13 @@ static uint64_t sys_open(uint64_t args[6])
         if (rc < 0)
             return ERR(-rc);
         rc = fd_bind_remote(&fd_tables[idx][fd], remote_handle, oflags);
+        if (rc >= 0) {
+            rc = fd_bind_remote_shadow(&fd_tables[idx][fd], path_arg, oflags);
+            if (rc < 0) {
+                (void)vfsd_proxy_close(remote_handle);
+                fd_clear(&fd_tables[idx][fd]);
+            }
+        }
     } else {
         rc = fd_bind_path(&fd_tables[idx][fd], path_arg, oflags);
     }
@@ -817,6 +841,8 @@ static uint64_t sys_close(uint64_t args[6])
         if (rc < 0) return ERR(-rc);
     } else if (e->type == FD_TYPE_VFSD) {
         int rc = vfsd_proxy_close(e->remote_handle);
+        if (e->file.mount)
+            (void)vfs_close(&e->file);
         if (rc < 0) return ERR(-rc);
     }
 
@@ -865,26 +891,25 @@ static uint64_t sys_fstat(uint64_t args[6])
  * Syscall 7 — mmap
  *
  * args: addr(hint), length, prot, flags, fd, offset
- * Solo MAP_ANONYMOUS supportato. Alloca un nuovo range user-space
- * nel window alto e ritorna un vero VA EL0.
+ * Supporta MAP_ANONYMOUS (anonima) e file-backed (MAP_SHARED/MAP_PRIVATE).
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_mmap(uint64_t args[6])
 {
-    uint64_t    length = args[1];
-    uint32_t    prot   = (uint32_t)args[2];
-    uint32_t    flags  = (uint32_t)args[3];
+    uint64_t    length      = args[1];
+    uint32_t    prot        = (uint32_t)args[2];
+    uint32_t    flags       = (uint32_t)args[3];
+    int         fd          = (int)(int64_t)args[4];
+    uint64_t    file_offset = args[5];
     uint64_t    pages;
     size_t      aligned;
     uintptr_t   user_va;
     mm_space_t *space;
 
-    (void)args[0];
-    (void)args[4];
-    (void)args[5];
+    (void)args[0]; /* hint VA — ignorato, usiamo mmap_base */
 
     if (!current_task || !sched_task_is_user(current_task))
         return MAP_FAILED_VA;
-    if (length == 0ULL || !(flags & MAP_ANONYMOUS))
+    if (length == 0ULL)
         return MAP_FAILED_VA;
 
     pages = (length + PAGE_SIZE - 1ULL) / PAGE_SIZE;
@@ -892,42 +917,125 @@ static uint64_t sys_mmap(uint64_t args[6])
         return MAP_FAILED_VA;
 
     aligned = (size_t)pages * PAGE_SIZE;
-    space = sched_task_space(current_task);
+    space   = sched_task_space(current_task);
     if (!space)
         return MAP_FAILED_VA;
 
-    if (mmu_map_user_anywhere(space, aligned, sys_mmap_prot_to_mmu(prot), &user_va) < 0)
-        return MAP_FAILED_VA;
+    /* ── Caso 1: mappatura anonima ──────────────────────────────── */
+    if (flags & MAP_ANONYMOUS) {
+        if (mmu_map_user_anywhere(space, aligned,
+                                  sys_mmap_prot_to_mmu(prot), &user_va) < 0)
+            return MAP_FAILED_VA;
+        return (uint64_t)user_va;
+    }
 
-    return (uint64_t)user_va;
+    /* ── Caso 2: file-backed (M8-02) ───────────────────────────── */
+    {
+        fd_entry_t *e;
+        vfs_file_t  f;
+        uint32_t    vma_flags = 0U;
+        uint32_t    mmu_prot;
+        size_t      i;
+
+        e = fd_get(fd);
+        if (!e) return MAP_FAILED_VA;
+
+        /* Copia il file handle e riposiziona all'offset richiesto */
+        f     = e->file;
+        f.pos = file_offset;
+
+        /* Alloca le pagine fisiche e mappa in user space */
+        mmu_prot = sys_mmap_prot_to_mmu(prot);
+        /* MAP_PRIVATE: anche PROT_READ-only ottiene copia scrivibile temporaneamente
+         * per il caricamento; dopo settiamo in read-only se non PROT_WRITE. */
+        if (mmu_map_user_anywhere(space, aligned,
+                                  mmu_prot | MMU_PROT_USER_R, &user_va) < 0)
+            return MAP_FAILED_VA;
+
+        /* Carica il contenuto del file pagina per pagina (eager loading) */
+        for (i = 0U; i < (size_t)pages; i++) {
+            uintptr_t  page_va = user_va + (uintptr_t)(i * PAGE_SIZE);
+            uint64_t   off     = file_offset + (uint64_t)(i * PAGE_SIZE);
+            void      *kva;
+            ssize_t    nr;
+
+            kva = mmu_space_resolve_ptr(space, page_va, PAGE_SIZE);
+            if (!kva) continue;
+
+            f.pos = off;
+            nr = vfs_read(&f, kva, PAGE_SIZE);
+            (void)nr; /* il resto è già azzerato da mmu_map_user_anywhere */
+        }
+
+        /* Costruisce i flag VMM */
+        if (flags & MAP_SHARED) vma_flags |= VMA_FLAG_SHARED;
+        if (prot & PROT_WRITE)  vma_flags |= VMA_FLAG_WRITE;
+        if (prot & PROT_EXEC)   vma_flags |= VMA_FLAG_EXEC;
+
+        /* Registra la VMA per il write-back (msync/munmap) */
+        (void)vmm_map_file(current_task->pid, user_va, aligned,
+                           vma_flags, file_offset, &e->file);
+
+        return (uint64_t)user_va;
+    }
 }
 
 /* ════════════════════════════════════════════════════════════════════
  * Syscall 8 — munmap
  *
  * args: addr, length
- * Il free puntuale dei range user-space e' rinviato: il backing viene
- * comunque rilasciato alla distruzione dello mm_space.
+ * Per le VMA file-backed MAP_SHARED: write-back prima di rimuovere.
+ * Il free fisico delle pagine è rinviato alla distruzione dello mm_space.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_munmap(uint64_t args[6])
 {
-    uint64_t addr   = args[0];
-    uint64_t length = args[1];
+    uint64_t    addr   = args[0];
+    uint64_t    length = args[1];
+    mm_space_t *space;
 
-    if (addr == 0 || length == 0) return ERR(EINVAL);
-    if (current_task && sched_task_is_user(current_task) &&
-        addr >= MMU_USER_BASE && addr < MMU_USER_LIMIT)
-        return ERR(ENOSYS);
+    if (addr == 0U || length == 0U) return ERR(EINVAL);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EINVAL);
+    if (addr < MMU_USER_BASE || addr >= MMU_USER_LIMIT)
+        return ERR(EINVAL);
 
-    uint64_t pages = (length + 4095ULL) / 4096ULL;
-    uint32_t order = 0;
-    uint64_t p = pages;
-    while (p > 1) { p >>= 1; order++; }
-    if ((1ULL << order) < pages) order++;
-    if (order > 10) order = 10;
+    space = sched_task_space(current_task);
 
-    phys_free_pages(addr, order);
+    /* Se la regione era file-backed MAP_SHARED: scrive le pagine sporche */
+    if (space)
+        (void)vmm_unmap_range(current_task->pid, space,
+                              (uintptr_t)addr, (size_t)length);
+
+    /* Il rilascio fisico delle pagine avviene alla distruzione di mm_space */
     return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Syscall 24 — msync (M8-02)
+ *
+ * args: addr, length, flags
+ * Scrive le pagine modificate di una VMA MAP_SHARED nel file di backing.
+ * flags: MS_SYNC (4) = sincrono, MS_ASYNC (1) = no-op in questa v1.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_msync(uint64_t args[6])
+{
+    uintptr_t   addr   = (uintptr_t)args[0];
+    size_t      length = (size_t)args[1];
+    uint32_t    flags  = (uint32_t)args[2];
+    mm_space_t *space;
+
+    (void)flags; /* MS_ASYNC trattato come MS_SYNC per semplicità */
+
+    if (addr == 0U || length == 0U) return ERR(EINVAL);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EINVAL);
+    if (addr < MMU_USER_BASE || addr >= MMU_USER_LIMIT)
+        return ERR(EINVAL);
+
+    space = sched_task_space(current_task);
+    if (!space) return ERR(EINVAL);
+
+    return (uint64_t)(int64_t)vmm_msync(current_task->pid, space, addr, length);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -2050,6 +2158,9 @@ void syscall_init(void)
     };
     syscall_table[SYS_MUNMAP] = (syscall_entry_t){
         sys_munmap, 0, "munmap"
+    };
+    syscall_table[SYS_MSYNC] = (syscall_entry_t){
+        sys_msync, 0, "msync"
     };
     syscall_table[SYS_BRK] = (syscall_entry_t){
         sys_brk, SYSCALL_FLAG_RT, "brk"

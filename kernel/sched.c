@@ -18,6 +18,7 @@
 #include "timer.h"
 #include "pmm.h"
 #include "uart.h"
+#include "vmm.h"
 
 extern void *memset(void *dst, int value, size_t n);
 
@@ -230,6 +231,21 @@ static inline void irq_restore(uint64_t flags)
     __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
 }
 
+static __attribute__((noinline)) void sched_restore_irq_flags(uint64_t flags)
+{
+    irq_restore(flags);
+}
+
+static __attribute__((noinline)) void sched_return_irqs_masked(void)
+{
+    __asm__ volatile("" ::: "memory");
+}
+
+static uint64_t sched_alloc_kernel_stack(void)
+{
+    return phys_alloc_pages(TASK_STACK_ORDER);
+}
+
 /* ── Allocazione task dal pool ───────────────────────────────────── */
 
 static sched_tcb_t *task_alloc(void)
@@ -393,8 +409,8 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
         while (1) __asm__ volatile("wfe");
     }
 
-    /* Alloca stack da 4KB dal buddy allocator */
-    uint64_t stack_pa = phys_alloc_page();
+    /* Alloca uno stack kernel dedicato multi-pagina per i path syscall/IPC. */
+    uint64_t stack_pa = sched_alloc_kernel_stack();
     uint8_t *stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
 
     t->name      = name;
@@ -449,7 +465,7 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
         while (1) __asm__ volatile("wfe");
     }
 
-    stack_pa = phys_alloc_page();
+    stack_pa = sched_alloc_kernel_stack();
     stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
 
     t->name       = name;
@@ -473,7 +489,6 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
                         current_task->pid : 0U);
 
     task_setup_stack(t, stack_top, (sched_fn)0);
-
     {
         uint64_t flags = irq_save();
         rq_push(t);
@@ -509,7 +524,7 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
         while (1) __asm__ volatile("wfe");
     }
 
-    stack_pa = phys_alloc_page();
+    stack_pa = sched_alloc_kernel_stack();
     stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
 
     t->name       = name;
@@ -533,7 +548,6 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     ctx->start_frame.x[0]  = 0ULL;
 
     task_setup_stack(t, stack_top, (sched_fn)0);
-
     {
         uint64_t flags = irq_save();
         rq_push(t);
@@ -555,8 +569,10 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     return t;
 }
 
-static void schedule_locked(uint64_t flags)
+static __attribute__((noinline))
+void schedule_locked(uint64_t flags, int reenable_irqs_after_switch)
 {
+    volatile uint64_t saved_flags = flags;
     sched_tcb_t *prev = current_task;
     sched_tcb_t *next = NULL;
 
@@ -564,7 +580,7 @@ static void schedule_locked(uint64_t flags)
         int next_prio = bitmap_find_first();
 
         if (next_prio < 0 || next_prio > 255) {
-            irq_restore(flags);
+            sched_restore_irq_flags(saved_flags);
             return;
         }
 
@@ -594,27 +610,35 @@ static void schedule_locked(uint64_t flags)
     mmu_activate_space(sched_task_space(next));
 
     /*
-     * IRQ rimangono DISABILITATI durante sched_context_switch per evitare che
-     * un timer IRQ scatti tra irq_restore e sched_context_switch, causando una
-     * chiamata rientrante a schedule() che corrompe next->sp (PC=0, x30=0).
+     * Gli IRQ restano disabilitati durante sched_context_switch per evitare
+     * preemption rientranti tra il salvataggio di prev e il ripristino di next.
      *
-     * Dopo sched_context_switch si abilita INCONDIZIONATAMENTE l'IRQ (daifclr).
-     *
-     * Non si usa irq_restore(flags) perché il task ripreso potrebbe avere
-     * flags=I=1 (era bloccato dentro un syscall handler dove gli IRQ erano già
-     * disabilitati dall'HW all'ingresso dell'eccezione). Ripristinare I=1
-     * causerebbe l'esecuzione del task con gli IRQ mascherati → timer_now_ms()
-     * non avanza → busy-wait senza timeout → hang.
-     *
-     * Per i task al primo avvio: sched_context_switch fa `ret` a
-     * task_entry_trampoline che abilita gli IRQ lui stesso; questa riga
-     * non viene mai raggiunta per quei task.
-     * Per i task vettored da vectors.S: dopo che schedule() ritorna, vectors.S
-     * esegue `eret` che ripristina SPSR_EL1 (con I=0 dell'esecuzione normale),
-     * quindi gli IRQ vengono comunque riabilitati dall'eret.
+     * Dopo il context switch distinguiamo due casi:
+     *   - schedule()/yield/block da codice kernel normale:
+     *       riabilitiamo qui gli IRQ prima di tornare al caller.
+     *   - schedule() chiamata da vectors.S durante un'eccezione:
+     *       NON riabilitiamo qui gli IRQ, altrimenti un nuovo timer IRQ puo'
+     *       annidarsi mentre il frame eccezione e' ancora sullo stack.
+     *       In quel path gli IRQ torneranno attivi soltanto con l'ERET.
      */
     sched_context_switch(prev, next);
-    __asm__ volatile("msr daifclr, #2" ::: "memory"); /* abilita IRQ */
+    if (reenable_irqs_after_switch) {
+        /*
+         * Ripristina il DAIF originale del caller kernel-side.
+         * Non possiamo fidarci dei registri caller-saved dopo il
+         * context switch: quando questo task riprende piu' tardi,
+         * x0-x18 possono contenere valori arbitrari del task corrente.
+         */
+        sched_restore_irq_flags(saved_flags);
+    } else {
+        /*
+         * schedule_from_exception() deve tornare in vectors.S con
+         * gli IRQ ancora mascherati.  Saranno riabilitati solo dall'ERET
+         * tramite SPSR_EL1 del task interrotto, evitando IRQ annidati
+         * mentre il frame eccezione e' ancora sullo stack kernel.
+         */
+        sched_return_irqs_masked();
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -626,7 +650,13 @@ static void schedule_locked(uint64_t flags)
 void schedule(void)
 {
     uint64_t flags = irq_save();
-    schedule_locked(flags);
+    schedule_locked(flags, 1);
+}
+
+void schedule_from_exception(void)
+{
+    uint64_t flags = irq_save();
+    schedule_locked(flags, 0);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -637,7 +667,7 @@ void sched_yield(void)
     uint64_t flags = irq_save();
     if (current_task)
         current_task->ticks_left = 0;   /* forza re-insert in coda */
-    schedule_locked(flags);
+    schedule_locked(flags, 1);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -648,7 +678,7 @@ void sched_block(void)
     uint64_t flags = irq_save();
     if (current_task)
         current_task->state = TCB_STATE_BLOCKED;
-    schedule_locked(flags);
+    schedule_locked(flags, 1);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -856,6 +886,14 @@ void sched_task_bootstrap(uint64_t entry_reg)
     sched_task_ctx_t *ctx = ctx_of(current_task);
 
     if (ctx && ctx->resume_from_frame) {
+        /*
+         * Il fork child arriva qui alla sua prima schedulazione con gli IRQ
+         * ancora mascherati dal context switch.  Manteniamoli disabilitati
+         * fino alla sched_resume_user_frame(): la sequenza MSR→ERET deve essere
+         * atomica, altrimenti un timer IRQ puo' preemptare il bootstrap e farci
+         * riprendere il task con un frame EL1 incompleto (PC=0, x30=0).
+         */
+        __asm__ volatile("msr daifset, #2" ::: "memory");
         ctx->resume_from_frame = 0U;
         sched_resume_user_frame(&ctx->start_frame);
         while (1) __asm__ volatile("wfe");
@@ -868,6 +906,8 @@ void sched_task_bootstrap(uint64_t entry_reg)
     }
 
     if (entry_reg != 0ULL) {
+        /* I task kernel possono riprendere con IRQ attivi solo qui. */
+        __asm__ volatile("msr daifclr, #2" ::: "memory");
         ((sched_fn)(uintptr_t)entry_reg)();
     }
 
@@ -884,6 +924,7 @@ void sched_task_exit_with_code(int32_t code)
         kmon_task_cleanup(current_task);
         ksem_task_cleanup(current_task);
         mreact_task_cleanup(current_task);
+        vmm_cleanup_task(current_task->pid);
         signal_task_exit(current_task);
         current_task->state = TCB_STATE_ZOMBIE;
     }

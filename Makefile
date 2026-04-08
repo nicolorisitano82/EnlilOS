@@ -65,6 +65,7 @@ C_SRCS   = kernel/main.c \
            kernel/ksem.c \
            kernel/kmon.c \
            kernel/cap.c \
+           kernel/vmm.c \
            kernel/procfs.c \
            kernel/vfs.c \
            kernel/syscall.c \
@@ -83,7 +84,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/mmap_demo.c
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
@@ -200,6 +201,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		CAPDEMO.ELF=user/cap_demo.elf \
 		VFSD.ELF=user/vfsd.elf \
 		BLKD.ELF=user/blkd.elf \
+		MMAPDEMO.ELF=user/mmap_demo.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf

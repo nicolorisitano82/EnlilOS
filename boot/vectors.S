@@ -161,7 +161,7 @@ __exc_common:
     ldr     w1, [x0, :lo12:need_resched]
     cbz     w1, .Lno_resched
     str     wzr, [x0, :lo12:need_resched]
-    bl      schedule
+    bl      schedule_from_exception
 .Lno_resched:
 
     /* ── Ripristino ────────────────────────────────────────────────── */

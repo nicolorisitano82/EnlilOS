@@ -843,14 +843,28 @@ int mmu_handle_user_fault(mm_space_t *space, uintptr_t far, uint64_t esr)
 int mmu_prefault_space_range(mm_space_t *space, uintptr_t start, uintptr_t end)
 {
     mm_space_t *saved;
+    uint64_t    daif_flags;
 
     if (!space || !space->in_use || end < start)
         return -1;
 
+    /*
+     * Disable IRQs for the activate→prefault→restore sequence.
+     * A timer-driven context switch between mmu_activate_space(space) and
+     * mmu_activate_space(saved) would let schedule_locked re-activate the
+     * resuming task's mm_space, so when we continue mmu_prefault_range the
+     * TTBR0 points to the wrong address space → EL1 translation fault on
+     * user-space VAs.  Disabling IRQs here is safe: the function is called
+     * only at task-creation time (not in any RT hot path), and the window
+     * is bounded by the number of pages in [start, end].
+     */
+    __asm__ volatile("mrs %0, daif\n msr daifset, #2\n"
+                     : "=r"(daif_flags) :: "memory");
     saved = mmu_current_space();
     mmu_activate_space(space);
     mmu_prefault_range(start, end);
     mmu_activate_space(saved);
+    __asm__ volatile("msr daif, %0" :: "r"(daif_flags) : "memory");
     return 0;
 }
 

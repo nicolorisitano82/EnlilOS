@@ -43,6 +43,7 @@
 #define SYS_SIGPROCMASK     18
 #define SYS_SIGRETURN       19
 #define SYS_YIELD           20
+#define SYS_MSYNC           24  /* mmap file-backed write-back (M8-02) */
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -149,6 +150,11 @@
 
 /* Valore di errore per mmap (equivalente a (void*)-1) */
 #define MAP_FAILED_VA   ((uint64_t)(uintptr_t)(-1LL))
+
+/* Flags msync */
+#define MS_ASYNC        1
+#define MS_SYNC         4
+#define MS_INVALIDATE   2
 
 /* ── Clock IDs per clock_gettime() ─────────────────────────────────── */
 

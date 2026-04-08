@@ -49,7 +49,8 @@
 
 #define SCHED_MAX_TASKS     32          /* pool statico di TCB           */
 #define SCHED_TICK_QUANTUM  10          /* ms di time slice per task     */
-#define TASK_STACK_SIZE     4096        /* 1 pagina per stack kernel task */
+#define TASK_STACK_ORDER    2           /* 16 KiB stack kernel per task  */
+#define TASK_STACK_SIZE     (4096U << TASK_STACK_ORDER)
 
 /* ── Stati del TCB ──────────────────────────────────────────────── */
 #define TCB_STATE_RUNNING   0
@@ -156,6 +157,7 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
  * schedule() — seleziona ed esegue il task con priorità massima. O(1).
  */
 void schedule(void);
+void schedule_from_exception(void);
 
 /*
  * sched_yield() — cede volontariamente la CPU. O(1).
