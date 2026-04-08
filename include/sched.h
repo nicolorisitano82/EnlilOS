@@ -201,6 +201,16 @@ int         sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
                                    uintptr_t argc, uintptr_t argv,
                                    uintptr_t envp, uintptr_t auxv);
 int         sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out);
+uint32_t    sched_task_parent_pid(const sched_tcb_t *t);
+uint32_t    sched_task_pgid(const sched_tcb_t *t);
+uint32_t    sched_task_sid(const sched_tcb_t *t);
+int         sched_task_has_session(uint32_t sid);
+int         sched_task_has_pgrp(uint32_t sid, uint32_t pgid);
+int         sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target,
+                               uint32_t pgid);
+int         sched_task_setsid(sched_tcb_t *task, uint32_t *out_sid);
+sched_tcb_t *sched_task_at(uint32_t index);
+uint32_t    sched_task_count_total(void);
 
 /* Helper del trampoline assembly */
 void sched_task_bootstrap(uint64_t entry_reg);

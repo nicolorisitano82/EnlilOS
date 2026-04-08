@@ -1131,7 +1131,7 @@ static void bootcli_render(void)
                       "Comandi: help clear pwd cd gpu selftest [nome] fs ls cat write",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 112U,
-                      "append mkdir truncate rm mv fsync sync nsh mreactdemo mouse",
+                      "append mkdir truncate rm mv fsync sync nsh mreactdemo jobdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1247,6 +1247,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("forkdemo  lancia un ELF che verifica fork() + COW");
         bootcli_push_line("sigdemo   lancia un ELF che verifica signal + SIGCHLD");
         bootcli_push_line("mreactdemo lancia un ELF che attende su una word reattiva");
+        bootcli_push_line("jobdemo   lancia un ELF che verifica groups/sessioni/job control");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
@@ -1467,6 +1468,16 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "jobdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/JOBDEMO.ELF", "/JOBDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "job control demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_startswith(bootcli_input, "runelf ")) {
         char resolved[BOOTCLI_PATH_MAX + 1];
         uint32_t pid = 0U;
@@ -1652,6 +1663,7 @@ static void bootcli_init(void)
     bootcli_push_line("Prova anche: pwd, cd /data, ls, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
+    bootcli_push_line("M8-04: prova 'jobdemo' per process group, sessione e waitpid(WUNTRACED).");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
     bootcli_push_line("M7-02: usa 'nsh' per aprire la shell ELF statica 80x25.");

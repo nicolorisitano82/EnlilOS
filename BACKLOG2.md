@@ -1,5 +1,5 @@
 # EnlilOS — Backlog 2: Userspace, Network, SMP
-## Da implementare dopo il completamento di BACKLOG.md (M1–M7)
+## Roadmap estesa dopo `BACKLOG.md` (con piu' milestone gia' implementate)
 
 ---
 
@@ -12,9 +12,9 @@ Questo backlog assume completate tutte le milestone di `BACKLOG.md`:
 | M1-M2 | Kernel foundation + interrupt RT + scheduler FPP |
 | M3 | Syscall dispatcher + base + GPU + ANE |
 | M4 | Tastiera + mouse + terminal + UTF-8 |
-| M5 | VirtIO-blk + VFS + ext4 r/o + initrd |
+| M5 | VirtIO-blk + VFS + ext4 rw-full + initrd + recovery |
 | M5b | GPU driver + display engine + 2D rendering |
-| M6 | ELF loader statico + execve |
+| M6 | ELF loader statico/dinamico + execve |
 | M7 | IPC sincrono RT + shell `nsh` (bootstrap minimale, sostituita da arksh in M8-08) |
 
 ---
@@ -69,20 +69,40 @@ typedef struct mm_space {
 
 ---
 
-### ⬜ M8-02 · mmap() File-Backed
+### ✅ M8-02 · mmap() File-Backed
 **Priorità:** ALTA
 
-- `MAP_SHARED` / `MAP_PRIVATE` su file descriptor VFS
-- Page fault handler: legge blocco da VFS server via IPC, mappa pagina, ritorna
-- `MAP_PRIVATE` + COW: write → copia privata della pagina (non scritto su disco)
-- `msync(MS_SYNC)` per flush esplicito (da server, non da task RT)
-- `munmap()` scrive dirty pages al VFS server prima di liberare (solo se `MAP_SHARED`)
-- Limite: mai chiamato da task hard-RT; solo da loader e task generali
+**Stato attuale:** implementata v1 con VMA statiche kernel-side, syscall
+`mmap/munmap/msync`, supporto `MAP_SHARED` / `MAP_PRIVATE`, demo `/MMAPDEMO.ELF`
+e selftest `mmap-file` validato nel run completo `SUMMARY total=23 pass=23 fail=0`.
 
-**Integrazione con VFS:**
-- VFS server espone IPC call `vfs_read_page(ino, offset) → phys_page_t`
-- Il kernel crea la mappatura MMU e registra la coppia `(vaddr, ino, offset)` nella vm_area list
-- `vm_area_t`: vaddr, size, flags, backing (ino + offset) — lista collegata per processo
+- `MAP_SHARED` / `MAP_PRIVATE` supportati su file descriptor VFS
+- `MAP_ANONYMOUS` resta disponibile come base per heap e shared memory user-space
+- `sys_mmap()` carica il contenuto file nelle pagine user e registra una `vm_area_t`
+  per task in un pool statico bounded
+- `MAP_PRIVATE` mantiene le modifiche locali al processo
+- `MAP_SHARED` usa write-back esplicito su `msync()` e implicito su `munmap()`
+- supporto operativo anche con fd remoti dietro `vfsd`, tramite shadow handle VFS
+  locale usato dal kernel per `msync()` / `munmap()`
+- separazione chiara tra `mmu.c` e `vmm.c`: mapping fisico/MMU da un lato, metadata
+  VMA file-backed dall'altro
+
+**Limiti v1 dichiarati:**
+- mapping eager al `mmap()`, non ancora demand paging lazy guidato da page fault
+- write-back a pagina intera su `msync()` / `munmap()`
+- non RT-safe: resta pensato per loader, libc, task general-purpose e server
+
+**Struttura file attuale:**
+```
+include/vmm.h         — metadata VMA file-backed
+kernel/vmm.c          — pool statico VMA + msync/munmap write-back
+kernel/syscall.c      — syscall mmap/munmap/msync
+kernel/selftest.c     — selftest end-to-end `mmap-file`
+user/mmap_demo.c      — demo EL0 `MAP_PRIVATE` + `MAP_SHARED`
+```
+
+**Dipende da:** M8-01 (MMU/COW stabile), M9-02 (fd remoti via `vfsd`)
+**Sblocca:** tooling user-space piu' ricco, file I/O memory-mapped, porting libc futuro
 
 ---
 
@@ -125,14 +145,28 @@ sigaction_t signal_table[64];    /* handler per i 64 segnali standard */
 
 ---
 
-### ⬜ M8-04 · Process Groups, Sessions, Job Control
+### ✅ M8-04 · Process Groups, Sessions, Job Control
 **Priorità:** MEDIA (richiesta da shell interattiva con `CTRL+Z`, `bg`, `fg`)
+
+**Stato attuale:** implementata v1 con `pgid/sid` per-task, syscall EL0
+`setpgid/getpgid/setsid/getsid/tcsetpgrp/tcgetpgrp`, `waitpid(WUNTRACED)`,
+job-control signal path completo e demo `/JOBDEMO.ELF` validato dal selftest
+`jobctl-core` nel run completo `SUMMARY total=23 pass=23 fail=0`.
 
 - `setpgid()`, `getpgid()`, `setsid()`, `getsid()`
 - `tcsetpgrp()` / `tcgetpgrp()` per controllo terminale (console)
 - Segnali di job control: `SIGTSTP`, `SIGCONT`, `SIGTTIN`, `SIGTTOU`
 - `waitpid(WUNTRACED)` per rilevare task stoppati
-- Campo `pgid` e `sid` in `sched_tcb_t`
+- Campi `pgid`, `sid` e `parent_pid` mantenuti nel contesto scheduler
+- `CTRL+C` e `CTRL+Z` inviati al foreground process group invece che al singolo task
+- `tty_read()` blocca i background job con `SIGTTIN`, `write()` su console con `SIGTTOU`
+- la TTY di controllo viene adottata da sessioni interattive (`read` / `tcsetpgrp`)
+  e non piu' da qualsiasi server che scrive su `stdout`
+
+**Note v1 / limiti dichiarati:**
+- `nsh` non espone ancora built-in `fg` / `bg`
+- non esiste ancora distinzione completa tra controlling TTY multipli: il modello
+  attuale copre una console globale coerente con il target QEMU di bootstrap
 
 ---
 
@@ -1410,15 +1444,15 @@ Per binari glibc: musl implementa una compatibilità sufficiente per la maggior 
 
 #### M11-05e · Linux Filesystem Environment
 
-I binari Linux si aspettano certi path e file nel filesystem. Il server `procfsd`
-(M14-01) viene esteso per fornirli:
+I binari Linux si aspettano certi path e file nel filesystem. Il layer `procfs/sysfs`
+di M14-01 viene esteso per fornirli:
 
 **`/proc` — richiesto da glibc e molti tool:**
 ```
 /proc/self/exe          → symlink all'ELF del processo corrente
-/proc/self/maps         → mappa di memoria (già M14-01)
-/proc/self/fd/          → file descriptor aperti (già M14-01)
-/proc/self/status       → già M14-01
+/proc/self/maps         → mappa di memoria (estensione M14-01)
+/proc/self/fd/          → file descriptor aperti (estensione M14-01)
+/proc/self/status       → già nel procfs core M14-01
 /proc/self/cmdline      → argv[0] + '\0' + argv[1] + '\0' + ...
 /proc/self/environ      → variabili d'ambiente concatenate
 /proc/cpuinfo           → "processor : 0\nBogoMIPS : 62.50\nFeatures : fp asimd..."
@@ -1521,7 +1555,7 @@ dei binari.
 **Struttura file:**
 ```
 compat/linux/
-    linux_fs.c          — /proc, /etc, /dev entries (serve procfsd M14-01)
+    linux_fs.c          — /proc, /etc, /dev entries (serve estendere M14-01)
     linux_sysv_ipc.c    — shmget/shmat/shmctl + semget/semop/semctl
     linux_epoll.c       — epoll_create/ctl/wait
     linux_pty.c         — pseudo-terminal
@@ -1532,7 +1566,7 @@ include/linux_compat.h  — flag, strutture (epoll_event, dirent64, ipc_perm, ..
 
 **Dipende da:** M6-01 (ELF loader), M11-01 (musl libc), M11-03 (dynamic linker),
 M8-08a (pipe/dup), M8-08b (getcwd/chdir), M8-06 (ksem per System V sem),
-M14-01 (procfsd per /proc entries)
+M14-01 (procfs/sysfs per `/proc` entries)
 **Sblocca:** esecuzione di binari Linux AArch64 glibc e musl senza ricompilazione —
 `bash`, `python3`, `git`, `curl`, `gcc`, GNU coreutils
 
@@ -1986,7 +2020,7 @@ Dominio NAS (soft-RT e aperiodici, best-effort):
 - Macro `WCET_BEGIN(label)` / `WCET_END(label)`: legge `PMCCNTR_EL0` (CPU cycle counter)
 - Tabella statica `wcet_table[MAX_LABELS]`: min, max, sum, count per ogni label
 - Syscall `wcet_query(label, wcet_stat_t *out)` per lettura da user-space
-- Export via `/proc/wcet` (servito da `procfs` server — vedi M14-01)
+- Export via `/proc/wcet` (estensione del `procfs` di M14-01)
 - Alert: se `max_cycles > WCET_THRESHOLD(label)` → log + contatore overflow
 - PMU (Performance Monitor Unit): abilita `PMCR_EL0`, conta cicli e istruzioni
 - Instrumentazione automatica opzionale: wrapper attorno alle syscall RT per misurare
@@ -1996,19 +2030,29 @@ Dominio NAS (soft-RT e aperiodici, best-effort):
 
 ## MILESTONE 14 — Utilities di Sistema
 
-### ⬜ M14-01 · procfs / sysfs
+### ✅ M14-01 · procfs / sysfs (procfs core v1)
 **Priorità:** MEDIA
 
 Filesystem virtuale per ispezione dello stato kernel da user-space.
 
-- `/proc/<pid>/status` — stato task: priorità, stato, runtime, deadline
-- `/proc/<pid>/maps` — mappa di memoria: indirizzi, permessi, backing
-- `/proc/<pid>/fd` — file descriptor aperti
-- `/proc/wcet` — statistiche WCET (M13-03)
-- `/proc/sched` — run queue per core, jiffies, context switch count
-- `/sys/bus/virtio/` — device virtio rilevati
-- `/sys/gpu/` — info GPU: vendor, VRAM, fence pending
-- Implementato come server `procfsd` che monta `/proc` e `/sys` nel `vfsd`
+**Stato attuale:** implementato `procfs` core read-only, montato su `/proc`,
+navigabile da shell e coperto dal selftest `procfs-core`. La parte `sysfs`
+e la futura migrazione a un server `procfsd` restano lavoro successivo.
+
+- `/proc/` — directory root
+- `/proc/sched` — snapshot scheduler con `jiffies` e task presenti
+- `/proc/<pid>/status` — stato task: nome, pid, priorita', runtime, stato
+- `/proc/self` e `/proc/self/status` — alias del task corrente
+- mount automatico in `vfs_init()`
+- backend read-only in-kernel con `vfs_ops_t` dedicato
+- selftest automatico `procfs-core` nel run completo `SUMMARY total=23 pass=23 fail=0`
+
+**Resta da completare:**
+- `/proc/<pid>/maps`
+- `/proc/<pid>/fd`
+- `/proc/wcet`
+- export `/sys/*`
+- eventuale migrazione verso `procfsd` / `sysfsd` user-space sopra `vfsd`
 
 ---
 
@@ -2599,7 +2643,7 @@ Senza questa fase tutto il kernel è un blob monolitico non sicuro.
 | 7 | **M9-01** Capability System | Gia' implementata v1 nel kernel; base di sicurezza pronta prima di muovere driver e VFS fuori dal kernel |
 | 8 | **M9-02** VFS Server (`vfsd`) | Migra il VFS kernel di M5-02 in user-space. Dipendenza critica di audio, USB, procfs |
 | 9 | **M9-03** Block Server (`blkd`) | Migra il driver virtio-blk. Dipende da M9-02 e M9-01 |
-| 10 | **M14-01** procfs / sysfs | Dipende da vfsd. Utile subito per ispezionare lo stato del sistema durante lo sviluppo |
+| 10 | **M14-01** procfs / sysfs | `procfs` core gia' implementato; resta da estendere `sysfs` e gli export avanzati |
 | 11 | **M9-04** Mount Dinamico + Namespace | Completa il VFS server. Richiesto da Linux compat più avanti |
 
 **Checkpoint FASE 2:** VFS e block device girano come processi separati, il filesystem
@@ -2633,7 +2677,7 @@ Python, server applicativi.
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
 | 19 | **M11-02** pthread + futex + sem_t | Dipende da M11-01 + M8-06 + M8-07. Sblocca ogni programma multi-thread |
-| 20 | **M8-02** mmap file-backed | Dipende da M8-01 + M9-02. Richiesto da dynamic linker e da eseguibili grandi |
+| 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
 | 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |
 
@@ -2784,7 +2828,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M8-07 kmon (race condition selftest corretta)
 - ✅ M9-01 capability system
 - ✅ M9-02 vfsd bootstrap v1
-- 🟡 M8-04 process groups (non critica per FASE 3)
+- ✅ M8-04 process groups / sessions / job control
 - ✅ M9-03 blkd
 - ⬜ M9-04 namespace
 - **Prossimo step:** FASE 3 — musl libc (M11-01) sblocca M8-08 arksh e tutto il porting POSIX

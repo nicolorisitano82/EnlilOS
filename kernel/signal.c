@@ -32,8 +32,9 @@ typedef struct {
     uint32_t    parent_pid;
     uint8_t     in_handler;
     uint8_t     stopped;
+    uint8_t     stop_reported;
+    uint8_t     stop_sig;
     uint8_t     active_sig;
-    uint8_t     _pad0;
     sigaction_t actions[ENLILOS_NSIG];
 } signal_state_t;
 
@@ -76,7 +77,7 @@ static int signal_default_ignore(int sig)
 
 static int signal_default_stop(int sig)
 {
-    return sig == SIGSTOP;
+    return sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU;
 }
 
 static int signal_default_terminate(int sig)
@@ -162,16 +163,47 @@ static int signal_pick_pending(signal_state_t *st)
     return 1 + __builtin_ctzll(ready);
 }
 
-static void signal_stop_current(signal_state_t *st)
+static int signal_has_deliverable_pending(const signal_state_t *st)
+{
+    uint64_t ready;
+
+    if (!st)
+        return 0;
+
+    ready = st->pending & ~(signal_strip_unmaskable(st->blocked));
+    ready |= st->pending & signal_unmaskable_bits();
+
+    while (ready != 0ULL) {
+        int sig = 1 + __builtin_ctzll(ready);
+        sigaction_t act = st->actions[sig - 1];
+
+        if (!(act.sa_handler == SIG_IGN ||
+              (act.sa_handler == SIG_DFL && signal_default_ignore(sig))))
+            return 1;
+        ready &= ~signal_bit(sig);
+    }
+
+    return 0;
+}
+
+static uint64_t signal_stop_bits(void)
+{
+    return signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+           signal_bit(SIGTTIN) | signal_bit(SIGTTOU);
+}
+
+static void signal_stop_current(signal_state_t *st, int sig)
 {
     if (!current_task || !st)
         return;
 
     st->stopped = 1U;
+    st->stop_reported = 0U;
+    st->stop_sig = (uint8_t)sig;
+    if (st->parent_pid != 0U)
+        (void)signal_send_pid(st->parent_pid, SIGCHLD);
     current_task->state = TCB_STATE_BLOCKED;
     schedule();
-    while (1)
-        __asm__ volatile("wfe");
 }
 
 static void signal_terminate_current(void)
@@ -269,6 +301,8 @@ void signal_task_fork(sched_tcb_t *child, const sched_tcb_t *parent)
     dst->pending     = 0ULL;
     dst->in_handler  = 0U;
     dst->stopped     = 0U;
+    dst->stop_reported = 0U;
+    dst->stop_sig  = 0U;
     dst->active_sig  = 0U;
     dst->parent_pid  = parent->pid;
 }
@@ -302,6 +336,8 @@ void signal_task_exit(sched_tcb_t *task)
     st->pending = 0ULL;
     st->in_handler = 0U;
     st->stopped = 0U;
+    st->stop_reported = 0U;
+    st->stop_sig = 0U;
     if (st->parent_pid != 0U)
         (void)signal_send_pid(st->parent_pid, SIGCHLD);
 }
@@ -324,10 +360,15 @@ int signal_send_pid(uint32_t pid, int sig)
 
     st = &signal_state[signal_slot_task(task)];
     if (sig == SIGCONT) {
-        st->pending &= ~signal_bit(SIGSTOP);
+        st->pending &= ~signal_stop_bits();
         st->stopped = 0U;
+        st->stop_reported = 0U;
+        st->stop_sig = 0U;
         if (task->state == TCB_STATE_BLOCKED)
             sched_unblock(task);
+        st->pending |= signal_bit(SIGCONT);
+        if (st->parent_pid != 0U)
+            (void)signal_send_pid(st->parent_pid, SIGCHLD);
         return 0;
     }
 
@@ -339,6 +380,29 @@ int signal_send_pid(uint32_t pid, int sig)
     return 0;
 }
 
+int signal_send_pgrp(uint32_t pgid, int sig)
+{
+    int delivered = 0;
+
+    if (pgid == 0U || !signal_valid(sig))
+        return -EINVAL;
+
+    for (uint32_t i = 0U; i < sched_task_count_total(); i++) {
+        sched_tcb_t *task = sched_task_at(i);
+
+        if (!task || !sched_task_is_user(task))
+            continue;
+        if (sched_task_pgid(task) != pgid)
+            continue;
+        if (task->state == TCB_STATE_ZOMBIE)
+            continue;
+        if (signal_send_pid(task->pid, sig) == 0)
+            delivered = 1;
+    }
+
+    return delivered ? 0 : -ESRCH;
+}
+
 int signal_has_unblocked_pending(const sched_tcb_t *task)
 {
     const signal_state_t *st;
@@ -347,7 +411,7 @@ int signal_has_unblocked_pending(const sched_tcb_t *task)
         return 0;
 
     st = &signal_state[signal_slot_task(task)];
-    return signal_pick_pending((signal_state_t *)st) != 0;
+    return signal_has_deliverable_pending(st);
 }
 
 int signal_deliver_pending(exception_frame_t *frame)
@@ -370,18 +434,19 @@ int signal_deliver_pending(exception_frame_t *frame)
 
         st->pending &= ~signal_bit(sig);
 
-        if (sig == SIGCONT) {
-            st->stopped = 0U;
-            continue;
-        }
-
         act = st->actions[sig - 1];
         if (act.sa_handler == SIG_IGN || (act.sa_handler == SIG_DFL && signal_default_ignore(sig)))
             continue;
 
         if (act.sa_handler == SIG_DFL) {
+            if (sig == SIGCONT) {
+                st->stopped = 0U;
+                st->stop_reported = 0U;
+                st->stop_sig = 0U;
+                continue;
+            }
             if (signal_default_stop(sig))
-                signal_stop_current(st);
+                signal_stop_current(st, sig);
             if (signal_default_terminate(sig))
                 signal_terminate_current();
             continue;
@@ -425,6 +490,33 @@ int signal_handle_user_exception(exception_frame_t *frame, uint32_t ec)
     (void)signal_send_pid(current_task->pid, sig);
     (void)signal_deliver_pending(frame);
     return 0;
+}
+
+int signal_task_is_stopped(const sched_tcb_t *task)
+{
+    const signal_state_t *st;
+
+    if (!task)
+        return 0;
+    st = &signal_state[signal_slot_task(task)];
+    return st->stopped ? 1 : 0;
+}
+
+int signal_task_consume_stop_report(const sched_tcb_t *task, int *sig_out)
+{
+    signal_state_t *st;
+
+    if (!task)
+        return 0;
+
+    st = &signal_state[signal_slot_task(task)];
+    if (!st->stopped || st->stop_reported)
+        return 0;
+
+    st->stop_reported = 1U;
+    if (sig_out)
+        *sig_out = st->stop_sig ? st->stop_sig : SIGSTOP;
+    return 1;
 }
 
 int signal_sigaction_current(int sig, const sigaction_t *act, sigaction_t *old)

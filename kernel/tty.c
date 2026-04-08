@@ -5,7 +5,7 @@
  *   - modalita' canonica: la read ritorna solo linee terminate da '\n'
  *   - echo su UART del testo digitato
  *   - backspace locale con editing della linea corrente
- *   - CTRL+C: invalida la linea corrente e genera SIGINT per il task foreground
+ *   - CTRL+C / CTRL+Z: invalida la linea corrente e genera segnali al foreground pgrp
  *   - le read canoniche tornano -EINTR se esistono segnali non mascherati
  */
 
@@ -22,6 +22,7 @@
 #define TTY_READY_MAX   512U
 
 #define TTY_CTRL_C      0x03
+#define TTY_CTRL_Z      0x1A
 #define TTY_BS          0x08
 #define TTY_DEL         0x7F
 
@@ -32,7 +33,8 @@ static uint8_t tty_ready_buf[TTY_READY_MAX];
 static uint16_t tty_ready_head;
 static uint16_t tty_ready_tail;
 
-static uint32_t tty_foreground_pid;
+static uint32_t tty_foreground_pgid;
+static uint32_t tty_session_sid;
 
 static inline int tty_ready_empty(void)
 {
@@ -82,9 +84,61 @@ static void tty_echo_backspace(void)
     uart_putc('\b');
 }
 
-static void tty_signal_foreground_sigint(void)
+static uint32_t tty_current_pgid(void)
 {
-    (void)signal_send_pid(tty_foreground_pid, SIGINT);
+    return current_task ? sched_task_pgid(current_task) : 0U;
+}
+
+static uint32_t tty_current_sid(void)
+{
+    return current_task ? sched_task_sid(current_task) : 0U;
+}
+
+static void tty_adopt_current_session(void)
+{
+    uint32_t sid = tty_current_sid();
+    uint32_t pgid = tty_current_pgid();
+
+    if (sid == 0U || pgid == 0U)
+        return;
+
+    if (tty_session_sid == 0U || !sched_task_has_session(tty_session_sid)) {
+        tty_session_sid = sid;
+        tty_foreground_pgid = pgid;
+        return;
+    }
+
+    if (tty_session_sid == sid &&
+        !sched_task_has_pgrp(tty_session_sid, tty_foreground_pgid))
+        tty_foreground_pgid = pgid;
+}
+
+static int tty_is_background_current(void)
+{
+    uint32_t sid = tty_current_sid();
+    uint32_t pgid = tty_current_pgid();
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+    if (tty_session_sid == 0U || sid == 0U)
+        return 0;
+    if (sid != tty_session_sid)
+        return 0;
+    return pgid != 0U && pgid != tty_foreground_pgid;
+}
+
+static void tty_signal_foreground(int sig)
+{
+    if (tty_foreground_pgid != 0U)
+        (void)signal_send_pgrp(tty_foreground_pgid, sig);
+}
+
+static void tty_signal_current_group(int sig)
+{
+    uint32_t pgid = tty_current_pgid();
+
+    if (pgid != 0U)
+        (void)signal_send_pgrp(pgid, sig);
 }
 
 static void tty_commit_line(void)
@@ -104,9 +158,18 @@ static void tty_handle_input_char(uint8_t c)
 
     if (c == TTY_CTRL_C) {
         tty_edit_len = 0U;
-        tty_signal_foreground_sigint();
+        tty_signal_foreground(SIGINT);
         uart_putc('^');
         uart_putc('C');
+        tty_echo_char('\n');
+        return;
+    }
+
+    if (c == TTY_CTRL_Z) {
+        tty_edit_len = 0U;
+        tty_signal_foreground(SIGTSTP);
+        uart_putc('^');
+        uart_putc('Z');
         tty_echo_char('\n');
         return;
     }
@@ -145,16 +208,21 @@ void tty_init(void)
     tty_edit_len = 0U;
     tty_ready_head = 0U;
     tty_ready_tail = 0U;
-    tty_foreground_pid = current_task ? current_task->pid : 0U;
+    tty_foreground_pgid = 0U;
+    tty_session_sid = 0U;
 
-    uart_puts("[TTY] Line discipline: echo + canonical + ^C pronto\n");
+    uart_puts("[TTY] Line discipline: echo + canonical + ^C/^Z pronto\n");
 }
 
 uint64_t tty_read(char *buf, uint64_t cnt)
 {
     if (!buf || cnt == 0U) return ERR(EFAULT);
 
-    tty_foreground_pid = current_task ? current_task->pid : tty_foreground_pid;
+    tty_adopt_current_session();
+    if (tty_is_background_current()) {
+        tty_signal_current_group(SIGTTIN);
+        return ERR(EINTR);
+    }
     tty_pump_input();
 
     if (signal_has_unblocked_pending(current_task))
@@ -175,4 +243,40 @@ uint64_t tty_read(char *buf, uint64_t cnt)
     }
 
     return got ? got : ERR(EAGAIN);
+}
+
+int tty_check_output_current(void)
+{
+    if (tty_is_background_current()) {
+        tty_signal_current_group(SIGTTOU);
+        return -EINTR;
+    }
+    return 0;
+}
+
+int tty_tcsetpgrp_current(uint32_t pgid)
+{
+    uint32_t sid;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EPERM;
+
+    sid = tty_current_sid();
+    if (sid == 0U || pgid == 0U)
+        return -EINVAL;
+    if (tty_session_sid == 0U || !sched_task_has_session(tty_session_sid))
+        tty_session_sid = sid;
+    if (sid != tty_session_sid)
+        return -EPERM;
+    if (!sched_task_has_pgrp(sid, pgid))
+        return -EPERM;
+
+    tty_foreground_pgid = pgid;
+    return 0;
+}
+
+uint32_t tty_tcgetpgrp(void)
+{
+    tty_adopt_current_session();
+    return tty_foreground_pgid;
 }

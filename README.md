@@ -15,9 +15,13 @@ Le milestone completate oggi coprono:
 - **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
+- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `mreact`, `ksem` e `kmon`.
+- **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC.
+- **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
-Il backlog principale `BACKLOG.md` e' chiuso: il selftest QEMU corrente passa con
-`SUMMARY total=8 pass=8 fail=0`.
+Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
+ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
+`SUMMARY total=23 pass=23 fail=0`.
 
 ---
 
@@ -55,23 +59,35 @@ Al boot, la mount table osservabile oggi e':
 
 - `/` -> `initrd-cpio` read-only embedded nel kernel
 - `/dev` -> `devfs`
+- `/proc` -> `procfs` read-only
 - `/data` -> `ext4` su `virtio-blk` quando il disco e' presente
 - `/sysroot` -> `ext4` su `virtio-blk` quando il disco e' presente
 
-L'`initrd` contiene almeno:
+L'`initrd` e' generato a build-time e contiene almeno:
 
 - `README.TXT`
 - `BOOT.TXT`
+- `dev/`
+- `data/`
+- `sysroot/`
 - `INIT.ELF`
 - `NSH.ELF`
 - `DEMO.ELF`
 - `EXEC1.ELF`
 - `EXEC2.ELF`
 - `DYNDEMO.ELF`
+- `FORKDEMO.ELF`
+- `SIGDEMO.ELF`
+- `MREACTDEMO.ELF`
+- `CAPDEMO.ELF`
+- `VFSD.ELF`
+- `BLKD.ELF`
+- `MMAPDEMO.ELF`
+- `JOBDEMO.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
-Questa scelta permette un bootstrap completamente in RAM e accessi O(1) ai file iniziali, utile per configurazione iniziale, recovery e bootstrap dei primi task user-space.
+Questa scelta permette un bootstrap completamente in RAM e accessi O(1) ai file iniziali, utile per configurazione iniziale, recovery, avvio dei server user-space e validazione dei demo EL0.
 
 ---
 
@@ -146,9 +162,11 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `cat /BOOT.TXT`
 - `write`, `append`, `truncate`, `sync`, `fsync`
 - `mkdir`, `rm`, `mv`
-- `elfdemo`, `execdemo`, `dyndemo`, `runelf PATH`
+- `elfdemo`, `execdemo`, `dyndemo`, `forkdemo`, `sigdemo`, `mreactdemo`
+- `jobdemo`
+- `runelf PATH`
 - `nsh`
-- `selftest`
+- `selftest`, `selftest [nome]`
 
 `NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
 
@@ -167,16 +185,13 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che verifica i sottosistemi piu' recenti, tra cui:
+Esiste una suite di self-test kernel-side che oggi copre 23 casi:
 
-- `vfs-rootfs`
-- `vfs-devfs`
-- `ext4-core`
-- `elf-loader`
-- `execve`
-- `elf-dynamic`
-- `ipc-sync`
-- `gpu-stack`
+- `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
+- `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
+- `fork-cow`, `signal-core`, `jobctl-core`, `mreact-core`, `cap-core`
+- `ksem-core`, `kmon-core`, `ipc-sync`
+- `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`
 
 La build dedicata e':
 
@@ -185,7 +200,13 @@ make test-build
 make test
 ```
 
-Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, IPC e stack grafico.
+Lo stato attuale validato e':
+
+```text
+SUMMARY total=23 pass=23 fail=0
+```
+
+Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.
 
 ---
 
@@ -242,7 +263,7 @@ EnlilOS/
 Se guardi il backlog principale, il nucleo del sistema e' gia' oltre il bring-up:
 
 - storage e rootfs bootstrap sono presenti
-- userspace EL0 con loader dinamico e `execve()` e' presente
-- shell `NSH` e IPC sincrono sono presenti
+- userspace EL0 con loader dinamico, `fork()`, `mmap()` file-backed e `execve()` e' presente
+- shell `NSH`, capability, `vfsd`, `blkd`, `procfs` e IPC sincrono sono presenti
 
 Il path core descritto in [BACKLOG.md](BACKLOG.md) e' completato; il lavoro successivo continua nella roadmap estesa in [BACKLOG2.md](BACKLOG2.md).

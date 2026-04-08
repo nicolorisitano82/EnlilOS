@@ -43,7 +43,13 @@
 #define SYS_SIGPROCMASK     18
 #define SYS_SIGRETURN       19
 #define SYS_YIELD           20
+#define SYS_SETPGID         21
+#define SYS_GETPGID         22
+#define SYS_SETSID          23
 #define SYS_MSYNC           24  /* mmap file-backed write-back (M8-02) */
+#define SYS_GETSID          25
+#define SYS_TCSETPGRP       26
+#define SYS_TCGETPGRP       27
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -164,6 +170,12 @@
 /* ── waitpid options ────────────────────────────────────────────────── */
 
 #define WNOHANG     1
+#define WUNTRACED   2
+
+#define WIFEXITED(status)   ((((status) & 0x7F) == 0))
+#define WEXITSTATUS(status) (((status) >> 8) & 0xFF)
+#define WIFSTOPPED(status)  ((((status) & 0xFF) == 0x7F))
+#define WSTOPSIG(status)    (((status) >> 8) & 0xFF)
 
 /* ── struct timespec ────────────────────────────────────────────────── */
 

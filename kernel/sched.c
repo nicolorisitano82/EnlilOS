@@ -49,7 +49,9 @@ typedef struct {
     uint8_t     resume_from_frame;
     uint8_t     _pad[6];
     int32_t     exit_code;
-    uint32_t    _pad2;
+    uint32_t    parent_pid;
+    uint32_t    pgid;
+    uint32_t    sid;
     exception_frame_t start_frame;
 } sched_task_ctx_t;
 
@@ -85,6 +87,18 @@ static inline sched_task_ctx_t *ctx_of(const sched_tcb_t *t)
 {
     if (!t) return NULL;
     return &task_ctx[task_slot(t)];
+}
+
+static inline uint32_t pgid_of(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    return ctx ? ctx->pgid : 0U;
+}
+
+static inline uint32_t sid_of(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    return ctx ? ctx->sid : 0U;
 }
 
 static inline uint8_t eff_prio_of(const sched_tcb_t *t)
@@ -281,6 +295,9 @@ static sched_tcb_t *task_alloc(void)
     task_ctx[slot].is_user         = 0U;
     task_ctx[slot].resume_from_frame = 0U;
     task_ctx[slot].exit_code       = 0;
+    task_ctx[slot].parent_pid      = 0U;
+    task_ctx[slot].pgid            = t->pid;
+    task_ctx[slot].sid             = t->pid;
     memset(&task_ctx[slot].start_frame, 0, sizeof(task_ctx[slot].start_frame));
     donated_priority[slot]         = 0xFFU;
     return t;
@@ -422,6 +439,9 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
     ctx->mm = mmu_kernel_space();
     ctx->kernel_stack_pa = stack_pa;
     ctx->is_user = 0U;
+    ctx->parent_pid = current_task ? current_task->pid : 0U;
+    ctx->pgid = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
+    ctx->sid = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
     signal_task_init(t, 0U);
 
     task_setup_stack(t, stack_top, entry);
@@ -485,6 +505,9 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->auxv            = auxv;
     ctx->is_user         = 1U;
     ctx->resume_from_frame = 0U;
+    ctx->parent_pid      = current_task ? current_task->pid : 0U;
+    ctx->pgid            = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
+    ctx->sid             = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
     signal_task_init(t, (current_task && sched_task_is_user(current_task)) ?
                         current_task->pid : 0U);
 
@@ -544,6 +567,9 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     ctx->auxv              = 0ULL;
     ctx->is_user           = 1U;
     ctx->resume_from_frame = 1U;
+    ctx->parent_pid        = current_task ? current_task->pid : 0U;
+    ctx->pgid              = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
+    ctx->sid               = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
     ctx->start_frame       = *frame;
     ctx->start_frame.x[0]  = 0ULL;
 
@@ -879,6 +905,117 @@ int sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out)
 
     *out = ctx->exit_code;
     return 0;
+}
+
+uint32_t sched_task_parent_pid(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    return ctx ? ctx->parent_pid : 0U;
+}
+
+uint32_t sched_task_pgid(const sched_tcb_t *t)
+{
+    return pgid_of(t);
+}
+
+uint32_t sched_task_sid(const sched_tcb_t *t)
+{
+    return sid_of(t);
+}
+
+int sched_task_has_session(uint32_t sid)
+{
+    if (sid == 0U)
+        return 0;
+
+    for (uint32_t i = 0U; i < task_count; i++) {
+        sched_tcb_t *t = &task_pool[i];
+
+        if (t->state == TCB_STATE_ZOMBIE)
+            continue;
+        if (sid_of(t) == sid)
+            return 1;
+    }
+
+    return 0;
+}
+
+int sched_task_has_pgrp(uint32_t sid, uint32_t pgid)
+{
+    if (pgid == 0U || sid == 0U)
+        return 0;
+
+    for (uint32_t i = 0U; i < task_count; i++) {
+        sched_tcb_t *t = &task_pool[i];
+
+        if (t->state == TCB_STATE_ZOMBIE)
+            continue;
+        if (sid_of(t) == sid && pgid_of(t) == pgid)
+            return 1;
+    }
+
+    return 0;
+}
+
+int sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target, uint32_t pgid)
+{
+    sched_task_ctx_t       *target_ctx;
+    const sched_task_ctx_t *caller_ctx;
+
+    if (!caller || !target)
+        return -EINVAL;
+    if (!sched_task_is_user(caller) || !sched_task_is_user(target))
+        return -EPERM;
+
+    caller_ctx = ctx_of(caller);
+    target_ctx = ctx_of(target);
+    if (!caller_ctx || !target_ctx)
+        return -EINVAL;
+    if (target != caller && target_ctx->parent_pid != caller->pid)
+        return -EPERM;
+    if (target_ctx->sid == target->pid)
+        return -EPERM;
+
+    if (pgid == 0U)
+        pgid = target->pid;
+
+    if (target_ctx->sid != caller_ctx->sid)
+        return -EPERM;
+    if (pgid != target->pid && !sched_task_has_pgrp(target_ctx->sid, pgid))
+        return -EPERM;
+
+    target_ctx->pgid = pgid;
+    return 0;
+}
+
+int sched_task_setsid(sched_tcb_t *task, uint32_t *out_sid)
+{
+    sched_task_ctx_t *ctx = ctx_of(task);
+
+    if (!task || !ctx)
+        return -EINVAL;
+    if (!sched_task_is_user(task))
+        return -EPERM;
+    if (ctx->pgid == task->pid)
+        return -EPERM;
+
+    ctx->sid = task->pid;
+    ctx->pgid = task->pid;
+    if (out_sid)
+        *out_sid = ctx->sid;
+    return (int)ctx->sid;
+}
+
+sched_tcb_t *sched_task_at(uint32_t index)
+{
+    if (index >= task_count)
+        return NULL;
+    return &task_pool[index];
+}
+
+uint32_t sched_task_count_total(void)
+{
+    return task_count;
 }
 
 void sched_task_bootstrap(uint64_t entry_reg)

@@ -1214,39 +1214,80 @@ static uint64_t sys_fork(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_waitpid(uint64_t args[6])
 {
-    int32_t  pid_arg    = (int32_t)args[0];
-    /* args[1] = status ptr (ignorato) */
-    uint32_t options    = (uint32_t)args[2];
-    uint64_t timeout_ms = args[3];
+    int32_t   pid_arg      = (int32_t)args[0];
+    uintptr_t status_uva   = (uintptr_t)args[1];
+    uint32_t  options      = (uint32_t)args[2];
+    uint64_t  timeout_ms   = args[3];
+    uint64_t  deadline;
+    uint32_t  caller_pid;
 
-    /* pid = -1: attesa di "qualsiasi figlio" — non supportata senza fork */
-    if (pid_arg < 0) return ERR(ECHILD);
+    if (options & ~(WNOHANG | WUNTRACED))
+        return ERR(EINVAL);
+    if (!current_task)
+        return ERR(ECHILD);
 
-    sched_tcb_t *t = sched_task_find((uint32_t)pid_arg);
-    if (!t) return ERR(ECHILD);
+    caller_pid = current_task->pid;
+    deadline = (timeout_ms > 0U) ? (timer_now_ms() + timeout_ms) : (uint64_t)-1ULL;
 
-    /* WNOHANG: non blocca, ritorna 0 se non ancora zombie */
-    if (options & WNOHANG)
-        return (t->state == TCB_STATE_ZOMBIE) ? (uint64_t)pid_arg : 0;
+    for (;;) {
+        int matched_child = 0;
 
-    /*
-     * Attesa con timeout.
-     * timeout_ms = 0 → attesa illimitata (sconsigliato per task RT).
-     * Il loop cede la CPU ad ogni iterazione → non è busy-wait puro.
-     */
-    uint64_t deadline = (timeout_ms > 0)
-        ? timer_now_ms() + timeout_ms
-        : (uint64_t)-1ULL;
+        for (uint32_t i = 0U; i < sched_task_count_total(); i++) {
+            sched_tcb_t *t = sched_task_at(i);
+            int          status = 0;
+            int32_t      code = 0;
+            int          stop_sig = 0;
+            int          match = 0;
 
-    while (t->state != TCB_STATE_ZOMBIE) {
+            if (!t)
+                continue;
+            if (sched_task_parent_pid(t) != caller_pid)
+                continue;
+
+            if (pid_arg > 0)
+                match = ((uint32_t)pid_arg == t->pid);
+            else if (pid_arg == 0)
+                match = (sched_task_pgid(t) == sched_task_pgid(current_task));
+            else if (pid_arg == -1)
+                match = 1;
+            else
+                match = (sched_task_pgid(t) == (uint32_t)(-pid_arg));
+
+            if (!match)
+                continue;
+
+            matched_child = 1;
+
+            if (t->state == TCB_STATE_ZOMBIE) {
+                if (sched_task_get_exit_code(t, &code) < 0)
+                    code = 0;
+                status = ((int)code & 0xFF) << 8;
+                if (status_uva != 0U &&
+                    user_store_bytes(status_uva, &status, sizeof(status)) < 0)
+                    return ERR(EFAULT);
+                return (uint64_t)t->pid;
+            }
+
+            if ((options & WUNTRACED) &&
+                signal_task_consume_stop_report(t, &stop_sig)) {
+                status = (((int)stop_sig & 0xFF) << 8) | 0x7F;
+                if (status_uva != 0U &&
+                    user_store_bytes(status_uva, &status, sizeof(status)) < 0)
+                    return ERR(EFAULT);
+                return (uint64_t)t->pid;
+            }
+        }
+
+        if (!matched_child)
+            return ERR(ECHILD);
+        if (options & WNOHANG)
+            return 0;
         if (signal_has_unblocked_pending(current_task))
             return ERR(EINTR);
         if (timer_now_ms() >= deadline)
             return ERR(EAGAIN);
         sched_yield();
     }
-
-    return (uint64_t)pid_arg;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1490,28 +1531,99 @@ static uint64_t sys_sigreturn(uint64_t args[6])
 
 static uint64_t sys_kill(uint64_t args[6])
 {
-    uint32_t pid = (uint32_t)args[0];
+    int32_t  pid_arg = (int32_t)args[0];
     int      sig = (int)args[1];
     int      rc;
+    uint32_t pgid;
 
-    uart_puts("[SIGNAL] kill pid=");
-    syscall_uart_put_u64((uint64_t)pid);
-    uart_puts(" sig=");
-    syscall_uart_put_i64((int64_t)sig);
-    uart_puts("\n");
-
-    rc = signal_send_pid(pid, sig);
-    if (rc < 0) {
-        uart_puts("[SIGNAL] kill fail pid=");
-        syscall_uart_put_u64((uint64_t)pid);
-        uart_puts(" sig=");
-        syscall_uart_put_i64((int64_t)sig);
-        uart_puts(" rc=");
-        syscall_uart_put_i64((int64_t)rc);
-        uart_puts("\n");
-        return ERR(-rc);
+    if (pid_arg > 0) {
+        rc = signal_send_pid((uint32_t)pid_arg, sig);
+    } else if (pid_arg == 0) {
+        pgid = sched_task_pgid(current_task);
+        rc = (pgid == 0U) ? -EINVAL : signal_send_pgrp(pgid, sig);
+    } else if (pid_arg < -1) {
+        rc = signal_send_pgrp((uint32_t)(-pid_arg), sig);
+    } else {
+        rc = -EINVAL;
     }
+
+    if (rc < 0)
+        return ERR(-rc);
     return 0;
+}
+
+static uint64_t sys_setpgid(uint64_t args[6])
+{
+    int32_t      pid_arg = (int32_t)args[0];
+    uint32_t     pgid = (uint32_t)args[1];
+    sched_tcb_t *target;
+    int          rc;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (pid_arg == 0)
+        pid_arg = (int32_t)current_task->pid;
+
+    target = sched_task_find((uint32_t)pid_arg);
+    if (!target)
+        return ERR(ESRCH);
+
+    rc = sched_task_setpgid(current_task, target, pgid);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_getpgid(uint64_t args[6])
+{
+    int32_t      pid_arg = (int32_t)args[0];
+    sched_tcb_t *target;
+
+    if (!current_task)
+        return ERR(ESRCH);
+    if (pid_arg == 0)
+        return (uint64_t)sched_task_pgid(current_task);
+
+    target = sched_task_find((uint32_t)pid_arg);
+    if (!target)
+        return ERR(ESRCH);
+    return (uint64_t)sched_task_pgid(target);
+}
+
+static uint64_t sys_setsid(uint64_t args[6])
+{
+    uint32_t sid = 0U;
+    int      rc;
+
+    (void)args;
+    rc = sched_task_setsid(current_task, &sid);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)sid;
+}
+
+static uint64_t sys_getsid(uint64_t args[6])
+{
+    int32_t      pid_arg = (int32_t)args[0];
+    sched_tcb_t *target;
+
+    if (!current_task)
+        return ERR(ESRCH);
+    if (pid_arg == 0)
+        return (uint64_t)sched_task_sid(current_task);
+
+    target = sched_task_find((uint32_t)pid_arg);
+    if (!target)
+        return ERR(ESRCH);
+    return (uint64_t)sched_task_sid(target);
+}
+
+static uint64_t sys_tcsetpgrp(uint64_t args[6])
+{
+    int rc = tty_tcsetpgrp_current((uint32_t)args[0]);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_tcgetpgrp(uint64_t args[6])
+{
+    (void)args;
+    return (uint64_t)tty_tcgetpgrp();
 }
 
 static uint64_t sys_mreact_subscribe(uint64_t args[6])
@@ -2197,6 +2309,24 @@ void syscall_init(void)
     };
     syscall_table[SYS_YIELD] = (syscall_entry_t){
         sys_yield, SYSCALL_FLAG_RT, "yield"
+    };
+    syscall_table[SYS_SETPGID] = (syscall_entry_t){
+        sys_setpgid, SYSCALL_FLAG_RT, "setpgid"
+    };
+    syscall_table[SYS_GETPGID] = (syscall_entry_t){
+        sys_getpgid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getpgid"
+    };
+    syscall_table[SYS_SETSID] = (syscall_entry_t){
+        sys_setsid, SYSCALL_FLAG_RT, "setsid"
+    };
+    syscall_table[SYS_GETSID] = (syscall_entry_t){
+        sys_getsid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getsid"
+    };
+    syscall_table[SYS_TCSETPGRP] = (syscall_entry_t){
+        sys_tcsetpgrp, SYSCALL_FLAG_RT, "tcsetpgrp"
+    };
+    syscall_table[SYS_TCGETPGRP] = (syscall_entry_t){
+        sys_tcgetpgrp, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "tcgetpgrp"
     };
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"

@@ -15,5 +15,8 @@
 
 void tty_init(void);
 uint64_t tty_read(char *buf, uint64_t cnt);
+int tty_check_output_current(void);
+int tty_tcsetpgrp_current(uint32_t pgid);
+uint32_t tty_tcgetpgrp(void);
 
 #endif /* ENLILOS_TTY_H */

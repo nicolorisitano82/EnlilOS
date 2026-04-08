@@ -203,6 +203,8 @@ static ssize_t devfs_write(vfs_file_t *file, const void *buf, size_t count)
     if (!buf) return -EFAULT;
     if (file->node_id == DEV_NODE_NULL)
         return (ssize_t)count;
+    if (tty_check_output_current() < 0)
+        return -EINTR;
 
     if (count > 4096U) count = 4096U;
     term80_write(bytes, (uint32_t)count);

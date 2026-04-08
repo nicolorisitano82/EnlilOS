@@ -192,6 +192,23 @@ static int st_expect_exit_code(const char *case_name, uint32_t pid, int32_t expe
     }
     if (code != expected) {
         st_log_fail(case_name, "exit code inatteso");
+        uart_puts("[SELFTEST] ");
+        uart_puts(case_name);
+        uart_puts(": exit code atteso=");
+        if (expected < 0) {
+            uart_putc('-');
+            st_put_u32((uint32_t)(-expected));
+        } else {
+            st_put_u32((uint32_t)expected);
+        }
+        uart_puts(" ottenuto=");
+        if (code < 0) {
+            uart_putc('-');
+            st_put_u32((uint32_t)(-code));
+        } else {
+            st_put_u32((uint32_t)code);
+        }
+        uart_puts("\n");
         return -1;
     }
     return 0;
@@ -280,6 +297,15 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
              "/VFSD.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/VFSD.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/JOBDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /JOBDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /JOBDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/JOBDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/JOBDEMO.ELF ha size zero");
     (void)vfs_close(&file);
     return 0;
 }
@@ -703,6 +729,56 @@ static int selftest_case_mreact(void)
     ST_CHECK(case_name, rc == 0, "unlink MREACT.TXT fallita");
     rc = vfs_unlink("/data/MREACT.READY");
     ST_CHECK(case_name, rc == 0, "unlink MREACT.READY fallita");
+    return 0;
+}
+
+static int selftest_case_jobctl(void)
+{
+    static const char case_name[] = "jobctl-core";
+    static const char expected[] =
+        "child-cont\n"
+        "child-term\n"
+        "parent-ok\n";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    vfs_file_t   file;
+    char         buf[128];
+    ssize_t      n;
+    int          rc;
+
+    rc = vfs_unlink("/data/JOBCTRL.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup JOBCTRL.TXT fallita");
+    rc = vfs_unlink("/data/JOBREADY.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup JOBREADY.TXT fallita");
+    rc = vfs_unlink("/data/JOBCONT.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup JOBCONT.TXT fallita");
+
+    if (st_spawn_user_task(case_name, "/JOBDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 4000ULL);
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
+    ST_CHECK(case_name, task != NULL, "task JOBDEMO.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa JOBDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "JOBDEMO exit code non e' 0");
+
+    rc = vfs_open("/data/JOBCTRL.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open JOBCTRL.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read JOBCTRL.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected), "contenuto JOBCTRL.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_unlink("/data/JOBCTRL.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink JOBCTRL.TXT fallita");
+    rc = vfs_unlink("/data/JOBREADY.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink JOBREADY.TXT fallita");
+    rc = vfs_unlink("/data/JOBCONT.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink JOBCONT.TXT fallita");
     return 0;
 }
 
@@ -1408,6 +1484,7 @@ static const selftest_case_t selftest_cases[] = {
     { "elf-dynamic", selftest_case_dynelf    },
     { "fork-cow",    selftest_case_fork      },
     { "signal-core", selftest_case_signal    },
+    { "jobctl-core", selftest_case_jobctl    },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },
     { "ksem-core",   selftest_case_ksem      },
