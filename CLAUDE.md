@@ -326,18 +326,48 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-07)
+## Milestone completate (stato 2026-04-09)
 
-Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-03 sono completi.
-Vedere `progress.txt` per la lista dettagliata.
+Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-04 sono completi in forma v1.
+Il run di riferimento e':
+
+```text
+SUMMARY total=24 pass=24 fail=0
+```
 
 **Prossime priorità**:
-1. M11-01 musl libc (sblocca pthread, arksh, porting)
-2. M9-04 Namespace & Mount Dinamico
-3. M8-08 arksh (dipende da musl + pipe/dup/termios)
-4. M14-02 Crash Reporter + KGDB
+1. M8-08a pipe() + dup/dup2
+2. M11-01 musl libc
+3. M10-01 VirtIO network driver
+4. M8-08 termios/getcwd/env e arksh default shell
 5. M11-02 POSIX Threading (pthread)
-6. M11-02 POSIX Threading (pthread)
+
+### Knowledge operativa M9-04 (namespace + mount dinamico)
+
+- `vfsd` e' il punto di verita' per la vista del filesystem dei task EL0: `cwd`, mount table privata
+  e risoluzione dei path vivono lato server, non nel kernel.
+- I nuovi syscall `chdir/getcwd`, `mount/umount`, `unshare(CLONE_NEWNS)` e `pivot_root()`
+  devono passare tramite `vfsd`; non introdurre bypass kernel-side che risolvano path direttamente.
+- `execve()` / `spawn()` e il path shadow dei file descriptor usati da `mmap/msync` devono sempre
+  risolvere il path attraverso `vfsd`, altrimenti rompono i namespace privati.
+- L'ereditarieta' dei namespace dopo `fork()` e' implementata in `vfsd` usando `ipc_message_t.sender_tid`
+  + `SYS_VFS_BOOT_TASKINFO`: al primo accesso del figlio il server copia `ns_id` e `cwd` dal parent.
+- `pivot_root()` deve ribasare il vecchio root nella nuova vista. Esempio reale del bug risolto:
+  con `pivot_root("/mnt", "/mnt/oldroot")`, il vecchio root va esposto a `/oldroot`, non lasciato
+  a `/mnt/oldroot`.
+- `NSDEMO.ELF` e il selftest `vfs-namespace` verificano il path completo: `unshare`, bind mount,
+  `chdir/getcwd`, mount `procfs`, `fork()` con ereditarieta', `pivot_root()` e visibilita' di `/oldroot/BOOT.TXT`.
+- I log `boot_open fail` di `vfsd` su file di probe assenti durante i demo (`SIGREADY.TXT`, `JOBREADY.TXT`,
+  `/data/proc/...`) non indicano per forza un bug: spesso sono attesi nel percorso di test.
+- User-space freestanding: non introdurre dipendenze implicite da libc. In `vfsd` usare helper locali
+  (`vfsd_memcpy`, `vfsd_bzero`, ecc.), non assumere che `memcpy` venga risolta dal linker.
+
+### Limiti noti della v1 M9-04
+
+- I backend filesystem reali restano ancora bootstrap kernel-side dietro `SYS_VFS_BOOT_*`.
+- `vfsd` non fa ancora garbage collection dello stato client/namespace dei PID terminati.
+- La semantica `pivot_root()` e' sufficiente per bootstrap e test, ma non e' ancora il modello completo
+  da container/runtime avanzato previsto piu' avanti in `M11-07`.
 
 ---
 

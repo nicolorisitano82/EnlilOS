@@ -908,7 +908,7 @@ Stato dettagliato:
 - [x] Small message inline (`mr[]`, ≤64 byte)
 - [x] Statistiche per-porta: `last`, `worst`, `total`, `budget_misses`, `inline_calls`
 - [x] Delivery robusta senza scritture dirette nello stack del task remoto
-- [x] `ipc-sync` validato su QEMU nel run completo `SUMMARY total=23 pass=23 fail=0`
+- [x] `ipc-sync` validato su QEMU nel run completo `SUMMARY total=24 pass=24 fail=0`
 
 ---
 
@@ -928,10 +928,10 @@ Stato dettagliato:
 - [x] Syscall user-space dedicate: `getdents`, `task_snapshot`, `spawn`
 - [x] Wiring boot console: comando `nsh` per lanciare la shell EL0 e ritorno automatico alla UI
 - [x] Echo input/output su `/dev/std*` visibile anche nella console 80×25
-- [x] Suite `selftest` estesa a 23 casi, inclusi `vfsd-core`, `blkd-core`, `fork-cow`,
-      `signal-core`, `jobctl-core`, `mreact-core`, `cap-core`, `ksem-core`,
-      `kmon-core`, `kdebug-core`, `procfs-core`, `mmap-file`
-- [x] Run completo QEMU validato con `SUMMARY total=23 pass=23 fail=0`
+- [x] Suite `selftest` estesa a 24 casi, inclusi `vfsd-core`, `blkd-core`, `fork-cow`,
+      `signal-core`, `jobctl-core`, `vfs-namespace`, `mreact-core`, `cap-core`,
+      `ksem-core`, `kmon-core`, `kdebug-core`, `procfs-core`, `mmap-file`
+- [x] Run completo QEMU validato con `SUMMARY total=24 pass=24 fail=0`
 
 ---
 
@@ -956,7 +956,7 @@ M2-03 ✅ → M7-01 ✅ → M7-02 ✅
 Tutte le milestone di `BACKLOG.md` sono ora implementate.
 
 Stato di validazione:
-- `make test` su QEMU `virt` passa con `SUMMARY total=23 pass=23 fail=0`
+- `make test` su QEMU `virt` passa con `SUMMARY total=24 pass=24 fail=0`
 - il profilo storage bootstrap copre `/ -> initrd-cpio (ro)` e `/data -> ext4` con journal bounded
 - il nucleo boot, storage, grafica, userspace e IPC del backlog principale e' chiuso
 

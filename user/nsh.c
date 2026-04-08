@@ -89,6 +89,16 @@ static long sys_sigaction_now(int sig, const sigaction_t *act, sigaction_t *old)
     return sys_call3(SYS_SIGACTION, sig, (long)act, (long)old);
 }
 
+static long sys_chdir_path(const char *path)
+{
+    return user_svc1(SYS_CHDIR, (long)path);
+}
+
+static long sys_getcwd_now(char *buf, u32 len)
+{
+    return user_svc2(SYS_GETCWD, (long)buf, (long)len);
+}
+
 static u32 nsh_strlen(const char *s)
 {
     u32 n = 0U;
@@ -207,6 +217,7 @@ static const char *nsh_errno_name(long rc)
     case ENFILE: return "ENFILE";
     case ENOSPC: return "ENOSPC";
     case EROFS: return "EROFS";
+    case ERANGE: return "ERANGE";
     case ENAMETOOLONG: return "ENAMETOOLONG";
     case ENOTEMPTY: return "ENOTEMPTY";
     case EIO: return "EIO";
@@ -380,42 +391,35 @@ static void nsh_cmd_help(void)
 
 static void nsh_cmd_pwd(void)
 {
+    char cwd[NSH_PATH_MAX];
+
+    if (sys_getcwd_now(cwd, sizeof(cwd)) >= 0) {
+        nsh_strlcpy(nsh_cwd, cwd, sizeof(nsh_cwd));
+        nsh_putln(cwd);
+        return;
+    }
     nsh_putln(nsh_cwd);
 }
 
 static void nsh_cmd_cd(const char *arg)
 {
     char   resolved[NSH_PATH_MAX];
-    stat_t st;
-    long   fd;
     long   rc;
-
     if (!arg || !*arg) {
-        nsh_strlcpy(nsh_cwd, "/", sizeof(nsh_cwd));
-        return;
+        arg = "/";
     }
     if (!nsh_resolve_path(arg, resolved, sizeof(resolved))) {
         nsh_putln("cd: path non valido");
         return;
     }
 
-    fd = sys_open_path(resolved, O_RDONLY);
-    if (fd < 0) {
-        nsh_print_error("cd open", fd);
-        return;
-    }
-    rc = sys_fstat_fd(fd, &st);
-    (void)sys_close_fd(fd);
+    rc = sys_chdir_path(resolved);
     if (rc < 0) {
-        nsh_print_error("cd stat", rc);
+        nsh_print_error("cd", rc);
         return;
     }
-    if ((st.st_mode & S_IFMT) != S_IFDIR) {
-        nsh_putln("cd: non e' una directory");
-        return;
-    }
-
-    nsh_strlcpy(nsh_cwd, resolved, sizeof(nsh_cwd));
+    if (sys_getcwd_now(nsh_cwd, sizeof(nsh_cwd)) < 0)
+        nsh_strlcpy(nsh_cwd, resolved, sizeof(nsh_cwd));
 }
 
 static void nsh_cmd_ls(const char *arg)
@@ -654,7 +658,8 @@ void _start(void)
     sigaction_t sa;
     char line[NSH_LINE_MAX];
 
-    nsh_strlcpy(nsh_cwd, "/", sizeof(nsh_cwd));
+    if (sys_getcwd_now(nsh_cwd, sizeof(nsh_cwd)) < 0)
+        nsh_strlcpy(nsh_cwd, "/", sizeof(nsh_cwd));
     nsh_sigint_seen = 0U;
     sa.sa_handler = nsh_on_sigint;
     sa.sa_mask = 0ULL;

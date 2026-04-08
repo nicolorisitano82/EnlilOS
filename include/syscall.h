@@ -50,6 +50,12 @@
 #define SYS_GETSID          25
 #define SYS_TCSETPGRP       26
 #define SYS_TCGETPGRP       27
+#define SYS_CHDIR           28
+#define SYS_GETCWD          29
+#define SYS_MOUNT           30
+#define SYS_UMOUNT          31
+#define SYS_PIVOT_ROOT      32
+#define SYS_UNSHARE         33
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -92,6 +98,7 @@
 #define SYS_BLK_BOOT_WRITE     157
 #define SYS_BLK_BOOT_FLUSH     158
 #define SYS_BLK_BOOT_SECTORS   159
+#define SYS_VFS_BOOT_TASKINFO  160
 
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
@@ -126,6 +133,7 @@
 #define ENFILE              23
 #define ENOSPC              28
 #define EROFS               30
+#define ERANGE              34
 #define ENAMETOOLONG        36
 #define ENOTEMPTY           39
 #define EIO                 5
@@ -161,6 +169,13 @@
 #define MS_ASYNC        1
 #define MS_SYNC         4
 #define MS_INVALIDATE   2
+
+/* ── Flag mount/unshare bootstrap (M9-04) ─────────────────────────── */
+
+#define MS_RDONLY       1U
+#define MS_BIND         4096U
+
+#define CLONE_NEWNS     0x00020000U
 
 /* ── Clock IDs per clock_gettime() ─────────────────────────────────── */
 

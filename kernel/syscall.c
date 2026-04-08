@@ -338,6 +338,43 @@ static int vfsd_proxy_call(const vfsd_request_t *req, vfsd_response_t *resp)
     return 0;
 }
 
+static void vfsd_req_set_path(char dst[VFSD_PATH_BYTES], const char *src)
+{
+    size_t i = 0U;
+
+    if (!dst)
+        return;
+    memset(dst, 0, VFSD_PATH_BYTES);
+    if (!src)
+        return;
+
+    while (src[i] != '\0' && i + 1U < VFSD_PATH_BYTES) {
+        dst[i] = src[i];
+        i++;
+    }
+}
+
+static int vfsd_resp_get_path(const vfsd_response_t *resp, char *out, size_t cap)
+{
+    size_t i;
+
+    if (!resp || !out || cap == 0U)
+        return -EFAULT;
+    if (resp->data_len == 0U || resp->data_len > VFSD_IO_BYTES)
+        return -EIO;
+
+    for (i = 0U; i + 1U < cap && i < (size_t)resp->data_len; i++) {
+        out[i] = (char)resp->u.data[i];
+        if (out[i] == '\0')
+            return 0;
+    }
+
+    if (i == cap)
+        i = cap - 1U;
+    out[i] = '\0';
+    return -ENAMETOOLONG;
+}
+
 static int vfsd_proxy_open(const char *path, uint32_t flags, uint32_t *handle_out)
 {
     vfsd_request_t  req;
@@ -350,8 +387,7 @@ static int vfsd_proxy_open(const char *path, uint32_t flags, uint32_t *handle_ou
     memset(&req, 0, sizeof(req));
     req.op = VFSD_REQ_OPEN;
     req.flags = flags;
-    for (size_t i = 0U; i + 1U < sizeof(req.u.path) && path[i] != '\0'; i++)
-        req.u.path[i] = path[i];
+    vfsd_req_set_path(req.u.paths.path, path);
 
     rc = vfsd_proxy_call(&req, &resp);
     if (rc < 0)
@@ -412,6 +448,145 @@ static ssize_t vfsd_proxy_write(uint32_t handle, const void *src, size_t count)
     if (resp.status < 0)
         return resp.status;
     return (ssize_t)resp.data_len;
+}
+
+static int vfsd_proxy_resolve(const char *path, char *out, size_t cap)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!path || !out || cap == 0U)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_RESOLVE;
+    vfsd_req_set_path(req.u.paths.path, path);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    return vfsd_resp_get_path(&resp, out, cap);
+}
+
+static int vfsd_proxy_chdir(const char *path)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!path)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_CHDIR;
+    vfsd_req_set_path(req.u.paths.path, path);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int vfsd_proxy_getcwd(char *out, size_t cap)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!out || cap == 0U)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_GETCWD;
+    req.count = (cap > VFSD_IO_BYTES) ? VFSD_IO_BYTES : (uint32_t)cap;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    return vfsd_resp_get_path(&resp, out, cap);
+}
+
+static int vfsd_proxy_mount(const char *src, const char *dst,
+                            uint32_t fs_type, uint32_t flags)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!dst)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_MOUNT;
+    req.flags = flags;
+    req.arg0 = fs_type;
+    vfsd_req_set_path(req.u.paths.path, src);
+    vfsd_req_set_path(req.u.paths.aux, dst);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int vfsd_proxy_umount(const char *path)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!path)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_UMOUNT;
+    vfsd_req_set_path(req.u.paths.path, path);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int vfsd_proxy_unshare(uint32_t flags)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_UNSHARE;
+    req.flags = flags;
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int vfsd_proxy_pivot_root(const char *new_root, const char *old_root)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+
+    if (!new_root || !old_root)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_PIVOT_ROOT;
+    vfsd_req_set_path(req.u.paths.path, new_root);
+    vfsd_req_set_path(req.u.paths.aux, old_root);
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
 }
 
 static int vfsd_proxy_readdir(uint32_t handle, vfs_dirent_t *out)
@@ -550,6 +725,74 @@ static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
     }
 
     return 0;
+}
+
+static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
+{
+    size_t i = 0U;
+
+    if (!input || !out || cap < 2U)
+        return -EFAULT;
+
+    if (current_task && sched_task_is_user(current_task) && vfsd_proxy_available())
+        return vfsd_proxy_resolve(input, out, cap);
+
+    while (input[i] != '\0' && i + 1U < cap) {
+        out[i] = input[i];
+        i++;
+    }
+    if (input[i] != '\0')
+        return -ENAMETOOLONG;
+    out[i] = '\0';
+    return 0;
+}
+
+static int sys_mount_parse_fs(const char *fstype, uint32_t flags, uint32_t *fs_out)
+{
+    if (!fstype || !fs_out)
+        return -EINVAL;
+
+    if (flags & MS_BIND) {
+        *fs_out = VFSD_FS_BIND;
+        return 0;
+    }
+    if (fstype[0] == 'b' && fstype[1] == 'i' && fstype[2] == 'n' &&
+        fstype[3] == 'd' && fstype[4] == '\0') {
+        *fs_out = VFSD_FS_BIND;
+        return 0;
+    }
+    if (fstype[0] == 'i' && fstype[1] == 'n' && fstype[2] == 'i' &&
+        fstype[3] == 't' && fstype[4] == 'r' && fstype[5] == 'd' &&
+        fstype[6] == '\0') {
+        *fs_out = VFSD_FS_INITRD;
+        return 0;
+    }
+    if (fstype[0] == 'd' && fstype[1] == 'e' && fstype[2] == 'v' &&
+        fstype[3] == 'f' && fstype[4] == 's' && fstype[5] == '\0') {
+        *fs_out = VFSD_FS_DEVFS;
+        return 0;
+    }
+    if (fstype[0] == 'p' && fstype[1] == 'r' && fstype[2] == 'o' &&
+        fstype[3] == 'c' && fstype[4] == 'f' && fstype[5] == 's' &&
+        fstype[6] == '\0') {
+        *fs_out = VFSD_FS_PROCFS;
+        return 0;
+    }
+    if (fstype[0] == 'e' && fstype[1] == 'x' && fstype[2] == 't' &&
+        fstype[3] == '4' && fstype[4] == '\0') {
+        *fs_out = VFSD_FS_EXT4_DATA;
+        return 0;
+    }
+    if (fstype[0] == 'e' && fstype[1] == 'x' && fstype[2] == 't' &&
+        fstype[3] == '4' && fstype[4] == '-' && fstype[5] == 's' &&
+        fstype[6] == 'y' && fstype[7] == 's' && fstype[8] == 'r' &&
+        fstype[9] == 'o' && fstype[10] == 'o' && fstype[11] == 't' &&
+        fstype[12] == '\0') {
+        *fs_out = VFSD_FS_EXT4_SYSROOT;
+        return 0;
+    }
+
+    return -EINVAL;
 }
 
 static uint32_t sys_mmap_prot_to_mmu(uint32_t prot)
@@ -780,6 +1023,7 @@ static uint64_t sys_open(uint64_t args[6])
     const char *path     = (const char *)(uintptr_t)args[0];
     const char *path_arg = path;
     char        path_buf[EXEC_MAX_PATH];
+    char        resolved_buf[VFSD_IO_BYTES];
     uint16_t    oflags   = (uint16_t)args[1];
     int         idx      = task_idx();
     int         rc;
@@ -803,7 +1047,9 @@ static uint64_t sys_open(uint64_t args[6])
             return ERR(-rc);
         rc = fd_bind_remote(&fd_tables[idx][fd], remote_handle, oflags);
         if (rc >= 0) {
-            rc = fd_bind_remote_shadow(&fd_tables[idx][fd], path_arg, oflags);
+            rc = vfsd_proxy_resolve(path_arg, resolved_buf, sizeof(resolved_buf));
+            if (rc >= 0)
+                rc = fd_bind_remote_shadow(&fd_tables[idx][fd], resolved_buf, oflags);
             if (rc < 0) {
                 (void)vfsd_proxy_close(remote_handle);
                 fd_clear(&fd_tables[idx][fd]);
@@ -1096,6 +1342,7 @@ static uint64_t sys_execve(uint64_t args[6])
     elf_image_t        image;
     exception_frame_t *frame = active_syscall_frame;
     mm_space_t        *old_mm;
+    char               resolved_path[VFSD_IO_BYTES];
     int                rc;
 
     if (!current_task || !sched_task_is_user(current_task) || !frame)
@@ -1116,7 +1363,14 @@ static uint64_t sys_execve(uint64_t args[6])
         return ERR(-rc);
     }
 
-    rc = elf64_load_from_path_exec(copy->path,
+    rc = resolve_user_vfs_path(copy->path, resolved_path, sizeof(resolved_path));
+    if (rc < 0) {
+        kdebug_watchdog_resume();
+        kfree(copy);
+        return ERR(-rc);
+    }
+
+    rc = elf64_load_from_path_exec(resolved_path,
                                    copy->argv, copy->argc,
                                    copy->envp, copy->envc,
                                    &image);
@@ -1428,6 +1682,7 @@ static uint64_t sys_task_snapshot(uint64_t args[6])
 static uint64_t sys_spawn(uint64_t args[6])
 {
     char      path[EXEC_MAX_PATH];
+    char      resolved_path[VFSD_IO_BYTES];
     uintptr_t path_uva = (uintptr_t)args[0];
     uintptr_t pid_uva  = (uintptr_t)args[1];
     uint8_t   prio     = (args[2] <= 255ULL) ? (uint8_t)args[2] : PRIO_NORMAL;
@@ -1441,7 +1696,11 @@ static uint64_t sys_spawn(uint64_t args[6])
     if (rc < 0)
         return ERR(-rc);
 
-    rc = elf64_spawn_path(path, path, prio, &pid);
+    rc = resolve_user_vfs_path(path, resolved_path, sizeof(resolved_path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = elf64_spawn_path(resolved_path, path, prio, &pid);
     if (rc < 0)
         return ERR(EIO);
 
@@ -1624,6 +1883,159 @@ static uint64_t sys_tcgetpgrp(uint64_t args[6])
 {
     (void)args;
     return (uint64_t)tty_tcgetpgrp();
+}
+
+static uint64_t sys_chdir(uint64_t args[6])
+{
+    uintptr_t path_uva = (uintptr_t)args[0];
+    char      path[VFSD_PATH_BYTES];
+    int       rc;
+
+    if (!path_uva)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    rc = user_copy_cstr(path_uva, path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfsd_proxy_chdir(path);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_getcwd(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    uint32_t  size = (uint32_t)args[1];
+    char      path[VFSD_IO_BYTES];
+    size_t    len;
+    int       rc;
+
+    if (!buf_uva || size == 0U)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    rc = vfsd_proxy_getcwd(path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    for (len = 0U; len < sizeof(path) && path[len] != '\0'; len++)
+        ;
+    len++;
+    if (len > size)
+        return ERR(ERANGE);
+
+    rc = user_store_bytes(buf_uva, path, len);
+    if (rc < 0)
+        return ERR(-rc);
+    return buf_uva;
+}
+
+static uint64_t sys_mount(uint64_t args[6])
+{
+    uintptr_t src_uva = (uintptr_t)args[0];
+    uintptr_t dst_uva = (uintptr_t)args[1];
+    uintptr_t fs_uva  = (uintptr_t)args[2];
+    uint32_t  flags   = (uint32_t)args[3];
+    char      src[VFSD_PATH_BYTES];
+    char      dst[VFSD_PATH_BYTES];
+    char      fs[32];
+    uint32_t  fs_type = VFSD_FS_NONE;
+    int       rc;
+
+    if (!dst_uva || !fs_uva)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    memset(src, 0, sizeof(src));
+    rc = user_copy_cstr(dst_uva, dst, sizeof(dst));
+    if (rc < 0)
+        return ERR(-rc);
+    rc = user_copy_cstr(fs_uva, fs, sizeof(fs));
+    if (rc < 0)
+        return ERR(-rc);
+    if (src_uva != 0U) {
+        rc = user_copy_cstr(src_uva, src, sizeof(src));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    rc = sys_mount_parse_fs(fs, flags, &fs_type);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfsd_proxy_mount((src_uva != 0U) ? src : NULL, dst, fs_type, flags);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_umount(uint64_t args[6])
+{
+    uintptr_t path_uva = (uintptr_t)args[0];
+    char      path[VFSD_PATH_BYTES];
+    int       rc;
+
+    if (!path_uva)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    rc = user_copy_cstr(path_uva, path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfsd_proxy_umount(path);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_pivot_root(uint64_t args[6])
+{
+    uintptr_t new_uva = (uintptr_t)args[0];
+    uintptr_t old_uva = (uintptr_t)args[1];
+    char      new_root[VFSD_PATH_BYTES];
+    char      old_root[VFSD_PATH_BYTES];
+    int       rc;
+
+    if (!new_uva || !old_uva)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    rc = user_copy_cstr(new_uva, new_root, sizeof(new_root));
+    if (rc < 0)
+        return ERR(-rc);
+    rc = user_copy_cstr(old_uva, old_root, sizeof(old_root));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfsd_proxy_pivot_root(new_root, old_root);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_unshare(uint64_t args[6])
+{
+    uint32_t flags = (uint32_t)args[0];
+    int      rc;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+    if (!vfsd_proxy_available())
+        return ERR(ENOSYS);
+
+    rc = vfsd_proxy_unshare(flags);
+    return (rc < 0) ? ERR(-rc) : 0;
 }
 
 static uint64_t sys_mreact_subscribe(uint64_t args[6])
@@ -2129,6 +2541,35 @@ static uint64_t sys_vfs_boot_close(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_vfs_boot_taskinfo(uint64_t args[6])
+{
+    uint32_t         pid = (uint32_t)args[0];
+    uintptr_t        buf_uva = (uintptr_t)args[1];
+    sched_tcb_t     *task;
+    vfsd_taskinfo_t  info;
+    int              rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+    if (!pid || !buf_uva)
+        return ERR(EFAULT);
+
+    task = sched_task_find(pid);
+    if (!task)
+        return ERR(ESRCH);
+
+    memset(&info, 0, sizeof(info));
+    info.pid = pid;
+    info.parent_pid = sched_task_parent_pid(task);
+    info.pgid = sched_task_pgid(task);
+    info.sid = sched_task_sid(task);
+
+    rc = user_store_bytes(buf_uva, &info, sizeof(info));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * Block server bootstrap syscall (M9-03 v1)
  *
@@ -2328,6 +2769,24 @@ void syscall_init(void)
     syscall_table[SYS_TCGETPGRP] = (syscall_entry_t){
         sys_tcgetpgrp, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "tcgetpgrp"
     };
+    syscall_table[SYS_CHDIR] = (syscall_entry_t){
+        sys_chdir, 0, "chdir"
+    };
+    syscall_table[SYS_GETCWD] = (syscall_entry_t){
+        sys_getcwd, 0, "getcwd"
+    };
+    syscall_table[SYS_MOUNT] = (syscall_entry_t){
+        sys_mount, 0, "mount"
+    };
+    syscall_table[SYS_UMOUNT] = (syscall_entry_t){
+        sys_umount, 0, "umount"
+    };
+    syscall_table[SYS_PIVOT_ROOT] = (syscall_entry_t){
+        sys_pivot_root, 0, "pivot_root"
+    };
+    syscall_table[SYS_UNSHARE] = (syscall_entry_t){
+        sys_unshare, 0, "unshare"
+    };
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"
     };
@@ -2357,6 +2816,9 @@ void syscall_init(void)
     };
     syscall_table[SYS_VFS_BOOT_CLOSE] = (syscall_entry_t){
         sys_vfs_boot_close, 0, "vfs_boot_close"
+    };
+    syscall_table[SYS_VFS_BOOT_TASKINFO] = (syscall_entry_t){
+        sys_vfs_boot_taskinfo, SYSCALL_FLAG_RT, "vfs_boot_taskinfo"
     };
     syscall_table[SYS_BLK_BOOT_READ] = (syscall_entry_t){
         sys_blk_boot_read, 0, "blk_boot_read"
@@ -2454,7 +2916,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 61 syscall base/UX/ipc/vfsd/blkd/signal/mreact/ksem/kmon/cap registrate\n");
+    uart_puts("[SYSCALL] 68 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
 }
 

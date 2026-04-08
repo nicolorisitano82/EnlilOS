@@ -74,7 +74,7 @@ typedef struct mm_space {
 
 **Stato attuale:** implementata v1 con VMA statiche kernel-side, syscall
 `mmap/munmap/msync`, supporto `MAP_SHARED` / `MAP_PRIVATE`, demo `/MMAPDEMO.ELF`
-e selftest `mmap-file` validato nel run completo `SUMMARY total=23 pass=23 fail=0`.
+e selftest `mmap-file` validato nel run completo `SUMMARY total=24 pass=24 fail=0`.
 
 - `MAP_SHARED` / `MAP_PRIVATE` supportati su file descriptor VFS
 - `MAP_ANONYMOUS` resta disponibile come base per heap e shared memory user-space
@@ -151,7 +151,7 @@ sigaction_t signal_table[64];    /* handler per i 64 segnali standard */
 **Stato attuale:** implementata v1 con `pgid/sid` per-task, syscall EL0
 `setpgid/getpgid/setsid/getsid/tcsetpgrp/tcgetpgrp`, `waitpid(WUNTRACED)`,
 job-control signal path completo e demo `/JOBDEMO.ELF` validato dal selftest
-`jobctl-core` nel run completo `SUMMARY total=23 pass=23 fail=0`.
+`jobctl-core` nel run completo `SUMMARY total=24 pass=24 fail=0`.
 
 - `setpgid()`, `getpgid()`, `setsid()`, `getsid()`
 - `tcsetpgrp()` / `tcgetpgrp()` per controllo terminale (console)
@@ -167,6 +167,20 @@ job-control signal path completo e demo `/JOBDEMO.ELF` validato dal selftest
 - `nsh` non espone ancora built-in `fg` / `bg`
 - non esiste ancora distinzione completa tra controlling TTY multipli: il modello
   attuale copre una console globale coerente con il target QEMU di bootstrap
+
+**Struttura file attuale:**
+```
+include/syscall.h      — ABI `setpgid/getpgid/setsid/getsid/tcsetpgrp/tcgetpgrp`
+include/sched.h        — metadata scheduler per `parent_pid/pgid/sid`
+include/tty.h          — foreground pgrp della console
+include/signal.h       — delivery per process group e stato stop/report
+kernel/sched.c         — ownership process group / sessione
+kernel/syscall.c       — syscall job control + `waitpid(WUNTRACED)`
+kernel/tty.c           — controllo terminale, `SIGTTIN/TTOU`, `CTRL+Z`
+kernel/signal.c        — stop/continue/reporting verso il parent
+kernel/selftest.c      — selftest end-to-end `jobctl-core`
+user/job_demo.c        — demo EL0 `/JOBDEMO.ELF`
+```
 
 ---
 
@@ -924,10 +938,10 @@ poi `vfs_kernel_ops` viene rimosso dal kernel e sostituito con chiamate IPC al s
   owner è task user-space, stat di `/VFSD.ELF` passante
 - proxy kernel con retry (1s deadline) su EBUSY/EAGAIN per la finestra di avvio del server
 
-**Resta a M9-03/M9-04:**
+**Resta oltre M9-04:**
 - rimozione del backend ext4/blocco dal kernel
-- mount dinamico reale tra server distinti (`vfsd` ↔ `blkd`)
-- namespace privati e gestione mount completamente lato server
+- mount dinamico reale tra server distinti (`vfsd` ↔ `blkd`) con backend non piu' bootstrap
+- cleanup/GC dello stato namespace lato server e policy piu' ricche per i mount
 
 ---
 
@@ -945,14 +959,24 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 
 ---
 
-### ⬜ M9-04 · Namespace & Mount Dinamico
+### ✅ M9-04 · Namespace & Mount Dinamico
 **Priorità:** MEDIA
 
-- `mount(dev, path, fstype, flags)` syscall (nr 165) — delega al `vfsd` via IPC
-- `umount(path)` — smonta filesystem e chiude la porta IPC del server fs
-- Namespace per processo: un processo può avere una vista privata del VFS (`unshare(CLONE_NEWNS)`)
-- Bind mount: `mount(src, dst, "bind", 0)` — due path puntano allo stesso inode
-- `pivot_root()` per transizione da `initrd` al root ext4 reale
+- syscall `chdir/getcwd`, `mount/umount`, `unshare(CLONE_NEWNS)` e `pivot_root()` proxyate dal kernel verso `vfsd`
+- namespace mount per-processo lato server: `vfsd` tiene `cwd` e mount table privata per PID,
+  con ereditarieta' su `fork()` tramite `SYS_VFS_BOOT_TASKINFO`
+- bind mount `mount(src, dst, "bind", 0)` implementato come alias di namespace verso lo stesso backend
+- `pivot_root()` funzionante per il bootstrap: il vecchio root viene ribasato nella nuova vista
+  (es. `/mnt/oldroot` -> `/oldroot`) e il task puo' passare da `initrd` a root ext4 privato
+- `open/execve/spawn` e il path shadow dei file descriptor usati da `mmap/msync` risolvono i path
+  tramite `vfsd`, quindi rispettano la vista privata del processo
+- demo `NSDEMO.ELF` e comando boot `nsdemo`
+- selftest `vfs-namespace` validato nel run completo `SUMMARY total=24 pass=24 fail=0`
+
+**Note v1 oneste:**
+- i backend filesystem reali restano ancora bootstrap kernel-side dietro `SYS_VFS_BOOT_*`
+- lo stato client/namespace in `vfsd` non fa ancora garbage collection dei PID terminati
+- `pivot_root()` copre il caso di bootstrap e rebase del vecchio root; policy avanzate restano per M11-07
 
 ---
 
@@ -2045,7 +2069,7 @@ e la futura migrazione a un server `procfsd` restano lavoro successivo.
 - `/proc/self` e `/proc/self/status` — alias del task corrente
 - mount automatico in `vfs_init()`
 - backend read-only in-kernel con `vfs_ops_t` dedicato
-- selftest automatico `procfs-core` nel run completo `SUMMARY total=23 pass=23 fail=0`
+- selftest automatico `procfs-core` nel run completo `SUMMARY total=24 pass=24 fail=0`
 
 **Resta da completare:**
 - `/proc/<pid>/maps`
@@ -2590,9 +2614,9 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M9-02** VFS Server (`vfsd`) — primo vero spostamento di una grossa superficie kernel in user-space
-2. **M9-03** Block Server (`blkd`) — completa la migrazione storage sopra capability + IPC
-3. **M11-01** musl libc — dopo i server base, sblocca userland C reale senza wrapper ad hoc
+1. **M8-08a** pipe() + dup/dup2 — piccolo step kernel-side che sblocca shell e tool POSIX
+2. **M11-01** musl libc — appena i primitive POSIX base sono stabili, sblocca userland C reale senza wrapper ad hoc
+3. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2644,7 +2668,7 @@ Senza questa fase tutto il kernel è un blob monolitico non sicuro.
 | 8 | **M9-02** VFS Server (`vfsd`) | Migra il VFS kernel di M5-02 in user-space. Dipendenza critica di audio, USB, procfs |
 | 9 | **M9-03** Block Server (`blkd`) | Migra il driver virtio-blk. Dipende da M9-02 e M9-01 |
 | 10 | **M14-01** procfs / sysfs | `procfs` core gia' implementato; resta da estendere `sysfs` e gli export avanzati |
-| 11 | **M9-04** Mount Dinamico + Namespace | Completa il VFS server. Richiesto da Linux compat più avanti |
+| 11 | **M9-04** Mount Dinamico + Namespace | ✅ Completata v1. `vfsd` gestisce cwd, mount privati, bind mount e `pivot_root()` |
 
 **Checkpoint FASE 2:** VFS e block device girano come processi separati, il filesystem
 è montato via server IPC, `/proc` è navigabile da shell.
@@ -2661,9 +2685,11 @@ Da qui in poi si può iniziare a portare software esistente.
 | 13 | **M8-08b** getcwd/chdir/env | Piccola, kernel puro. Richiesta da ogni shell e da musl |
 | 14 | **M8-08c** termios + isatty | Richiesta da arksh REPL. Piccola modifica alla line discipline esistente |
 | 15 | **M11-01** musl libc | La più importante di tutto il backlog. Da qui ogni programma C diventa compilabile |
-| 16 | **M8-04** Job Control | Dipende da M8-03. Richiesto da arksh per `CTRL+Z`/`fg`/`bg` |
-| 17 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting |
-| 18 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
+| 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
+| 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
+
+Nota: **M8-04 Job Control** e' gia' completata e disponibile come base per `CTRL+Z`,
+foreground/background group e `waitpid(WUNTRACED)`.
 
 **Checkpoint FASE 3:** si può compilare un programma C con musl, eseguirlo su EnlilOS,
 interagire con arksh, usare pipe (`ls | grep .c`), history, syntax highlight.
@@ -2820,7 +2846,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - M11-01 musl libc — senza libc nessun programma C gira
 - M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più
 
-**Stato FASE 1 e FASE 2 al 2026-04-06:**
+**Stato FASE 1 e FASE 2 al 2026-04-09:**
 - ✅ M8-01 fork + COW
 - ✅ M8-03 signal handling
 - ✅ M8-05 mreact
@@ -2830,5 +2856,5 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M9-02 vfsd bootstrap v1
 - ✅ M8-04 process groups / sessions / job control
 - ✅ M9-03 blkd
-- ⬜ M9-04 namespace
-- **Prossimo step:** FASE 3 — musl libc (M11-01) sblocca M8-08 arksh e tutto il porting POSIX
+- ✅ M9-04 namespace + mount dinamico v1
+- **Prossimo step:** aprire FASE 3 con `M8-08a` + `M11-01`, poi rete base con `M10-01`

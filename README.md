@@ -16,12 +16,12 @@ Le milestone completate oggi coprono:
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `mreact`, `ksem` e `kmon`.
-- **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC.
+- **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=23 pass=23 fail=0`.
+`SUMMARY total=24 pass=24 fail=0`.
 
 ---
 
@@ -84,10 +84,15 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `BLKD.ELF`
 - `MMAPDEMO.ELF`
 - `JOBDEMO.ELF`
+- `NSDEMO.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
 Questa scelta permette un bootstrap completamente in RAM e accessi O(1) ai file iniziali, utile per configurazione iniziale, recovery, avvio dei server user-space e validazione dei demo EL0.
+
+Da `M9-04`, i task EL0 passano anche da `vfsd` per `chdir()/getcwd()`, `mount()/umount()`,
+`unshare(CLONE_NEWNS)` e `pivot_root()`: la vista del filesystem puo' quindi diventare privata
+per processo senza bypassare il server VFS user-space.
 
 ---
 
@@ -164,6 +169,7 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `mkdir`, `rm`, `mv`
 - `elfdemo`, `execdemo`, `dyndemo`, `forkdemo`, `sigdemo`, `mreactdemo`
 - `jobdemo`
+- `nsdemo`
 - `runelf PATH`
 - `nsh`
 - `selftest`, `selftest [nome]`
@@ -185,11 +191,11 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 23 casi:
+Esiste una suite di self-test kernel-side che oggi copre 24 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
-- `fork-cow`, `signal-core`, `jobctl-core`, `mreact-core`, `cap-core`
+- `fork-cow`, `signal-core`, `jobctl-core`, `vfs-namespace`, `mreact-core`, `cap-core`
 - `ksem-core`, `kmon-core`, `ipc-sync`
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`
 
@@ -203,7 +209,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=23 pass=23 fail=0
+SUMMARY total=24 pass=24 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

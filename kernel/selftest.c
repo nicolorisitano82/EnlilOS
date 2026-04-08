@@ -307,6 +307,15 @@ static int selftest_case_rootfs(void)
              "/JOBDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/JOBDEMO.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/NSDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /NSDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /NSDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/NSDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/NSDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -797,6 +806,66 @@ static int selftest_case_cap(void)
              "timeout attesa CAPDEMO.ELF");
     ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
              "exit code CAPDEMO inatteso");
+    return 0;
+}
+
+static int selftest_case_vfs_namespace(void)
+{
+    static const char case_name[] = "vfs-namespace";
+    static const char nsroot_content[] = "ns-root\n";
+    static const char expected[] =
+        "bind-ok\n"
+        "umount-ok\n"
+        "fork-ok\n"
+        "pivot-ok\n";
+    vfs_file_t   file;
+    sched_tcb_t *task;
+    uint32_t     pid = 0U;
+    char         buf[160];
+    ssize_t      n;
+    int          rc;
+
+    if (!blk_is_ready() || !ext4_is_mounted())
+        return 0;
+
+    rc = vfs_unlink("/data/NSDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup NSDEMO.TXT fallita");
+    rc = vfs_unlink("/data/NSROOT.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT, "cleanup NSROOT.TXT fallita");
+
+    rc = vfs_open("/data/NSROOT.TXT", O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open NSROOT.TXT fallita");
+    n = vfs_write(&file, nsroot_content, st_strlen(nsroot_content));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(nsroot_content),
+             "write NSROOT.TXT fallita");
+    (void)vfs_close(&file);
+    (void)vfs_sync();
+
+    if (st_spawn_user_task(case_name, "/NSDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 4000ULL);
+    ST_CHECK(case_name, task != NULL, "task NSDEMO.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa NSDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "NSDEMO exit code non e' 0");
+
+    rc = vfs_open("/data/NSDEMO.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open NSDEMO.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read NSDEMO.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected), "contenuto NSDEMO.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/mnt", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == -ENOENT, "il namespace privato e' trapelato nel VFS globale");
+
+    rc = vfs_unlink("/data/NSDEMO.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink NSDEMO.TXT fallita");
+    rc = vfs_unlink("/data/NSROOT.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink NSROOT.TXT fallita");
     return 0;
 }
 
@@ -1485,6 +1554,7 @@ static const selftest_case_t selftest_cases[] = {
     { "fork-cow",    selftest_case_fork      },
     { "signal-core", selftest_case_signal    },
     { "jobctl-core", selftest_case_jobctl    },
+    { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },
     { "ksem-core",   selftest_case_ksem      },
