@@ -45,8 +45,23 @@ extern void *memset(void *dst, int value, size_t n);
 #define FD_TYPE_FREE    0
 #define FD_TYPE_VFS     1
 #define FD_TYPE_VFSD    2
+#define FD_TYPE_PIPE    3
 
 #define VFSD_HANDLE_MAX 64U
+#define FD_OBJECT_MAX   (SCHED_MAX_TASKS * MAX_FD)
+#define PIPE_POOL_MAX   32U
+#define PIPE_BUF_SIZE   4096U
+
+#define PIPE_END_READ   0U
+#define PIPE_END_WRITE  1U
+
+#define DEV_NODE_DIR        1U
+#define DEV_NODE_CONSOLE    2U
+#define DEV_NODE_TTY        3U
+#define DEV_NODE_STDIN      4U
+#define DEV_NODE_STDOUT     5U
+#define DEV_NODE_STDERR     6U
+#define DEV_NODE_NULL       7U
 
 typedef struct {
     uint8_t  in_use;
@@ -55,12 +70,32 @@ typedef struct {
 } vfs_srv_handle_t;
 
 typedef struct {
-    uint8_t  type;
-    uint8_t  _pad0;
-    uint16_t flags;
-    uint32_t remote_handle;
+    uint8_t    in_use;
+    uint8_t    type;
+    uint8_t    pipe_end;
+    uint8_t    _pad0;
+    uint16_t   flags;
+    uint16_t   _pad1;
+    uint32_t   refcount;
+    uint32_t   remote_handle;
+    void      *pipe;
     vfs_file_t file;
+} fd_object_t;
+
+typedef struct {
+    fd_object_t *obj;
 } fd_entry_t;
+
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  _pad0[3];
+    uint32_t readers;
+    uint32_t writers;
+    uint32_t read_pos;
+    uint32_t write_pos;
+    uint32_t size;
+    uint8_t  buf[PIPE_BUF_SIZE];
+} pipe_t;
 
 /*
  * Indicizzata per [pid % SCHED_MAX_TASKS][fd].
@@ -68,6 +103,8 @@ typedef struct {
  */
 static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
 static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
+static fd_object_t fd_objects[FD_OBJECT_MAX];
+static pipe_t      pipe_pool[PIPE_POOL_MAX];
 
 /* Owner check per blkd: solo il server proprietario della porta "block" può usare le blk_boot_* */
 static int blk_srv_owner_ok(void)
@@ -104,6 +141,10 @@ typedef struct {
     size_t      used;
 } exec_copy_t;
 
+static int  vfsd_proxy_close(uint32_t handle);
+static void stat_fill(stat_t *st, uint32_t mode, uint64_t size,
+                      uint32_t blksize);
+
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
 static void syscall_uart_put_u64(uint64_t v)
@@ -137,6 +178,16 @@ static void syscall_uart_put_i64(int64_t v)
     syscall_uart_put_u64(mag);
 }
 
+static void stat_fill(stat_t *st, uint32_t mode, uint64_t size,
+                      uint32_t blksize)
+{
+    if (!st) return;
+    st->st_mode    = mode;
+    st->st_blksize = blksize;
+    st->st_size    = size;
+    st->st_blocks  = (size + (uint64_t)blksize - 1ULL) / (uint64_t)blksize;
+}
+
 /* Indice nel fd_table per il task corrente */
 static inline int task_idx(void)
 {
@@ -144,83 +195,364 @@ static inline int task_idx(void)
     return (int)(current_task->pid % SCHED_MAX_TASKS);
 }
 
-/* Restituisce l'entry fd, NULL se fuori range o free */
-static fd_entry_t *fd_get(int fd)
+static int task_idx_from_pid(uint32_t pid)
+{
+    return (int)(pid % SCHED_MAX_TASKS);
+}
+
+static int syscall_streq(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+
+    while (*a && *b && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static fd_entry_t *fd_entry_get(int fd)
 {
     if (fd < 0 || fd >= MAX_FD) return NULL;
     fd_entry_t *e = &fd_tables[task_idx()][fd];
-    return (e->type != FD_TYPE_FREE) ? e : NULL;
+    return e->obj ? e : NULL;
+}
+
+/* Restituisce l'oggetto fd corrente, NULL se fuori range o free */
+static fd_object_t *fd_get(int fd)
+{
+    fd_entry_t *e = fd_entry_get(fd);
+    return e ? e->obj : NULL;
+}
+
+static fd_object_t *fd_object_alloc(void)
+{
+    for (uint32_t i = 0U; i < FD_OBJECT_MAX; i++) {
+        if (fd_objects[i].in_use)
+            continue;
+
+        memset(&fd_objects[i], 0, sizeof(fd_objects[i]));
+        fd_objects[i].in_use = 1U;
+        return &fd_objects[i];
+    }
+    return NULL;
+}
+
+static pipe_t *fd_pipe_alloc(void)
+{
+    for (uint32_t i = 0U; i < PIPE_POOL_MAX; i++) {
+        if (pipe_pool[i].in_use)
+            continue;
+
+        memset(&pipe_pool[i], 0, sizeof(pipe_pool[i]));
+        pipe_pool[i].in_use = 1U;
+        return &pipe_pool[i];
+    }
+    return NULL;
 }
 
 /* Alloca il primo fd libero >= 3 (non tocca stdin/stdout/stderr) */
-static int fd_alloc(void)
+static int fd_alloc_in_slot(int idx)
 {
-    int idx = task_idx();
     for (int i = 3; i < MAX_FD; i++) {
-        if (fd_tables[idx][i].type == FD_TYPE_FREE)
+        if (fd_tables[idx][i].obj == NULL)
             return i;
     }
     return -1;
 }
 
+static int fd_alloc(void)
+{
+    return fd_alloc_in_slot(task_idx());
+}
+
 static void fd_clear(fd_entry_t *e)
 {
-    e->type = FD_TYPE_FREE;
-    e->flags = 0;
-    e->remote_handle = 0U;
-    e->file.mount = NULL;
-    e->file.node_id = 0;
-    e->file.flags = 0;
-    e->file.pos = 0;
-    e->file.size_hint = 0;
-    e->file.dir_index = 0;
-    e->file.cookie = 0;
+    if (e)
+        e->obj = NULL;
+}
+
+static void fd_object_put(fd_object_t *obj)
+{
+    pipe_t *pipe;
+
+    if (!obj || !obj->in_use || obj->refcount == 0U)
+        return;
+
+    obj->refcount--;
+    if (obj->refcount != 0U)
+        return;
+
+    if (obj->type == FD_TYPE_VFS) {
+        if (obj->file.mount)
+            (void)vfs_close(&obj->file);
+    } else if (obj->type == FD_TYPE_VFSD) {
+        if (obj->remote_handle != 0U)
+            (void)vfsd_proxy_close(obj->remote_handle);
+        if (obj->file.mount)
+            (void)vfs_close(&obj->file);
+    } else if (obj->type == FD_TYPE_PIPE) {
+        pipe = (pipe_t *)obj->pipe;
+        if (pipe && pipe->in_use) {
+            if (obj->pipe_end == PIPE_END_READ) {
+                if (pipe->readers > 0U)
+                    pipe->readers--;
+            } else {
+                if (pipe->writers > 0U)
+                    pipe->writers--;
+            }
+            if (pipe->readers == 0U && pipe->writers == 0U)
+                memset(pipe, 0, sizeof(*pipe));
+        }
+    }
+
+    memset(obj, 0, sizeof(*obj));
+}
+
+static void fd_release_slot(fd_entry_t *e)
+{
+    if (!e || !e->obj)
+        return;
+
+    fd_object_put(e->obj);
+    e->obj = NULL;
+}
+
+static int fd_attach_object(fd_entry_t *e, fd_object_t *obj)
+{
+    if (!e || !obj || !obj->in_use)
+        return -EINVAL;
+
+    obj->refcount++;
+    e->obj = obj;
+    return 0;
+}
+
+static void fd_release_slot_index(int idx)
+{
+    for (int fd = 0; fd < MAX_FD; fd++)
+        fd_release_slot(&fd_tables[idx][fd]);
+}
+
+static int fd_bind_path_idx(int idx, int fd, const char *path, uint16_t flags)
+{
+    fd_object_t *obj;
+    int          rc;
+
+    if (idx < 0 || idx >= SCHED_MAX_TASKS || fd < 0 || fd >= MAX_FD)
+        return -EINVAL;
+
+    obj = fd_object_alloc();
+    if (!obj)
+        return -ENFILE;
+
+    rc = vfs_open(path, flags, &obj->file);
+    if (rc < 0) {
+        memset(obj, 0, sizeof(*obj));
+        return rc;
+    }
+
+    obj->type  = FD_TYPE_VFS;
+    obj->flags = flags;
+    return fd_attach_object(&fd_tables[idx][fd], obj);
+}
+
+static void fd_init_slot_defaults(int idx)
+{
+    if (idx < 0 || idx >= SCHED_MAX_TASKS)
+        return;
+
+    for (int j = 0; j < MAX_FD; j++)
+        fd_clear(&fd_tables[idx][j]);
+
+    (void)fd_bind_path_idx(idx, 0, "/dev/stdin",  O_RDONLY);
+    (void)fd_bind_path_idx(idx, 1, "/dev/stdout", O_WRONLY);
+    (void)fd_bind_path_idx(idx, 2, "/dev/stderr", O_WRONLY);
+}
+
+static void fd_reset_slot_defaults(int idx)
+{
+    fd_release_slot_index(idx);
+    fd_init_slot_defaults(idx);
 }
 
 static void fd_clone_task_table(int dst_idx, int src_idx)
 {
-    memcpy(&fd_tables[dst_idx][0], &fd_tables[src_idx][0], sizeof(fd_tables[0]));
+    if (dst_idx < 0 || dst_idx >= SCHED_MAX_TASKS ||
+        src_idx < 0 || src_idx >= SCHED_MAX_TASKS)
+        return;
+
+    fd_release_slot_index(dst_idx);
+    for (int i = 0; i < MAX_FD; i++) {
+        fd_object_t *obj = fd_tables[src_idx][i].obj;
+
+        fd_tables[dst_idx][i].obj = NULL;
+        if (obj)
+            (void)fd_attach_object(&fd_tables[dst_idx][i], obj);
+    }
 }
 
 static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
 {
-    int rc = vfs_open(path, flags, &e->file);
+    fd_object_t *obj;
+    int          rc;
+
+    if (!e)
+        return -EINVAL;
+
+    obj = fd_object_alloc();
+    if (!obj)
+        return -ENFILE;
+
+    rc = vfs_open(path, flags, &obj->file);
     if (rc < 0) {
-        fd_clear(e);
+        memset(obj, 0, sizeof(*obj));
         return rc;
     }
 
-    e->type  = FD_TYPE_VFS;
-    e->flags = flags;
-    return 0;
+    obj->type  = FD_TYPE_VFS;
+    obj->flags = flags;
+    return fd_attach_object(e, obj);
 }
 
 static int fd_bind_remote(fd_entry_t *e, uint32_t handle, uint16_t flags)
 {
+    fd_object_t *obj;
+
     if (!e || handle == 0U)
         return -EINVAL;
 
-    fd_clear(e);
-    e->type = FD_TYPE_VFSD;
-    e->flags = flags;
-    e->remote_handle = handle;
-    return 0;
+    obj = fd_object_alloc();
+    if (!obj)
+        return -ENFILE;
+
+    obj->type = FD_TYPE_VFSD;
+    obj->flags = flags;
+    obj->remote_handle = handle;
+    return fd_attach_object(e, obj);
 }
 
 static int fd_bind_remote_shadow(fd_entry_t *e, const char *path, uint16_t flags)
 {
     uint16_t shadow_flags;
+    fd_object_t *obj;
 
     if (!e || !path)
         return -EINVAL;
+    if (!e->obj)
+        return -EBADF;
 
     /*
      * Il file remoto e' gia' stato aperto/creato/troncato tramite vfsd.
      * Per il solo shadow locale usato da mmap/msync evitiamo side effect
      * duplicati come un secondo O_TRUNC/O_CREAT/O_APPEND.
      */
+    obj = e->obj;
     shadow_flags = (uint16_t)(flags & (uint16_t)~(O_TRUNC | O_CREAT | O_APPEND));
-    return vfs_open(path, shadow_flags, &e->file);
+    return vfs_open(path, shadow_flags, &obj->file);
+}
+
+static int fd_is_tty_object(const fd_object_t *obj)
+{
+    uint32_t node_id;
+
+    if (!obj)
+        return 0;
+    if ((obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD) || !obj->file.mount)
+        return 0;
+    if (!obj->file.mount->path || !syscall_streq(obj->file.mount->path, "/dev"))
+        return 0;
+
+    node_id = obj->file.node_id;
+    return node_id == DEV_NODE_CONSOLE || node_id == DEV_NODE_TTY ||
+           node_id == DEV_NODE_STDIN || node_id == DEV_NODE_STDOUT ||
+           node_id == DEV_NODE_STDERR;
+}
+
+static ssize_t fd_pipe_read(fd_object_t *obj, void *buf, size_t count)
+{
+    pipe_t   *pipe;
+    uint8_t  *dst = (uint8_t *)buf;
+    size_t    got = 0U;
+
+    if (!obj || obj->type != FD_TYPE_PIPE || obj->pipe_end != PIPE_END_READ || !buf)
+        return -EBADF;
+
+    pipe = (pipe_t *)obj->pipe;
+    if (!pipe || !pipe->in_use)
+        return -EBADF;
+
+    while (got < count) {
+        while (pipe->size == 0U) {
+            if (pipe->writers == 0U)
+                return (ssize_t)got;
+            if (obj->flags & O_NONBLOCK)
+                return got ? (ssize_t)got : -EAGAIN;
+            if (signal_has_unblocked_pending(current_task))
+                return got ? (ssize_t)got : -EINTR;
+            sched_yield();
+        }
+
+        dst[got++] = pipe->buf[pipe->read_pos];
+        pipe->read_pos = (pipe->read_pos + 1U) % PIPE_BUF_SIZE;
+        pipe->size--;
+
+        if (obj->flags & O_NONBLOCK)
+            break;
+    }
+
+    return (ssize_t)got;
+}
+
+static ssize_t fd_pipe_write(fd_object_t *obj, const void *buf, size_t count)
+{
+    pipe_t        *pipe;
+    const uint8_t *src = (const uint8_t *)buf;
+    size_t         put = 0U;
+
+    if (!obj || obj->type != FD_TYPE_PIPE || obj->pipe_end != PIPE_END_WRITE || !buf)
+        return -EBADF;
+
+    pipe = (pipe_t *)obj->pipe;
+    if (!pipe || !pipe->in_use)
+        return -EBADF;
+
+    while (put < count) {
+        if (pipe->readers == 0U)
+            return put ? (ssize_t)put : -EPIPE;
+
+        while (pipe->size >= PIPE_BUF_SIZE) {
+            if (pipe->readers == 0U)
+                return put ? (ssize_t)put : -EPIPE;
+            if (obj->flags & O_NONBLOCK)
+                return put ? (ssize_t)put : -EAGAIN;
+            if (signal_has_unblocked_pending(current_task))
+                return put ? (ssize_t)put : -EINTR;
+            sched_yield();
+        }
+
+        pipe->buf[pipe->write_pos] = src[put++];
+        pipe->write_pos = (pipe->write_pos + 1U) % PIPE_BUF_SIZE;
+        pipe->size++;
+
+        if (obj->flags & O_NONBLOCK)
+            break;
+    }
+
+    return (ssize_t)put;
+}
+
+void syscall_task_cleanup(sched_tcb_t *task)
+{
+    int idx;
+
+    if (!task)
+        return;
+
+    idx = task_idx_from_pid(task->pid);
+    fd_reset_slot_defaults(idx);
+    task_brk[idx] = 0ULL;
 }
 
 static int vfs_srv_task_slot(void)
@@ -902,8 +1234,8 @@ static uint64_t sys_write(uint64_t args[6])
     uint64_t     count    = args[2];
     int          copy_rc;
 
-    fd_entry_t *e = fd_get(fd);
-    if (!e) return ERR(EBADF);
+    fd_object_t *obj = fd_get(fd);
+    if (!obj) return ERR(EBADF);
     if (!src) return ERR(EFAULT);
     if (!count) return 0;
     if (count > 4096) count = 4096;
@@ -923,10 +1255,12 @@ static uint64_t sys_write(uint64_t args[6])
 
     ssize_t rc;
 
-    if (e->type == FD_TYPE_VFSD) {
-        rc = vfsd_proxy_write(e->remote_handle, src, (size_t)count);
-    } else if (e->type == FD_TYPE_VFS) {
-        rc = vfs_write(&e->file, src, count);
+    if (obj->type == FD_TYPE_VFSD) {
+        rc = vfsd_proxy_write(obj->remote_handle, src, (size_t)count);
+    } else if (obj->type == FD_TYPE_VFS) {
+        rc = vfs_write(&obj->file, src, count);
+    } else if (obj->type == FD_TYPE_PIPE) {
+        rc = fd_pipe_write(obj, src, (size_t)count);
     } else {
         if (bounce)
             kfree(bounce);
@@ -954,8 +1288,8 @@ static uint64_t sys_read(uint64_t args[6])
     uint64_t  cnt     = args[2];
     int       copy_rc;
 
-    fd_entry_t *e = fd_get(fd);
-    if (!e) return ERR(EBADF);
+    fd_object_t *obj = fd_get(fd);
+    if (!obj) return ERR(EBADF);
     if (!dst) return ERR(EFAULT);
     if (cnt == 0) return 0;
 
@@ -969,10 +1303,12 @@ static uint64_t sys_read(uint64_t args[6])
 
     ssize_t rc;
 
-    if (e->type == FD_TYPE_VFSD) {
-        rc = vfsd_proxy_read(e->remote_handle, dst, (size_t)cnt);
-    } else if (e->type == FD_TYPE_VFS) {
-        rc = vfs_read(&e->file, dst, cnt);
+    if (obj->type == FD_TYPE_VFSD) {
+        rc = vfsd_proxy_read(obj->remote_handle, dst, (size_t)cnt);
+    } else if (obj->type == FD_TYPE_VFS) {
+        rc = vfs_read(&obj->file, dst, cnt);
+    } else if (obj->type == FD_TYPE_PIPE) {
+        rc = fd_pipe_read(obj, dst, (size_t)cnt);
     } else {
         if (bounce)
             kfree(bounce);
@@ -1052,7 +1388,7 @@ static uint64_t sys_open(uint64_t args[6])
                 rc = fd_bind_remote_shadow(&fd_tables[idx][fd], resolved_buf, oflags);
             if (rc < 0) {
                 (void)vfsd_proxy_close(remote_handle);
-                fd_clear(&fd_tables[idx][fd]);
+                fd_release_slot(&fd_tables[idx][fd]);
             }
         }
     } else {
@@ -1067,7 +1403,7 @@ static uint64_t sys_open(uint64_t args[6])
  * Syscall 5 — close
  *
  * args: fd
- * Non si chiudono fd 0/1/2 (protezione stdin/stdout/stderr).
+ * Chiude un fd e rilascia la descrizione condivisa se l'ultimo riferimento.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_close(uint64_t args[6])
 {
@@ -1075,24 +1411,11 @@ static uint64_t sys_close(uint64_t args[6])
 
     if (fd < 0 || fd >= MAX_FD) return ERR(EBADF);
 
-    /* Protezione su fd standard */
-    if (fd <= 2) return ERR(EBADF);
-
     int idx = task_idx();
     fd_entry_t *e = &fd_tables[idx][fd];
-    if (e->type == FD_TYPE_FREE) return ERR(EBADF);
+    if (!e->obj) return ERR(EBADF);
 
-    if (e->type == FD_TYPE_VFS) {
-        int rc = vfs_close(&e->file);
-        if (rc < 0) return ERR(-rc);
-    } else if (e->type == FD_TYPE_VFSD) {
-        int rc = vfsd_proxy_close(e->remote_handle);
-        if (e->file.mount)
-            (void)vfs_close(&e->file);
-        if (rc < 0) return ERR(-rc);
-    }
-
-    fd_clear(e);
+    fd_release_slot(e);
     return 0;
 }
 
@@ -1110,18 +1433,24 @@ static uint64_t sys_fstat(uint64_t args[6])
     stat_t    st;
     int       rc;
 
-    fd_entry_t *e = fd_get(fd);
-    if (!e) return ERR(EBADF);
+    fd_object_t *obj = fd_get(fd);
+    if (!obj) return ERR(EBADF);
     if (!buf) return ERR(EFAULT);
 
     if (current_task && sched_task_is_user(current_task))
         buf = &st;
 
-    if (e->type == FD_TYPE_VFSD)
-        rc = vfsd_proxy_stat(e->remote_handle, buf);
-    else if (e->type == FD_TYPE_VFS)
-        rc = vfs_stat(&e->file, buf);
-    else
+    if (obj->type == FD_TYPE_VFSD)
+        rc = vfsd_proxy_stat(obj->remote_handle, buf);
+    else if (obj->type == FD_TYPE_VFS)
+        rc = vfs_stat(&obj->file, buf);
+    else if (obj->type == FD_TYPE_PIPE) {
+        stat_fill(buf, S_IFIFO | S_IRUSR | S_IWUSR |
+                       S_IRGRP | S_IWGRP |
+                       S_IROTH | S_IWOTH,
+                  0ULL, PIPE_BUF_SIZE);
+        rc = 0;
+    } else
         return ERR(EBADF);
 
     if (rc < 0) return ERR(-rc);
@@ -1177,17 +1506,19 @@ static uint64_t sys_mmap(uint64_t args[6])
 
     /* ── Caso 2: file-backed (M8-02) ───────────────────────────── */
     {
-        fd_entry_t *e;
-        vfs_file_t  f;
+        fd_object_t *obj;
+        vfs_file_t   f;
         uint32_t    vma_flags = 0U;
         uint32_t    mmu_prot;
         size_t      i;
 
-        e = fd_get(fd);
-        if (!e) return MAP_FAILED_VA;
+        obj = fd_get(fd);
+        if (!obj) return MAP_FAILED_VA;
+        if (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD)
+            return MAP_FAILED_VA;
 
         /* Copia il file handle e riposiziona all'offset richiesto */
-        f     = e->file;
+        f     = obj->file;
         f.pos = file_offset;
 
         /* Alloca le pagine fisiche e mappa in user space */
@@ -1220,7 +1551,7 @@ static uint64_t sys_mmap(uint64_t args[6])
 
         /* Registra la VMA per il write-back (msync/munmap) */
         (void)vmm_map_file(current_task->pid, user_va, aligned,
-                           vma_flags, file_offset, &e->file);
+                           vma_flags, file_offset, &obj->file);
 
         return (uint64_t)user_va;
     }
@@ -1589,10 +1920,10 @@ static uint64_t sys_getdents(uint64_t args[6])
     int           fd = (int)args[0];
     uintptr_t     buf_uva = (uintptr_t)args[1];
     uint32_t      max_entries = (uint32_t)args[2];
-    fd_entry_t   *e = fd_get(fd);
+    fd_object_t  *obj = fd_get(fd);
     uint32_t      copied = 0U;
 
-    if (!e) return ERR(EBADF);
+    if (!obj) return ERR(EBADF);
     if (!buf_uva) return ERR(EFAULT);
     if (max_entries == 0U) return 0;
     if (max_entries > 64U) max_entries = 64U;
@@ -1602,10 +1933,10 @@ static uint64_t sys_getdents(uint64_t args[6])
         sys_dirent_t  out;
         int           rc;
 
-        if (e->type == FD_TYPE_VFSD)
-            rc = vfsd_proxy_readdir(e->remote_handle, &ent);
-        else if (e->type == FD_TYPE_VFS)
-            rc = vfs_readdir(&e->file, &ent);
+        if (obj->type == FD_TYPE_VFSD)
+            rc = vfsd_proxy_readdir(obj->remote_handle, &ent);
+        else if (obj->type == FD_TYPE_VFS)
+            rc = vfs_readdir(&obj->file, &ent);
         else
             return ERR(EBADF);
 
@@ -1935,6 +2266,177 @@ static uint64_t sys_getcwd(uint64_t args[6])
     if (rc < 0)
         return ERR(-rc);
     return buf_uva;
+}
+
+static uint64_t sys_pipe(uint64_t args[6])
+{
+    uintptr_t    fds_uva = (uintptr_t)args[0];
+    int32_t      fds[2];
+    int          idx = task_idx();
+    int          fd_r;
+    int          fd_w;
+    pipe_t      *pipe;
+    fd_object_t *obj_r;
+    fd_object_t *obj_w;
+    int          rc;
+
+    if (!fds_uva)
+        return ERR(EFAULT);
+
+    fd_r = fd_alloc_in_slot(idx);
+    if (fd_r < 0)
+        return ERR(ENFILE);
+
+    fd_w = -1;
+    for (int i = 3; i < MAX_FD; i++) {
+        if (i == fd_r)
+            continue;
+        if (fd_tables[idx][i].obj == NULL) {
+            fd_w = i;
+            break;
+        }
+    }
+    if (fd_w < 0)
+        return ERR(ENFILE);
+
+    pipe = fd_pipe_alloc();
+    if (!pipe)
+        return ERR(ENFILE);
+
+    obj_r = fd_object_alloc();
+    obj_w = fd_object_alloc();
+    if (!obj_r || !obj_w) {
+        if (obj_r)
+            memset(obj_r, 0, sizeof(*obj_r));
+        if (obj_w)
+            memset(obj_w, 0, sizeof(*obj_w));
+        memset(pipe, 0, sizeof(*pipe));
+        return ERR(ENFILE);
+    }
+
+    pipe->readers = 1U;
+    pipe->writers = 1U;
+
+    obj_r->type = FD_TYPE_PIPE;
+    obj_r->flags = O_RDONLY;
+    obj_r->pipe = pipe;
+    obj_r->pipe_end = PIPE_END_READ;
+
+    obj_w->type = FD_TYPE_PIPE;
+    obj_w->flags = O_WRONLY;
+    obj_w->pipe = pipe;
+    obj_w->pipe_end = PIPE_END_WRITE;
+
+    rc = fd_attach_object(&fd_tables[idx][fd_r], obj_r);
+    if (rc < 0) {
+        memset(obj_r, 0, sizeof(*obj_r));
+        memset(obj_w, 0, sizeof(*obj_w));
+        memset(pipe, 0, sizeof(*pipe));
+        return ERR(-rc);
+    }
+
+    rc = fd_attach_object(&fd_tables[idx][fd_w], obj_w);
+    if (rc < 0) {
+        fd_release_slot(&fd_tables[idx][fd_r]);
+        memset(obj_w, 0, sizeof(*obj_w));
+        memset(pipe, 0, sizeof(*pipe));
+        return ERR(-rc);
+    }
+
+    fds[0] = fd_r;
+    fds[1] = fd_w;
+    rc = user_store_bytes(fds_uva, fds, sizeof(fds));
+    if (rc < 0) {
+        fd_release_slot(&fd_tables[idx][fd_r]);
+        fd_release_slot(&fd_tables[idx][fd_w]);
+        return ERR(-rc);
+    }
+
+    return 0;
+}
+
+static uint64_t sys_dup(uint64_t args[6])
+{
+    int          oldfd = (int)args[0];
+    int          newfd;
+    fd_object_t *obj = fd_get(oldfd);
+
+    if (!obj)
+        return ERR(EBADF);
+
+    newfd = fd_alloc();
+    if (newfd < 0)
+        return ERR(ENFILE);
+
+    if (fd_attach_object(&fd_tables[task_idx()][newfd], obj) < 0)
+        return ERR(ENFILE);
+    return (uint64_t)newfd;
+}
+
+static uint64_t sys_dup2(uint64_t args[6])
+{
+    int          oldfd = (int)args[0];
+    int          newfd = (int)args[1];
+    int          idx = task_idx();
+    fd_object_t *obj = fd_get(oldfd);
+
+    if (!obj)
+        return ERR(EBADF);
+    if (newfd < 0 || newfd >= MAX_FD)
+        return ERR(EBADF);
+    if (oldfd == newfd)
+        return (uint64_t)newfd;
+
+    fd_release_slot(&fd_tables[idx][newfd]);
+    if (fd_attach_object(&fd_tables[idx][newfd], obj) < 0)
+        return ERR(ENFILE);
+    return (uint64_t)newfd;
+}
+
+static uint64_t sys_tcgetattr(uint64_t args[6])
+{
+    int        fd = (int)args[0];
+    uintptr_t  term_uva = (uintptr_t)args[1];
+    termios_t  term;
+    int        rc;
+
+    if (!term_uva)
+        return ERR(EFAULT);
+    if (!fd_is_tty_object(fd_get(fd)))
+        return ERR(ENOTDIR);
+
+    rc = tty_tcgetattr(&term);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = user_store_bytes(term_uva, &term, sizeof(term));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
+static uint64_t sys_tcsetattr(uint64_t args[6])
+{
+    int        fd = (int)args[0];
+    int        action = (int)args[1];
+    uintptr_t  term_uva = (uintptr_t)args[2];
+    termios_t  term;
+    int        rc;
+
+    if (!term_uva)
+        return ERR(EFAULT);
+    if (!fd_is_tty_object(fd_get(fd)))
+        return ERR(ENOTDIR);
+
+    rc = user_copy_bytes(term_uva, &term, sizeof(term));
+    if (rc < 0)
+        return ERR(-rc);
+    rc = tty_tcsetattr(action, &term);
+    return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_isatty(uint64_t args[6])
+{
+    return fd_is_tty_object(fd_get((int)args[0])) ? 1ULL : 0ULL;
 }
 
 static uint64_t sys_mount(uint64_t args[6])
@@ -2665,14 +3167,11 @@ void syscall_init(void)
     tty_init();
     vfs_init();
 
-    /* 2. Inizializza fd_table: fd 0/1/2 = VFS devfs per tutti i task */
+    /* 2. Inizializza fd_table e object pool */
+    memset(fd_objects, 0, sizeof(fd_objects));
+    memset(pipe_pool, 0, sizeof(pipe_pool));
     for (int i = 0; i < SCHED_MAX_TASKS; i++) {
-        for (int j = 0; j < MAX_FD; j++)
-            fd_clear(&fd_tables[i][j]);
-
-        (void)fd_bind_path(&fd_tables[i][0], "/dev/stdin",  O_RDONLY);
-        (void)fd_bind_path(&fd_tables[i][1], "/dev/stdout", O_WRONLY);
-        (void)fd_bind_path(&fd_tables[i][2], "/dev/stderr", O_WRONLY);
+        fd_init_slot_defaults(i);
     }
 
     /* 3. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
@@ -2774,6 +3273,24 @@ void syscall_init(void)
     };
     syscall_table[SYS_GETCWD] = (syscall_entry_t){
         sys_getcwd, 0, "getcwd"
+    };
+    syscall_table[SYS_PIPE] = (syscall_entry_t){
+        sys_pipe, 0, "pipe"
+    };
+    syscall_table[SYS_DUP] = (syscall_entry_t){
+        sys_dup, SYSCALL_FLAG_RT, "dup"
+    };
+    syscall_table[SYS_DUP2] = (syscall_entry_t){
+        sys_dup2, SYSCALL_FLAG_RT, "dup2"
+    };
+    syscall_table[SYS_TCGETATTR] = (syscall_entry_t){
+        sys_tcgetattr, 0, "tcgetattr"
+    };
+    syscall_table[SYS_TCSETATTR] = (syscall_entry_t){
+        sys_tcsetattr, 0, "tcsetattr"
+    };
+    syscall_table[SYS_ISATTY] = (syscall_entry_t){
+        sys_isatty, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "isatty"
     };
     syscall_table[SYS_MOUNT] = (syscall_entry_t){
         sys_mount, 0, "mount"
@@ -2916,8 +3433,8 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 68 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap registrate\n");
-    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 32 task slot\n");
+    uart_puts("[SYSCALL] 74 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty registrate\n");
+    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 task slot\n");
 }
 
 /* ════════════════════════════════════════════════════════════════════

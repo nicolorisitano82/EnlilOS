@@ -14,10 +14,10 @@ tutto ogni sessione.
 - **Output selftest**: `enlil-selftest.elf` (suite separata, flag `-DENLILOS_SELFTEST=1`)
 - **Comandi**:
   - `make` — build normale
-  - `make test` — build selftest + lancio QEMU (con timeout via SIGKILL al termine)
+  - `make test` — build selftest + lancio QEMU
   - `make run` — boot kernel normale in QEMU
-- **Il `Killed: 9` finale di `make test` è normale** — il Makefile invia SIGKILL a QEMU
-  dopo che il kernel stampa "Sistema fermo". Non è un crash.
+- `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
+  il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
   la successiva fallisce con "Failed to get write lock". Usare `pkill -f qemu-system-aarch64`.
 
@@ -49,6 +49,10 @@ PRIO_NORMAL = 128
 PRIO_LOW    = 200
 PRIO_IDLE   = 255  // task idle, sempre READY
 ```
+
+- `SCHED_MAX_TASKS = 64`
+- Nota pratica: il pool task non ricicla ancora i TCB zombie; la suite completa ora
+  supera 32 task cumulativi, quindi il valore 64 è voluto e allineato ai log runtime.
 
 ### TCB (`sched_tcb_t`) — esattamente 64 byte, layout fisso
 ```
@@ -138,6 +142,9 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 100–119 ANE
 110–111 kmon_signal / kmon_broadcast
 120–139 GPU
+28–29   chdir/getcwd
+34–38   pipe/dup/dup2/tcgetattr/tcsetattr
+41      isatty
 134     kill
 140–142 IPC (port_lookup/ipc_wait/ipc_reply)
 150–155 VFS boot (vfs_boot_open/read/write/readdir/stat/close)
@@ -332,15 +339,38 @@ Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-04 sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=24 pass=24 fail=0
+SUMMARY total=25 pass=25 fail=0
 ```
 
 **Prossime priorità**:
-1. M8-08a pipe() + dup/dup2
-2. M11-01 musl libc
+1. M11-01 musl libc
+2. M8-08d..f glob/fnmatch + build system + integrazione arksh
 3. M10-01 VirtIO network driver
-4. M8-08 termios/getcwd/env e arksh default shell
-5. M11-02 POSIX Threading (pthread)
+4. M11-02 POSIX Threading (pthread)
+5. M11-03 dynamic linker user-space / `.so`
+
+### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
+
+- Il modello fd non e' piu' "valore per slot": ogni `fd_table[task][fd]` punta a un
+  `fd_object_t` condivisibile. `dup()`, `dup2()` e `fork()` devono condividere lo stesso
+  oggetto con `refcount`, altrimenti `close()` rompe pipe/redirection.
+- `syscall_task_cleanup()` e' obbligatoria su exit: rilascia fd, pipe e shadow state per
+  il task. Se viene saltata, la suite si riempie di writer/read-end fantasma.
+- Le pipe sono implementate in `kernel/syscall.c` con pool statico da 32 pipe e buffer
+  da 4096 byte. EOF lato lettore arriva quando `writers == 0`; `fstat()` espone `S_IFIFO`.
+- `O_NONBLOCK` e' utile soprattutto sul path pipe. Non e' un modello completo di I/O non
+  bloccante generale su tutti i backend VFS.
+- `getcwd()` / `chdir()` non devono mantenere uno stato parallelo nel kernel: la source of
+  truth e' `vfsd`, coerente con i namespace mount di `M9-04`.
+- L'environment bootstrap dei task lanciati con `elf64_spawn_path()` e':
+  `PATH=/:/dev:/data:/sysroot`, `HOME=/`, `PWD=/`, `TERM=enlilos`, `USER=root`.
+  `execve()` invece deve preservare l'`envp` passato dal caller.
+- `termios` e' una v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`,
+  `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
+- `VMIN/VTIME` non hanno ancora semantica POSIX completa e il termios state non e'
+  per-open-file o per-pty. Va bene per bootstrap shell/REPL, non ancora per compat piena.
+- `POSIXDEMO.ELF` e il selftest `posix-ux` sono il riferimento runtime per validare insieme:
+  env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 

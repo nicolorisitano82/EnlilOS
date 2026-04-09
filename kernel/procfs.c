@@ -36,7 +36,7 @@
 #define PROC_NODE_MAKE(t, pid)  ((uint32_t)(t) | ((uint32_t)(pid) << 8))
 
 /* Dimensione massima del buffer di testo generato per un singolo file.
- * /proc/sched elenca fino a SCHED_MAX_TASKS (32) task × ~80 byte/riga ≈ 2560.
+ * /proc/sched elenca fino a SCHED_MAX_TASKS (64) task × ~80 byte/riga ≈ 5120.
  * Usiamo 4 KB per sicurezza. */
 #define PROC_BUFSIZE    4096U
 

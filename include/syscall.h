@@ -20,6 +20,7 @@
 #include "ksem.h"
 #include "kmon.h"
 #include "cap.h"
+#include "termios.h"
 
 /* ── Numeri syscall ─────────────────────────────────────────────────── */
 
@@ -56,6 +57,12 @@
 #define SYS_UMOUNT          31
 #define SYS_PIVOT_ROOT      32
 #define SYS_UNSHARE         33
+#define SYS_PIPE            34
+#define SYS_DUP             35
+#define SYS_DUP2            36
+#define SYS_TCGETATTR       37
+#define SYS_TCSETATTR       38
+#define SYS_ISATTY          41
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -133,6 +140,7 @@
 #define ENFILE              23
 #define ENOSPC              28
 #define EROFS               30
+#define EPIPE               32
 #define ERANGE              34
 #define ENAMETOOLONG        36
 #define ENOTEMPTY           39
@@ -150,6 +158,7 @@
 #define O_CREAT     (1 << 6)
 #define O_TRUNC     (1 << 9)
 #define O_APPEND    (1 << 10)
+#define O_NONBLOCK  (1 << 11)
 
 /* ── Flag mmap() ────────────────────────────────────────────────────── */
 
@@ -202,6 +211,7 @@ typedef struct {
 /* ── struct stat minimale (M5-02) ──────────────────────────────────── */
 
 #define S_IFMT      0170000U
+#define S_IFIFO     0010000U
 #define S_IFREG     0100000U
 #define S_IFDIR     0040000U
 #define S_IFCHR     0020000U

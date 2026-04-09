@@ -1358,6 +1358,13 @@ int elf64_load_from_memory(const void *image, size_t image_size,
 int elf64_load_from_path(const char *path, const char *argv0, elf_image_t *out)
 {
     const char *argv_local[1];
+    static const char *const env_default[] = {
+        "PATH=/:/dev:/data:/sysroot",
+        "HOME=/",
+        "PWD=/",
+        "TERM=enlilos",
+        "USER=root",
+    };
 
     if (!path || path[0] == '\0') {
         elf_set_error("path ELF vuoto");
@@ -1365,7 +1372,10 @@ int elf64_load_from_path(const char *path, const char *argv0, elf_image_t *out)
     }
 
     argv_local[0] = (argv0 && argv0[0] != '\0') ? argv0 : path;
-    return elf_load_path_exec_dynamic(path, argv_local, 1ULL, NULL, 0ULL, out);
+    return elf_load_path_exec_dynamic(path, argv_local, 1ULL,
+                                      env_default,
+                                      sizeof(env_default) / sizeof(env_default[0]),
+                                      out);
 }
 
 int elf64_load_from_path_exec(const char *path,

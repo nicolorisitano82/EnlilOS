@@ -32,9 +32,11 @@ static uint16_t tty_edit_len;
 static uint8_t tty_ready_buf[TTY_READY_MAX];
 static uint16_t tty_ready_head;
 static uint16_t tty_ready_tail;
+static uint8_t tty_eof_pending;
 
 static uint32_t tty_foreground_pgid;
 static uint32_t tty_session_sid;
+static termios_t tty_termios;
 
 static inline int tty_ready_empty(void)
 {
@@ -68,7 +70,8 @@ static void tty_echo_char(uint8_t c)
 {
     if (c == '\n') {
         term80_putc('\n');
-        uart_putc('\r');
+        if ((tty_termios.c_oflag & OPOST) && (tty_termios.c_oflag & ONLCR))
+            uart_putc('\r');
         uart_putc('\n');
         return;
     }
@@ -151,46 +154,126 @@ static void tty_commit_line(void)
     tty_edit_len = 0U;
 }
 
+static void tty_commit_partial_line(void)
+{
+    for (uint16_t i = 0; i < tty_edit_len; i++) {
+        if (!tty_ready_push(tty_edit_buf[i]))
+            break;
+    }
+    tty_edit_len = 0U;
+}
+
+static int tty_is_canonical(void)
+{
+    return (tty_termios.c_lflag & ICANON) != 0U;
+}
+
+static int tty_is_echo_enabled(void)
+{
+    return (tty_termios.c_lflag & ECHO) != 0U;
+}
+
+static void tty_termios_defaults(termios_t *t)
+{
+    if (!t)
+        return;
+
+    t->c_iflag = ICRNL | IXON;
+    t->c_oflag = OPOST | ONLCR;
+    t->c_cflag = CS8 | CREAD;
+    t->c_lflag = ECHO | ECHOE | ICANON | ISIG | IEXTEN;
+    for (uint32_t i = 0U; i < (uint32_t)sizeof(t->c_cc); i++)
+        t->c_cc[i] = 0U;
+
+    t->c_cc[VINTR]  = TTY_CTRL_C;
+    t->c_cc[VEOF]   = 0x04U;
+    t->c_cc[VERASE] = TTY_DEL;
+    t->c_cc[VKILL]  = 0x15U;
+    t->c_cc[VMIN]   = 1U;
+    t->c_cc[VTIME]  = 0U;
+    t->c_cc[VSUSP]  = TTY_CTRL_Z;
+}
+
 static void tty_handle_input_char(uint8_t c)
 {
-    if (c == '\r')
+    if ((tty_termios.c_iflag & ICRNL) && c == '\r')
         c = '\n';
 
-    if (c == TTY_CTRL_C) {
-        tty_edit_len = 0U;
-        tty_signal_foreground(SIGINT);
-        uart_putc('^');
-        uart_putc('C');
-        tty_echo_char('\n');
-        return;
+    if (tty_termios.c_lflag & ISIG) {
+        if (c == tty_termios.c_cc[VINTR]) {
+            tty_edit_len = 0U;
+            tty_signal_foreground(SIGINT);
+            if (tty_is_echo_enabled()) {
+                uart_putc('^');
+                uart_putc('C');
+                tty_echo_char('\n');
+            }
+            return;
+        }
+
+        if (c == tty_termios.c_cc[VSUSP]) {
+            tty_edit_len = 0U;
+            tty_signal_foreground(SIGTSTP);
+            if (tty_is_echo_enabled()) {
+                uart_putc('^');
+                uart_putc('Z');
+                tty_echo_char('\n');
+            }
+            return;
+        }
     }
 
-    if (c == TTY_CTRL_Z) {
-        tty_edit_len = 0U;
-        tty_signal_foreground(SIGTSTP);
-        uart_putc('^');
-        uart_putc('Z');
-        tty_echo_char('\n');
-        return;
-    }
+    if (tty_is_canonical()) {
+        if (c == tty_termios.c_cc[VERASE] || c == TTY_BS) {
+            if (tty_edit_len > 0U) {
+                tty_edit_len--;
+                if (tty_termios.c_lflag & ECHOE)
+                    tty_echo_backspace();
+            }
+            return;
+        }
 
-    if (c == TTY_BS || c == TTY_DEL) {
-        if (tty_edit_len > 0U) {
-            tty_edit_len--;
-            tty_echo_backspace();
+        if (c == tty_termios.c_cc[VKILL]) {
+            while (tty_edit_len > 0U) {
+                tty_edit_len--;
+                if (tty_termios.c_lflag & ECHOE)
+                    tty_echo_backspace();
+            }
+            return;
+        }
+
+        if (c == tty_termios.c_cc[VEOF]) {
+            if (tty_edit_len > 0U)
+                tty_commit_partial_line();
+            else
+                tty_eof_pending = 1U;
+            return;
+        }
+
+        if (c == '\n') {
+            if (tty_is_echo_enabled())
+                tty_echo_char('\n');
+            tty_commit_line();
+            return;
+        }
+
+        if (c == '\t' || (c >= 32U && c < 127U)) {
+            if (tty_edit_len < TTY_EDIT_MAX) {
+                tty_edit_buf[tty_edit_len++] = c;
+                if (tty_is_echo_enabled())
+                    tty_echo_char(c);
+            }
         }
         return;
     }
 
-    if (c == '\n') {
-        tty_echo_char('\n');
-        tty_commit_line();
-        return;
-    }
+    if (c == '\r' && (tty_termios.c_iflag & ICRNL))
+        c = '\n';
 
-    if (c == '\t' || (c >= 32U && c < 127U)) {
-        if (tty_edit_len < TTY_EDIT_MAX) {
-            tty_edit_buf[tty_edit_len++] = c;
+    if (tty_ready_push(c) && tty_is_echo_enabled()) {
+        if (c == TTY_DEL || c == TTY_BS) {
+            tty_echo_backspace();
+        } else {
             tty_echo_char(c);
         }
     }
@@ -208,8 +291,10 @@ void tty_init(void)
     tty_edit_len = 0U;
     tty_ready_head = 0U;
     tty_ready_tail = 0U;
+    tty_eof_pending = 0U;
     tty_foreground_pgid = 0U;
     tty_session_sid = 0U;
+    tty_termios_defaults(&tty_termios);
 
     uart_puts("[TTY] Line discipline: echo + canonical + ^C/^Z pronto\n");
 }
@@ -228,6 +313,11 @@ uint64_t tty_read(char *buf, uint64_t cnt)
     if (signal_has_unblocked_pending(current_task))
         return ERR(EINTR);
 
+    if (tty_eof_pending && tty_ready_empty()) {
+        tty_eof_pending = 0U;
+        return 0U;
+    }
+
     if (tty_ready_empty())
         return ERR(EAGAIN);
 
@@ -238,7 +328,7 @@ uint64_t tty_read(char *buf, uint64_t cnt)
             break;
 
         buf[got++] = (char)c;
-        if (c == '\n')
+        if (tty_is_canonical() && c == '\n')
             break;
     }
 
@@ -279,4 +369,39 @@ uint32_t tty_tcgetpgrp(void)
 {
     tty_adopt_current_session();
     return tty_foreground_pgid;
+}
+
+int tty_tcgetattr(termios_t *out)
+{
+    if (!out)
+        return -EFAULT;
+
+    *out = tty_termios;
+    return 0;
+}
+
+int tty_tcsetattr(int action, const termios_t *in)
+{
+    if (!in)
+        return -EFAULT;
+    if (action != TCSANOW && action != TCSADRAIN && action != TCSAFLUSH)
+        return -EINVAL;
+
+    tty_termios = *in;
+    if (tty_termios.c_cc[VERASE] == 0U)
+        tty_termios.c_cc[VERASE] = TTY_DEL;
+    if (tty_termios.c_cc[VINTR] == 0U)
+        tty_termios.c_cc[VINTR] = TTY_CTRL_C;
+    if (tty_termios.c_cc[VSUSP] == 0U)
+        tty_termios.c_cc[VSUSP] = TTY_CTRL_Z;
+    if (tty_termios.c_cc[VMIN] == 0U)
+        tty_termios.c_cc[VMIN] = 1U;
+
+    if (action == TCSAFLUSH) {
+        tty_ready_head = tty_ready_tail = 0U;
+        tty_edit_len = 0U;
+        tty_eof_pending = 0U;
+    }
+
+    return 0;
 }

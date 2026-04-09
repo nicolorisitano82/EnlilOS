@@ -316,6 +316,15 @@ static int selftest_case_rootfs(void)
              "/NSDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/NSDEMO.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/POSIXDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /POSIXDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /POSIXDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/POSIXDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/POSIXDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -866,6 +875,26 @@ static int selftest_case_vfs_namespace(void)
     ST_CHECK(case_name, rc == 0, "unlink NSDEMO.TXT fallita");
     rc = vfs_unlink("/data/NSROOT.TXT");
     ST_CHECK(case_name, rc == 0, "unlink NSROOT.TXT fallita");
+    return 0;
+}
+
+static int selftest_case_posix_ux(void)
+{
+    static const char case_name[] = "posix-ux";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, "/POSIXDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 3000ULL);
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
+    ST_CHECK(case_name, task != NULL, "task POSIXDEMO.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa POSIXDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "POSIXDEMO exit code non e' 0");
     return 0;
 }
 
@@ -1554,6 +1583,7 @@ static const selftest_case_t selftest_cases[] = {
     { "fork-cow",    selftest_case_fork      },
     { "signal-core", selftest_case_signal    },
     { "jobctl-core", selftest_case_jobctl    },
+    { "posix-ux",    selftest_case_posix_ux  },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },

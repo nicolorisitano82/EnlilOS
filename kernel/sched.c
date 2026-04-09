@@ -4,7 +4,7 @@
  * Implementazione FPP con:
  *   - ready_bitmap[4] (256 bit): trova la priorità massima in O(1)
  *   - run_queue[256]:  FIFO intrusive singly-linked per priorità
- *   - task_pool[32]:   pool statico di sched_tcb_t (no kmalloc nel scheduler)
+ *   - task_pool[64]:   pool statico di sched_tcb_t (no kmalloc nel scheduler)
  *   - sched_context_switch: assembly in sched_switch.S
  *   - Preemption: need_resched settato da sched_tick(), letto da vectors.S
  */
@@ -21,6 +21,7 @@
 #include "vmm.h"
 
 extern void *memset(void *dst, int value, size_t n);
+extern void syscall_task_cleanup(sched_tcb_t *task);
 
 /* ── Costanti interne ────────────────────────────────────────────── */
 
@@ -1062,6 +1063,7 @@ void sched_task_exit_with_code(int32_t code)
         ksem_task_cleanup(current_task);
         mreact_task_cleanup(current_task);
         vmm_cleanup_task(current_task->pid);
+        syscall_task_cleanup(current_task);
         signal_task_exit(current_task);
         current_task->state = TCB_STATE_ZOMBIE;
     }

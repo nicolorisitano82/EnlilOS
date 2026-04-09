@@ -74,7 +74,7 @@ typedef struct mm_space {
 
 **Stato attuale:** implementata v1 con VMA statiche kernel-side, syscall
 `mmap/munmap/msync`, supporto `MAP_SHARED` / `MAP_PRIVATE`, demo `/MMAPDEMO.ELF`
-e selftest `mmap-file` validato nel run completo `SUMMARY total=24 pass=24 fail=0`.
+e selftest `mmap-file` validato nel run completo `SUMMARY total=25 pass=25 fail=0`.
 
 - `MAP_SHARED` / `MAP_PRIVATE` supportati su file descriptor VFS
 - `MAP_ANONYMOUS` resta disponibile come base per heap e shared memory user-space
@@ -151,7 +151,7 @@ sigaction_t signal_table[64];    /* handler per i 64 segnali standard */
 **Stato attuale:** implementata v1 con `pgid/sid` per-task, syscall EL0
 `setpgid/getpgid/setsid/getsid/tcsetpgrp/tcgetpgrp`, `waitpid(WUNTRACED)`,
 job-control signal path completo e demo `/JOBDEMO.ELF` validato dal selftest
-`jobctl-core` nel run completo `SUMMARY total=24 pass=24 fail=0`.
+`jobctl-core` nel run completo `SUMMARY total=25 pass=25 fail=0`.
 
 - `setpgid()`, `getpgid()`, `setsid()`, `getsid()`
 - `tcsetpgrp()` / `tcgetpgrp()` per controllo terminale (console)
@@ -560,9 +560,15 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 - Loop con deadline 1s su EBUSY/EAGAIN — tollera la finestra di avvio di vfsd
 - Necessario per i selftest che avviano vfsd e subito dopo fanno richieste VFS
 
-**Correzione numeri syscall M8-08c (termios)**
-- 19/20/21 erano già occupati da SYS_SIGRETURN/SYS_YIELD/futuro
-- Riassegnati: `tcgetattr` = 21, `tcsetattr` = 22, `isatty` = 23
+**Numeri syscall reali M8-08a/b/c**
+- `chdir` = 28
+- `getcwd` = 29
+- `pipe` = 34
+- `dup` = 35
+- `dup2` = 36
+- `tcgetattr` = 37
+- `tcsetattr` = 38
+- `isatty` = 41
 
 ---
 
@@ -592,75 +598,87 @@ necessarie sono già pianificate nelle milestone precedenti o in questo backlog:
 |---|---|---|
 | `fork()` / `execve()` | Sì | M8-01 + M6-02 |
 | `waitpid()` | Sì | M3-02 |
-| `pipe()` | Vedi M8-08a | questa milestone |
-| `dup2()` | Vedi M8-08a | questa milestone |
+| `pipe()` | Sì (v1) | M8-08a |
+| `dup2()` | Sì (v1) | M8-08a |
 | `open/read/write/close` | Sì | M3-02 + M5-02 |
-| `getcwd()` / `chdir()` | Vedi M8-08b | questa milestone |
+| `getcwd()` / `chdir()` | Sì (v1) | M8-08b |
 | `stat()` / `access()` | Sì | M3-02 (fstat) + M5-02 |
 | `opendir()` / `readdir()` | Sì | M5-02 |
 | `signal()` / `sigaction()` | Sì | M8-03 |
-| `tcgetattr()` / `tcsetattr()` | Vedi M8-08c | questa milestone |
-| `isatty()` | Vedi M8-08c | questa milestone |
-| `getenv()` / `setenv()` | Vedi M8-08b | questa milestone |
+| `tcgetattr()` / `tcsetattr()` | Sì (subset v1) | M8-08c |
+| `isatty()` | Sì (v1) | M8-08c |
+| `getenv()` / `setenv()` | Parziale | M8-08b |
 | `dlopen()` / `dlsym()` | Solo dopo M11-03 | M11-03 |
-| `realpath()` | Vedi M8-08b | questa milestone |
+| `realpath()` | Parziale lato libc | M8-08b |
 | `glob()` | Vedi M8-08d | questa milestone |
 | `fnmatch()` | Vedi M8-08d | questa milestone |
 | XDG dirs (`~/.config/arksh`) | Vedi M8-08b | questa milestone |
 
 ---
 
-#### M8-08a · Syscall pipe() e dup2()
+#### ✅ M8-08a · Syscall pipe() e dup2()
 
 Necessarie per la pipeline tra comandi (`cmd1 | cmd2`).
 
-**`pipe(int fd[2])` — syscall nr 22:**
+**Stato attuale:** implementata v1 con `pipe/dup/dup2` kernel-side, file descriptor
+condivisi a refcount corretto su `fork()`/`dup*()`, demo `/POSIXDEMO.ELF` e selftest
+`posix-ux` validato nel run completo `SUMMARY total=25 pass=25 fail=0`.
+
+**`pipe(int fd[2])` — syscall nr 34:**
 - Crea una coppia di fd: `fd[0]` lettura, `fd[1]` scrittura
 - Implementazione kernel: buffer circolare statico da 4096 byte per pipe
 - Pool di `MAX_PIPES = 32` pipe kernel (statico, no kmalloc)
-- Scrittura blocca se piena; lettura blocca se vuota (con timeout opzionale)
-- `close(fd[1])` → EOF sul lettore (campo `writer_closed` nella pipe entry)
-- RT constraint: `pipe_write` con `O_NONBLOCK` → EAGAIN se pieno — mai blocca task RT
+- Scrittura blocca cooperativamente se piena; lettura blocca cooperativamente se vuota
+- `close(fd[1])` → EOF sul lettore quando il conteggio writer scende a zero
+- `O_NONBLOCK` supportato sul path pipe con `-EAGAIN` se il buffer è pieno/vuoto
+- `isatty(fd_pipe)` ritorna `0`, `fstat(fd_pipe)` espone `S_IFIFO`
 
 ```c
 typedef struct {
     uint8_t   buf[4096];
     uint32_t  read_pos, write_pos;
     uint32_t  size;
-    int       writer_closed;
-    int       reader_closed;
-    sched_tcb_t *read_waiter;
-    sched_tcb_t *write_waiter;
+    uint32_t  readers;
+    uint32_t  writers;
 } pipe_t;
 
 static pipe_t pipe_pool[MAX_PIPES];
 ```
 
-**`dup2(int oldfd, int newfd)` — syscall nr 33:**
-- Copia l'entry `fd_table[pid][oldfd]` in `fd_table[pid][newfd]`
-- Se `newfd` già aperto: chiude prima
-- O(1) — due operazioni sulla fd_table
+**`dup2(int oldfd, int newfd)` — syscall nr 36:**
+- Condivide lo stesso `fd_object_t` del `oldfd` con refcount incrementato
+- Se `newfd` è già aperto: chiude prima il vecchio oggetto
+- Corretto anche attraverso `fork()`: la table child clona gli stessi oggetti condivisi
 
-**`dup(int oldfd)` — syscall nr 32:**
+**`dup(int oldfd)` — syscall nr 35:**
 - Trova il primo slot libero in `fd_table[pid]` e ci copia `oldfd`
+- `close()` rilascia solo il riferimento del singolo fd; l'oggetto sottostante si chiude all'ultimo ref
 
 ---
 
-#### M8-08b · Environment e CWD
+#### ✅ M8-08b · Environment e CWD
 
 Necessari per `cd`, variabili `$PATH`, `$HOME`, `$PWD`, ecc.
 
+**Stato attuale:** implementata v1. `getcwd/chdir` sono disponibili per i task EL0,
+il `cwd` è risolto tramite `vfsd` e i task lanciati con `elf64_spawn_path()` ricevono
+un ambiente bootstrap (`PATH`, `HOME`, `PWD`, `TERM`, `USER`). Demo e validazione
+runtime passano tramite `/POSIXDEMO.ELF` e selftest `posix-ux`.
+
 **Environment (`getenv`/`setenv`/`unsetenv`/`environ`):**
-- Array `envp[]` già passato nell'ABI stack al `execve` (M6-01 auxv) — arksh lo legge
-- `setenv`/`unsetenv`: gestiti interamente in musl user-space (heap) — nessuna syscall nuova
+- Array `envp[]` già passato nell'ABI stack al `execve` (M6-01 auxv) — `nsh`/demo lo leggono
+- `elf64_spawn_path()` fornisce env bootstrap di default: `PATH=/:/dev:/data:/sysroot`,
+  `HOME=/`, `PWD=/`, `TERM=enlilos`, `USER=root`
+- `execve()` continua a usare l'`envp` esplicitamente fornito dal caller
+- `setenv`/`unsetenv`: restano responsabilità della libc user-space (M11-01), non del kernel
 
-**`getcwd(char *buf, size_t size)` — syscall nr 17:**
-- Kernel mantiene `char cwd[256]` per processo nel TCB esteso
-- `getcwd` copia in `buf` — O(1)
+**`getcwd(char *buf, size_t size)` — syscall nr 29:**
+- Il kernel proxya la richiesta verso `vfsd`, che è la source of truth del namespace mount + `cwd`
+- `getcwd` copia il path risolto in user-space
 
-**`chdir(const char *path)` — syscall nr 80:**
-- Risolve il path via VFS server, aggiorna `tcb->cwd`
-- `chdir` di un path relativo: concatena `cwd + "/" + path`, normalizza `.` e `..`
+**`chdir(const char *path)` — syscall nr 28:**
+- Risolve il path via `vfsd`, aggiorna il `cwd` privato del task e rispetta i namespace mount
+- `chdir` di un path relativo usa la vista privata del processo, coerente con `unshare(CLONE_NEWNS)`
 - Ritorna `ENOENT` se il path non esiste, `ENOTDIR` se non è una directory
 
 **`realpath(const char *path, char *resolved)` — implementato in musl** sopra
@@ -668,15 +686,19 @@ Necessari per `cd`, variabili `$PATH`, `$HOME`, `$PWD`, ecc.
 
 ---
 
-#### M8-08c · Terminal Control (termios)
+#### ✅ M8-08c · Terminal Control (termios)
 
 Necessario per il REPL interattivo di arksh: syntax highlighting, autosuggestion,
 history con frecce, Ctrl+C/D/Z.
 
-**`tcgetattr(int fd, struct termios *t)` — syscall nr 21:**
-**`tcsetattr(int fd, int action, const struct termios *t)` — syscall nr 22:**
+**Stato attuale:** implementata v1 con subset `termios`, `isatty()`, modalità
+canonical/raw sulla console globale e integrazione con la line discipline esistente.
+La copertura runtime passa da `/POSIXDEMO.ELF` e selftest `posix-ux`.
 
-Il kernel mantiene uno `struct termios` per ogni fd che punta alla console:
+**`tcgetattr(int fd, struct termios *t)` — syscall nr 37:**
+**`tcsetattr(int fd, int action, const struct termios *t)` — syscall nr 38:**
+
+Il kernel mantiene uno `struct termios` per la console attiva:
 
 ```c
 /* Sottoinsieme minimale per arksh */
@@ -690,9 +712,16 @@ typedef struct {
 ```
 
 - Modalità **canonical** (default): line buffering, Backspace, Ctrl+C → SIGINT
+- `Ctrl+Z` rispetta `ISIG` e genera `SIGTSTP`
 - Modalità **raw** (`~ICANON`): arksh la abilita per il REPL — ogni byte arriva subito,
   senza buffering di riga; cursor movement con sequenze ANSI
-- `isatty(fd)` — syscall nr 23: ritorna 1 se `fd` è connesso alla console, 0 altrimenti
+- `isatty(fd)` — syscall nr 41: ritorna 1 se `fd` è connesso alla console, 0 altrimenti
+- `tcsetattr(TCSANOW)` è supportato; `TCSADRAIN` / `TCSAFLUSH` al momento convergono sullo stesso path
+
+**Limiti v1 dichiarati:**
+- `VMIN/VTIME` non hanno ancora una semantica completa POSIX
+- lo stato `termios` è globale sulla console, non ancora per-open-file o per-pty
+- il supporto REPL avanzato di arksh richiederà ancora `glob/fnmatch` e la toolchain libc (M11-01)
 
 **Sequenze ANSI necessarie per il REPL arksh:**
 - `\e[A`/`\e[B` — su/giù (history navigation)
@@ -856,8 +885,10 @@ compatibilità con software userspace che si aspetta locale e cataloghi
 compat/arksh/
     enlilos.c           — platform layer EnlilOS per arksh (contribuito upstream)
     enlilos.h
-kernel/pipe.c           — implementazione pipe() + dup()/dup2() (M8-08a)
-include/pipe.h
+kernel/syscall.c        — fd object model + pipe()/dup()/dup2()/isatty()
+kernel/tty.c            — subset termios canonical/raw (M8-08c)
+include/termios.h       — ABI termios minimale condivisa kernel/userspace
+user/posix_demo.c       — demo EL0 per pipe/dup/cwd/termios
 tools/enlilos-aarch64.cmake  — toolchain file CMake cross-compilation
 Makefile                — target 'arksh' aggiunto
 ```
@@ -971,7 +1002,7 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 - `open/execve/spawn` e il path shadow dei file descriptor usati da `mmap/msync` risolvono i path
   tramite `vfsd`, quindi rispettano la vista privata del processo
 - demo `NSDEMO.ELF` e comando boot `nsdemo`
-- selftest `vfs-namespace` validato nel run completo `SUMMARY total=24 pass=24 fail=0`
+- selftest `vfs-namespace` validato nel run completo `SUMMARY total=25 pass=25 fail=0`
 
 **Note v1 oneste:**
 - i backend filesystem reali restano ancora bootstrap kernel-side dietro `SYS_VFS_BOOT_*`
@@ -1315,15 +1346,15 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 
 | Nr Linux | Nome | Stato EnlilOS | Note implementazione |
 |---|---|---|---|
-| 17 | `getcwd` | ⬜ M8-08b | già pianificata |
-| 22 | `pipe` | ⬜ M8-08a | già pianificata |
+| 17 | `getcwd` | ✅ M8-08b v1 | syscall EnlilOS disponibile come `SYS_GETCWD` |
+| 22 | `pipe` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_PIPE` |
 | 23 | `select` | ⬜ questa milestone | fd multipli con timeout |
 | 24 | `sched_yield` | ⬜ | chiama `schedule()` — triviale |
 | 29 | `shmget` | ⬜ | shared memory System V |
 | 30 | `shmat` | ⬜ | attach shared memory |
 | 31 | `shmctl` | ⬜ | controllo + IPC_RMID |
-| 32 | `dup` | ⬜ M8-08a | già pianificata |
-| 33 | `dup2` | ⬜ M8-08a | già pianificata |
+| 32 | `dup` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP` |
+| 33 | `dup2` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP2` |
 | 35 | `nanosleep` | ⬜ M11-01 | pianificata |
 | 41 | `socket` | ⬜ M10-03 | pianificata |
 | 42 | `connect` | ⬜ M10-03 | pianificata |
@@ -1343,7 +1374,7 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 | 76 | `truncate` | ⬜ | tronca file a N byte |
 | 77 | `ftruncate` | ⬜ | come truncate ma su fd |
 | 78 | `getdents64` | ⬜ | readdir POSIX → formato Linux dirent64 |
-| 80 | `chdir` | ⬜ M8-08b | già pianificata |
+| 80 | `chdir` | ✅ M8-08b v1 | syscall EnlilOS disponibile come `SYS_CHDIR` |
 | 82 | `rename` | ⬜ M5-04 | già pianificata |
 | 83 | `mkdir` | ⬜ M5-04 | già pianificata |
 | 84 | `rmdir` | ⬜ M5-04 | già pianificata |
@@ -2069,7 +2100,7 @@ e la futura migrazione a un server `procfsd` restano lavoro successivo.
 - `/proc/self` e `/proc/self/status` — alias del task corrente
 - mount automatico in `vfs_init()`
 - backend read-only in-kernel con `vfs_ops_t` dedicato
-- selftest automatico `procfs-core` nel run completo `SUMMARY total=24 pass=24 fail=0`
+- selftest automatico `procfs-core` nel run completo `SUMMARY total=25 pass=25 fail=0`
 
 **Resta da completare:**
 - `/proc/<pid>/maps`
@@ -2614,8 +2645,8 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M8-08a** pipe() + dup/dup2 — piccolo step kernel-side che sblocca shell e tool POSIX
-2. **M11-01** musl libc — appena i primitive POSIX base sono stabili, sblocca userland C reale senza wrapper ad hoc
+1. **M11-01** musl libc — adesso che pipe/cwd/termios base sono stabili, sblocca userland C reale senza wrapper ad hoc
+2. **M8-08d..f** glob/fnmatch + build system + integrazione arksh — completa il porting della shell di default
 3. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
@@ -2681,9 +2712,9 @@ Da qui in poi si può iniziare a portare software esistente.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 12 | **M8-08a** pipe() + dup/dup2 | Piccola, kernel puro. Richiesta da arksh e da musl |
-| 13 | **M8-08b** getcwd/chdir/env | Piccola, kernel puro. Richiesta da ogni shell e da musl |
-| 14 | **M8-08c** termios + isatty | Richiesta da arksh REPL. Piccola modifica alla line discipline esistente |
+| 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
+| 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
+| 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
 | 15 | **M11-01** musl libc | La più importante di tutto il backlog. Da qui ogni programma C diventa compilabile |
 | 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
@@ -2846,7 +2877,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - M11-01 musl libc — senza libc nessun programma C gira
 - M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più
 
-**Stato FASE 1 e FASE 2 al 2026-04-09:**
+**Stato FASE 1, FASE 2 e avvio FASE 3 al 2026-04-09:**
 - ✅ M8-01 fork + COW
 - ✅ M8-03 signal handling
 - ✅ M8-05 mreact
@@ -2855,6 +2886,9 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M9-01 capability system
 - ✅ M9-02 vfsd bootstrap v1
 - ✅ M8-04 process groups / sessions / job control
+- ✅ M8-08a pipe + dup/dup2
+- ✅ M8-08b getcwd/chdir + env bootstrap
+- ✅ M8-08c termios + isatty
 - ✅ M9-03 blkd
 - ✅ M9-04 namespace + mount dinamico v1
-- **Prossimo step:** aprire FASE 3 con `M8-08a` + `M11-01`, poi rete base con `M10-01`
+- **Prossimo step:** proseguire FASE 3 con `M11-01`, poi chiudere `M8-08d..f` e aprire rete base con `M10-01`
