@@ -84,6 +84,7 @@
 #define SYS_GETTID          57
 #define SYS_SET_TID_ADDRESS 58
 #define SYS_EXIT_GROUP      59
+#define SYS_TGKILL          66
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82

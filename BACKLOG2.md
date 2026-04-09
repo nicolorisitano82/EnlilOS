@@ -1210,7 +1210,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime nel selftest completo `SUMMARY total=35 pass=35 fail=0`
+- validazione runtime nel selftest completo `SUMMARY total=36 pass=36 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1243,13 +1243,20 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
 **Studio di implementazione dettagliato:** vedi [M11-02.md](M11-02.md)
 
 **Stato reale ad oggi:**
-- `M11-02a` e' completata `v1`
-- `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e` restano aperte
+- `M11-02a` e `M11-02b` sono completate `v1`
+- `M11-02c`, `M11-02d`, `M11-02e` restano aperte
 - baseline kernel gia' presente:
   - `getpid()` = `tgid`, nuova `gettid()`
   - `clone()` subset thread-oriented
   - stato condiviso di processo via `proc_slot` statico (`mm`, fd table, `brk`, namespace/cwd `vfsd`, signal dispositions)
   - selftest `clone-thread` e demo `/CLONEDEMO.ELF`
+- lifecycle thread gia' presente:
+  - `set_tid_address()`
+  - `exit_group()`
+  - `tgkill()`
+  - `clear_child_tid` con clear affidabile su exit normale e signal-directed terminate
+  - processo waitable solo dopo l'uscita dell'ultimo thread
+  - selftest `thread-lifecycle` e demo `/THREADLIFE.ELF`
 
 **Scope reale consigliato per la `v1`:**
 - `pthread_create`
@@ -1277,9 +1284,6 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
   - `clone`
   - `gettid`
 - ancora aperti:
-  - `set_tid_address`
-  - `exit_group`
-  - `tgkill`
   - `futex`
   - `mprotect` minimale per stack guard page thread
 
@@ -1322,23 +1326,35 @@ Implementazione kernel:
   `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
 - supporto `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
   `CLONE_CHILD_CLEARTID` lato memoria utente
-- `fork()` e `execve()` rifiutano con `-EBUSY` i processi multi-thread finche'
-  non viene chiuso il lifecycle completo in `M11-02b`
+- `fork()` e `execve()` rifiutano ancora con `-EBUSY` i processi multi-thread:
+  il limite resta intenzionale finche' non esiste un path pthread/futex completo
+  e ben validato oltre `M11-02b`
 - selftest `clone-thread` verde, demo `/CLONEDEMO.ELF` disponibile dalla boot console
 
 **Limiti dichiarati della v1:**
-- nessun wake futex su `clear_child_tid` finche' non arriva `M11-02b/c`
-- `set_tid_address()`, `exit_group()` e `tgkill()` non ancora implementate
-- niente `pthread_join()/detach()` finche' non arriva `M11-02b/d`
+- nessun wake futex su `clear_child_tid` finche' non arriva `M11-02c`
+- niente `pthread_join()/detach()` finche' non arriva `M11-02c/d`
 - i metadati di processo zombie restano vivi fino al reap per non rompere
   `waitpid()`, `SIGCHLD` e job control
 
-**M11-02b · Lifecycle thread + join**
+**M11-02b · Lifecycle thread + join groundwork**
+- **Stato attuale:** completata `v1`
 - `set_tid_address()`
 - `exit_group()`
 - `tgkill()`
-- `clear_child_tid` + wake
 - cleanup differenziato thread/processo
+- `clear_child_tid` pulito in modo affidabile su exit normale e terminazione via segnale
+- `signal_send_pid()` ormai process-directed per `tgid`; la delivery thread-directed passa da `tgkill()`
+- processo marcato waitable solo quando esce l'ultimo thread del thread-group
+- demo `/THREADLIFE.ELF`
+- selftest `thread-lifecycle`
+
+**Note v1:**
+- il wake su `clear_child_tid` non c'e' ancora: arriva con `futex` in `M11-02c`
+- `pthread_join()` non va ancora costruita sopra `waitpid()`: la base corretta resta
+  `CLONE_CHILD_CLEARTID + set_tid_address() + futex(FUTEX_WAIT)`
+- `exit_group()` termina il resto del thread-group e fa convergere il codice finale
+  del processo sul leader waitable
 
 **M11-02c · Futex core**
 - `WAIT`
@@ -1627,11 +1643,11 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 | 110 | `getppid` | ⬜ M11-01 | pianificata |
 | 113 | `setuid` | ⬜ | stub OK (single-user) |
 | 114 | `setgid` | ⬜ | stub OK |
-| 131 | `tgkill` | ⬜ | invia segnale a thread specifico (= kill su EnlilOS) |
+| 131 | `tgkill` | ✅ M11-02b | invia segnale a thread specifico |
 | 160 | `settimeofday` | ⬜ | privilegiato — solo root |
 | 203 | `sched_setaffinity` | ⬜ | dopo M13-02 SMP; stub OK prima |
 | 204 | `sched_getaffinity` | ⬜ | ritorna maschera CPU disponibili |
-| 218 | `set_tid_address` | ⬜ | clear-child-tid per thread join |
+| 218 | `set_tid_address` | ✅ M11-02b | clear-child-tid per thread join |
 | 220 | `clone3` | ⬜ | estensione di clone() per thread (M11-02) |
 | 222 | `mmap` | ✅ M3-02 | già implementata |
 | 226 | `mprotect` | ⬜ | cambia permessi MMU su range |
@@ -2884,7 +2900,7 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 1. **M8-08e..f** build system + integrazione arksh — completa il porting della shell di default dopo `glob/fnmatch`
 2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
-3. **M11-02b** lifecycle thread + join — completa la baseline `clone()` e rende il modello thread davvero usabile da musl/pthread
+3. **M11-02c** futex core — aggiunge `WAIT/WAKE/REQUEUE` e sblocca il `pthread_join()` vero
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2952,7 +2968,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `34/34` |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `36/36` |
 | 16 | **M8-08e..f** CMake + integrazione | Completa arksh porting dopo pipe/termios/libc e wildcard bootstrap |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 
@@ -2970,7 +2986,7 @@ Python, server applicativi.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a` completata v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `clone-thread`). Restano `M11-02b..e` |
+| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a+b` completate v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `clone-thread`, `thread-lifecycle`). Restano `M11-02c..e` |
 | 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
 | 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |

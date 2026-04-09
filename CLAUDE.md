@@ -18,7 +18,7 @@ tutto ogni sessione.
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
   - `make musl-smoke` — compila i demo statici musl-linked
-- Stato validato corrente: `SUMMARY total=35 pass=35 fail=0`
+- Stato validato corrente: `SUMMARY total=36 pass=36 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -315,24 +315,53 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
   sono keyed per `proc_slot`, non per TID.
 - Le signal dispositions (`sigaction`) sono condivise per processo slot; i campi
   `pending`, `blocked` e lo stato stop/resto restano per-thread.
-- `signal_send_pid()` deve distinguere tra delivery thread-directed e process-directed:
-  prima prova il TID esatto, poi ricade sul primo task con `tgid` corrispondente.
+- Dopo `M11-02b`, `signal_send_pid()` e' process-directed per `tgid`, mentre
+  `signal_send_tgkill()` fa delivery thread-directed sul `tid` esatto.
 - `clone()` v1 supporta solo il subset thread-oriented:
   `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
   piu' `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
   `CLONE_CHILD_CLEARTID`.
-- `fork()` ed `execve()` ritornano `-EBUSY` nei processi multi-thread finche' non
-  esiste il lifecycle completo in `M11-02b`.
+- `fork()` ed `execve()` ritornano ancora `-EBUSY` nei processi multi-thread.
+  Il limite e' intenzionale finche' non esiste un path pthread/futex completo
+  e meglio validato oltre `M11-02b`.
 - Gotcha critico: non liberare subito i metadati del processo quando l'ultimo thread
   esce. Se azzeri il `proc_slot` troppo presto, rompi `waitpid()`, `SIGCHLD`,
   job control e demo come `nsdemo`/`musl-forkexec`. La parte da rilasciare subito e'
   l'`mm`; i metadati zombie devono restare vivi fino al reap.
-- `CLONE_CHILD_CLEARTID` in questa fase fa solo il clear in memoria utente; il wake
-  via `futex` appartiene a `M11-02b/c`.
+- `CLONE_CHILD_CLEARTID` in questa fase prepara il clear affidabile in memoria
+  utente; il wake via `futex` resta nel perimetro di `M11-02c`.
 - Validazione attuale:
   - selftest `clone-thread`
   - demo `/CLONEDEMO.ELF`
-  - suite completa `34/34`
+  - suite completa `36/36`
+
+---
+
+## Thread lifecycle (`M11-02b`)
+
+**File**: [kernel/sched.c](kernel/sched.c), [include/sched.h](include/sched.h),
+[kernel/syscall.c](kernel/syscall.c), [kernel/signal.c](kernel/signal.c),
+[user/thread_life_demo.c](user/thread_life_demo.c)
+
+- `set_tid_address()` salva `clear_child_tid` per-thread e ritorna il `tid` corrente.
+- `exit_group()` non e' sinonimo di `exit()`: marca il `proc_slot` come group-exiting,
+  termina gli altri thread del gruppo e fa convergere il codice finale del processo
+  sul leader waitable.
+- Un processo multi-thread diventa reapable da `waitpid()` **solo** quando esce
+  l'ultimo thread. Prima di quel momento, il leader zombie non deve essere considerato
+  "process exit completed".
+- `signal_terminate_current()` deve passare da `sched_task_exit_with_code()`, non
+  zombificare il task da sola. Altrimenti `clear_child_tid`, cleanup `ksem/kmon/mreact`
+  e accounting di processo si rompono.
+- `tgkill(tgid, tid, sig)` e' il path corretto per segnali thread-directed. Va usato
+  anche per eccezioni sincrone del task EL0 corrente.
+- `clear_child_tid` oggi fa solo il clear affidabile in memoria utente. Il wake dei
+  waiter verra' aggiunto con `futex` in `M11-02c`; non tentare di modellare
+  `pthread_join()` sopra `waitpid()`.
+- Validazione attuale:
+  - selftest `thread-lifecycle`
+  - demo `/THREADLIFE.ELF`
+  - suite completa `36/36`
 
 ---
 
@@ -460,6 +489,8 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 32. `musl-forkexec` — smoke `fork/execve/waitpid`
 33. `musl-pipe` — smoke `pipe/dup2/termios`
 34. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
+35. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
+36. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
 
 ### Helper macro
 ```c
@@ -476,17 +507,17 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-09)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01` e `M8-08d` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01`, `M11-02a/b` e `M8-08d` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=35 pass=35 fail=0
+SUMMARY total=36 pass=36 fail=0
 ```
 
 **Prossime priorità**:
 1. M8-08e..f build system + integrazione arksh
 2. M10-01 VirtIO network driver
-3. M11-02 POSIX Threading (pthread)
+3. M11-02c futex core
 4. M11-03 dynamic linker user-space / `.so`
 5. M11-05 Linux compatibility layer
 

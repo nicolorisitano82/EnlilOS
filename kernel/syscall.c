@@ -1730,6 +1730,37 @@ static uint64_t sys_gettid(uint64_t args[6])
     return current_task ? (uint64_t)current_task->pid : 0ULL;
 }
 
+static uint64_t sys_set_tid_address(uint64_t args[6])
+{
+    uintptr_t clear_tid_uva = (uintptr_t)args[0];
+    int       rc;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+
+    if (clear_tid_uva != 0U) {
+        rc = user_probe_write(clear_tid_uva, sizeof(uint32_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    rc = sched_task_set_clear_tid(current_task, clear_tid_uva);
+    if (rc < 0)
+        return ERR(EINVAL);
+    return (uint64_t)current_task->pid;
+}
+
+static uint64_t sys_exit_group(uint64_t args[6])
+{
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+
+    if (sched_task_begin_exit_group((int32_t)args[0]) < 0)
+        return ERR(EINVAL);
+    sched_task_exit_with_code((int32_t)args[0]);
+    return 0;
+}
+
 static uint64_t sys_gettimeofday(uint64_t args[6])
 {
     uintptr_t  tv_uva = (uintptr_t)args[0];
@@ -2562,7 +2593,9 @@ static uint64_t sys_clone(uint64_t args[6])
                                          frame,
                                          child_stack,
                                          child_tpidr,
-                                         ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) != 0U)
+                                         ((flags & CLONE_CHILD_SETTID) != 0U)
+                                             ? child_tid_uva : 0U,
+                                         ((flags & CLONE_CHILD_CLEARTID) != 0U)
                                              ? child_tid_uva : 0U,
                                          current_task->priority);
     if (!child)
@@ -2638,7 +2671,7 @@ static uint64_t sys_waitpid(uint64_t args[6])
 
             matched_child = 1;
 
-            if (t->state == TCB_STATE_ZOMBIE) {
+            if (t->state == TCB_STATE_ZOMBIE && sched_task_is_process_waitable(t)) {
                 if (sched_task_get_exit_code(t, &code) < 0)
                     code = 0;
                 status = ((int)code & 0xFF) << 8;
@@ -2935,6 +2968,17 @@ static uint64_t sys_kill(uint64_t args[6])
     if (rc < 0)
         return ERR(-rc);
     return 0;
+}
+
+static uint64_t sys_tgkill(uint64_t args[6])
+{
+    uint32_t tgid = (uint32_t)args[0];
+    uint32_t tid  = (uint32_t)args[1];
+    int      sig  = (int)args[2];
+    int      rc;
+
+    rc = signal_send_tgkill(tgid, tid, sig);
+    return (rc < 0) ? ERR(-rc) : 0;
 }
 
 static uint64_t sys_setpgid(uint64_t args[6])
@@ -4161,6 +4205,12 @@ void syscall_init(void)
     syscall_table[SYS_GETTID] = (syscall_entry_t){
         sys_gettid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "gettid"
     };
+    syscall_table[SYS_SET_TID_ADDRESS] = (syscall_entry_t){
+        sys_set_tid_address, 0, "set_tid_address"
+    };
+    syscall_table[SYS_EXIT_GROUP] = (syscall_entry_t){
+        sys_exit_group, 0, "exit_group"
+    };
     syscall_table[SYS_MOUNT] = (syscall_entry_t){
         sys_mount, 0, "mount"
     };
@@ -4175,6 +4225,9 @@ void syscall_init(void)
     };
     syscall_table[SYS_KILL] = (syscall_entry_t){
         sys_kill, SYSCALL_FLAG_RT, "kill"
+    };
+    syscall_table[SYS_TGKILL] = (syscall_entry_t){
+        sys_tgkill, SYSCALL_FLAG_RT, "tgkill"
     };
     syscall_table[SYS_PORT_LOOKUP] = (syscall_entry_t){
         sys_port_lookup, SYSCALL_FLAG_RT, "port_lookup"
@@ -4305,7 +4358,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 93 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
+    uart_puts("[SYSCALL] 96 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 proc slot\n");
 }
 

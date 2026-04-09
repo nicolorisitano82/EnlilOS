@@ -157,7 +157,8 @@ sched_tcb_t *sched_task_clone_user_thread(const char *name,
                                           const exception_frame_t *frame,
                                           uintptr_t child_sp,
                                           uint64_t child_tpidr,
-                                          uintptr_t child_tid_uva,
+                                          uintptr_t child_set_tid_uva,
+                                          uintptr_t clear_child_tid_uva,
                                           uint8_t priority);
 
 /*
@@ -215,12 +216,15 @@ uint32_t    sched_task_sid(const sched_tcb_t *t);
 uint32_t    sched_task_proc_slot(const sched_tcb_t *t);
 uint32_t    sched_task_proc_refcount(const sched_tcb_t *t);
 int         sched_task_is_thread(const sched_tcb_t *t);
+int         sched_task_is_process_waitable(const sched_tcb_t *t);
 int         sched_task_has_session(uint32_t sid);
 int         sched_task_has_pgrp(uint32_t sid, uint32_t pgid);
 int         sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target,
                                uint32_t pgid);
 int         sched_task_setsid(sched_tcb_t *task, uint32_t *out_sid);
 void        sched_task_set_tpidr(sched_tcb_t *t, uint64_t tpidr);
+int         sched_task_set_clear_tid(sched_tcb_t *t, uintptr_t clear_tid_uva);
+int         sched_task_begin_exit_group(int32_t code);
 uint64_t    sched_task_get_tpidr(const sched_tcb_t *t);
 sched_tcb_t *sched_task_at(uint32_t index);
 uint32_t    sched_task_count_total(void);

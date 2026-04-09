@@ -63,6 +63,7 @@ void signal_task_reset_for_exec(sched_tcb_t *task);
 void signal_task_exit(sched_tcb_t *task);
 
 int  signal_send_pid(uint32_t pid, int sig);
+int  signal_send_tgkill(uint32_t tgid, uint32_t tid, int sig);
 int  signal_send_pgrp(uint32_t pgid, int sig);
 int  signal_has_unblocked_pending(const sched_tcb_t *task);
 int  signal_deliver_pending(exception_frame_t *frame);

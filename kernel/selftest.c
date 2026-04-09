@@ -392,6 +392,15 @@ static int selftest_case_rootfs(void)
              "/CLONEDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/CLONEDEMO.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/THREADLIFE.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /THREADLIFE.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /THREADLIFE.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/THREADLIFE.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/THREADLIFE.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -1011,6 +1020,37 @@ static int selftest_case_clone_thread(void)
     static const char case_name[] = "clone-thread";
 
     return st_run_user_path(case_name, "/CLONEDEMO.ELF", 4000ULL);
+}
+
+static int selftest_case_thread_lifecycle(void)
+{
+    static const char case_name[] = "thread-lifecycle";
+    static const char expected[] =
+        "settid-ok\n"
+        "sigthread-ok\n"
+        "cleartid-ok\n"
+        "sigkill-thread-ok\n"
+        "exit-group-ok\n";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    int          rc;
+
+    rc = vfs_unlink("/data/THREADLIFE.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup THREADLIFE.TXT fallita");
+
+    if (st_spawn_user_task(case_name, "/THREADLIFE.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 4000ULL);
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
+    ST_CHECK(case_name, task != NULL, "task THREADLIFE.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa THREADLIFE.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 17) == 0,
+             "THREADLIFE exit code non e' 17");
+    return st_expect_text_file(case_name, "/data/THREADLIFE.TXT", expected, 1);
 }
 
 static int selftest_case_vfsd(void)
@@ -1856,6 +1896,7 @@ static const selftest_case_t selftest_cases[] = {
     { "posix-ux",    selftest_case_posix_ux  },
     { "musl-abi-core", selftest_case_musl_abi },
     { "clone-thread", selftest_case_clone_thread },
+    { "thread-lifecycle", selftest_case_thread_lifecycle },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },

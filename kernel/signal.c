@@ -217,19 +217,14 @@ static void signal_stop_current(signal_state_t *st, int sig)
     schedule();
 }
 
-static void signal_terminate_current(void)
+static void signal_terminate_current(int sig)
 {
     if (!current_task)
         return;
 
-    kmon_task_cleanup(current_task);
-    ksem_task_cleanup(current_task);
-    mreact_task_cleanup(current_task);
-    signal_task_exit(current_task);
-    current_task->state = TCB_STATE_ZOMBIE;
-    schedule();
-    while (1)
-        __asm__ volatile("wfe");
+    if (sig <= 0)
+        sig = SIGTERM;
+    sched_task_exit_with_code(128 + sig);
 }
 
 static int signal_install_user_frame(signal_state_t *st, exception_frame_t *frame,
@@ -370,32 +365,14 @@ void signal_task_exit(sched_tcb_t *task)
     st->stopped = 0U;
     st->stop_reported = 0U;
     st->stop_sig = 0U;
-    if (st->parent_pid != 0U && sched_task_proc_refcount(task) <= 1U)
-        (void)signal_send_pid(st->parent_pid, SIGCHLD);
 }
 
-int signal_send_pid(uint32_t pid, int sig)
+static int signal_send_task(sched_tcb_t *task, int sig)
 {
-    sched_tcb_t    *task;
     signal_state_t *st;
 
     if (!signal_valid(sig))
         return -EINVAL;
-
-    task = sched_task_find(pid);
-    if (!task || !sched_task_is_user(task) || task->state == TCB_STATE_ZOMBIE) {
-        task = NULL;
-        for (uint32_t i = 0U; i < sched_task_count_total(); i++) {
-            sched_tcb_t *cur = sched_task_at(i);
-
-            if (!cur || !sched_task_is_user(cur) || cur->state == TCB_STATE_ZOMBIE)
-                continue;
-            if (sched_task_tgid(cur) != pid)
-                continue;
-            task = cur;
-            break;
-        }
-    }
     if (!task)
         return -ESRCH;
     if (!sched_task_is_user(task))
@@ -441,7 +418,7 @@ int signal_send_pgrp(uint32_t pgid, int sig)
             continue;
         if (task->state == TCB_STATE_ZOMBIE)
             continue;
-        if (signal_send_pid(task->pid, sig) == 0)
+        if (signal_send_task(task, sig) == 0)
             delivered = 1;
     }
 
@@ -493,12 +470,12 @@ int signal_deliver_pending(exception_frame_t *frame)
             if (signal_default_stop(sig))
                 signal_stop_current(st, sig);
             if (signal_default_terminate(sig))
-                signal_terminate_current();
+                signal_terminate_current(sig);
             continue;
         }
 
         if (signal_install_user_frame(st, frame, sig, &act) < 0) {
-            signal_terminate_current();
+            signal_terminate_current(sig);
         }
         return 1;
     }
@@ -532,7 +509,7 @@ int signal_handle_user_exception(exception_frame_t *frame, uint32_t ec)
         break;
     }
 
-    (void)signal_send_pid(current_task->pid, sig);
+    (void)signal_send_tgkill(sched_task_tgid(current_task), current_task->pid, sig);
     (void)signal_deliver_pending(frame);
     return 0;
 }
@@ -613,6 +590,53 @@ int signal_sigprocmask_current(int how, const uint64_t *set, uint64_t *old)
     }
 
     return 0;
+}
+
+static sched_tcb_t *signal_find_process_target(uint32_t tgid)
+{
+    sched_tcb_t *leader;
+
+    if (tgid == 0U)
+        return NULL;
+
+    leader = sched_task_find(tgid);
+    if (leader && sched_task_is_user(leader) && leader->state != TCB_STATE_ZOMBIE &&
+        sched_task_tgid(leader) == tgid)
+        return leader;
+
+    for (uint32_t i = 0U; i < sched_task_count_total(); i++) {
+        sched_tcb_t *cur = sched_task_at(i);
+
+        if (!cur || !sched_task_is_user(cur) || cur->state == TCB_STATE_ZOMBIE)
+            continue;
+        if (sched_task_tgid(cur) != tgid)
+            continue;
+        return cur;
+    }
+
+    return NULL;
+}
+
+int signal_send_pid(uint32_t pid, int sig)
+{
+    return signal_send_task(signal_find_process_target(pid), sig);
+}
+
+int signal_send_tgkill(uint32_t tgid, uint32_t tid, int sig)
+{
+    sched_tcb_t *task;
+
+    if (!signal_valid(sig))
+        return -EINVAL;
+    if (tgid == 0U || tid == 0U)
+        return -EINVAL;
+
+    task = sched_task_find(tid);
+    if (!task || !sched_task_is_user(task) || task->state == TCB_STATE_ZOMBIE)
+        return -ESRCH;
+    if (sched_task_tgid(task) != tgid)
+        return -ESRCH;
+    return signal_send_task(task, sig);
 }
 
 int signal_sigreturn_current(exception_frame_t *frame)
