@@ -16,11 +16,14 @@ tutto ogni sessione.
   - `make` — build normale
   - `make test` — build selftest + lancio QEMU
   - `make run` — boot kernel normale in QEMU
-- Stato validato corrente: `SUMMARY total=27 pass=27 fail=0`
+  - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
+  - `make musl-smoke` — compila i demo statici musl-linked
+- Stato validato corrente: `SUMMARY total=33 pass=33 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
-  la successiva fallisce con "Failed to get write lock". Usare `pkill -f qemu-system-aarch64`.
+  la successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64`
+  e poi `kill <pid>`.
 
 ---
 
@@ -34,6 +37,7 @@ include/       — header pubblici
 drivers/       — uart, keyboard, mouse, blk, framebuffer, ane/, gpu/
 user/          — programmi EL0 (demo, nsh, vfsd, blkd, ecc.)
 tools/         — gen_ksyms.py e altri script di build
+toolchain/     — sysroot/bootstrap libc/wrapper `aarch64-enlilos-musl-*`
 ```
 
 ---
@@ -250,6 +254,37 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - layout TLS statico v1 funzionante con il toolchain attuale:
   `[TCB stub 16B][tdata][tbss zeroed/aligned]`, con `TPIDR_EL0` puntato al TCB
 
+## Toolchain musl bootstrap (`M11-01c`)
+
+**File**: [toolchain/enlilos-musl/include](toolchain/enlilos-musl/include),
+[toolchain/enlilos-musl/src](toolchain/enlilos-musl/src),
+[toolchain/bin/aarch64-enlilos-musl-gcc](toolchain/bin/aarch64-enlilos-musl-gcc),
+[toolchain/bin/enlilos-toolchain-common.sh](toolchain/bin/enlilos-toolchain-common.sh),
+[tools/enlilos-aarch64.cmake](tools/enlilos-aarch64.cmake)
+
+- `M11-01c` non e' un porting upstream completo di musl: e' un bootstrap statico
+  sufficiente per compilare ed eseguire programmi C semplici su EnlilOS.
+- Il sysroot vive in `toolchain/sysroot/usr/{include,lib}` e viene popolato da:
+  - header bootstrap in `toolchain/enlilos-musl/include`
+  - `libc.a` minimale costruita da `toolchain/enlilos-musl/src`
+  - `crt1.o`, `crti.o`, `crtn.o` copiati dalla build user-space esistente
+- Il wrapper `aarch64-enlilos-musl-gcc` deve passare sia `--sysroot` sia
+  `-isystem "$SYSROOT/usr/include"`; con il solo `--sysroot` alcuni include non
+  vengono risolti come previsto nella toolchain attuale.
+- La bootstrap libc non deve includere direttamente `include/syscall.h` del kernel:
+  trascina tipi kernel-side che collidono con `stdint.h/stddef.h`. Usare l'header
+  privato `toolchain/enlilos-musl/src/enlil_syscalls.h`.
+- Nella rule di build della bootstrap libc, l'ordine include corretto e':
+  `-Itoolchain/enlilos-musl/include -Iinclude`. Invertirlo rompe la build per
+  collisioni di typedef e macro.
+- `environ` e' definita dal runtime `crt1`; nella libc bootstrap va solo dichiarata
+  `extern`, altrimenti il link fallisce per simbolo duplicato.
+- I smoke test runtime attuali sono:
+  `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`.
+- Bug reale emerso dal bring-up: `fd_pipe_read()` non deve tentare di riempire tutto
+  il buffer richiesto su una pipe. Deve tornare appena ha letto i byte disponibili,
+  altrimenti `musl-pipe` resta bloccato dopo aver consumato il payload presente.
+
 ---
 
 ## Block server user-space (`blkd`)
@@ -310,8 +345,8 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
   - L1[0]: MMIO 0x00000000–0x3FFFFFFF (Device-nGnRnE)
   - L1[1]: RAM  0x40000000–0x7FFFFFFF (Normal WB)
 - **Kernel heap**: named typed caches (`task_cache` 64B, `port_cache` 64B, `ipc_cache` 512B)
-- Stack task kernel: 4KB (1 pagina), allocata con `phys_alloc_page()`
-- `TASK_STACK_SIZE = 4096`, `SCHED_MAX_TASKS = 32`
+- Stack task kernel: 16 KiB (`TASK_STACK_ORDER = 2`), allocata con `phys_alloc_pages()`
+- `TASK_STACK_SIZE = 16384`, `SCHED_MAX_TASKS = 64`
 
 ---
 
@@ -341,7 +376,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 
 **File**: [kernel/selftest.c](kernel/selftest.c)
 
-20 test case in ordine:
+33 test case in ordine:
 1. `vfs-rootfs` — mount initrd, readdir, stat file
 2. `vfs-devfs` — devfs /dev/stdin /dev/stdout
 3. `ext4-core` — mount rw ext4, journal replay
@@ -355,13 +390,26 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 11. `elf-dynamic` — carica ELF PIE con ld_enlil.so
 12. `fork-cow` — fork() + COW + output su file ext4
 13. `signal-core` — sigaction/sigreturn/kill
-14. `mreact-core` — reactive subscriptions
-15. `cap-core` — capability alloc/query/derive/revoke
-16. `ksem-core` — semafori RT + priority inheritance
-17. `kmon-core` — monitor + PI ceiling
-18. `ipc-sync` — IPC sincrono + priority donation
-19. `kdebug-core` — crash reporter + ksymtab
-20. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
+14. `jobctl-core` — process groups/sessioni/TTY job control
+15. `posix-ux` — pipe/dup/cwd/env/termios
+16. `musl-abi-core` — ABI minima musl + auxv
+17. `vfs-namespace` — mount namespace + pivot_root
+18. `mreact-core` — reactive subscriptions
+19. `cap-core` — capability alloc/query/derive/revoke
+20. `ksem-core` — semafori RT + priority inheritance
+21. `kmon-core` — monitor + PI ceiling
+22. `ipc-sync` — IPC sincrono + priority donation
+23. `kdebug-core` — crash reporter + ksymtab
+24. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
+25. `procfs-core` — mount /proc + snapshot base
+26. `mmap-file` — mmap/msync/munmap file-backed
+27. `tls-tp` — preservazione `TPIDR_EL0`
+28. `crt-startup` — ctor/env/auxv/dtor
+29. `musl-hello` — smoke `write/open/close`
+30. `musl-stdio` — smoke `printf/snprintf`
+31. `musl-malloc` — smoke `malloc/calloc/realloc`
+32. `musl-forkexec` — smoke `fork/execve/waitpid`
+33. `musl-pipe` — smoke `pipe/dup2/termios`
 
 ### Helper macro
 ```c
@@ -378,19 +426,19 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-09)
 
-Tutto il backlog 1 (M1–M7) e backlog 2 fino a M9-04 sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04 e `M11-01` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=25 pass=25 fail=0
+SUMMARY total=33 pass=33 fail=0
 ```
 
 **Prossime priorità**:
-1. M11-01 musl libc
-2. M8-08d..f glob/fnmatch + build system + integrazione arksh
-3. M10-01 VirtIO network driver
-4. M11-02 POSIX Threading (pthread)
-5. M11-03 dynamic linker user-space / `.so`
+1. M8-08d..f glob/fnmatch + build system + integrazione arksh
+2. M10-01 VirtIO network driver
+3. M11-02 POSIX Threading (pthread)
+4. M11-03 dynamic linker user-space / `.so`
+5. M11-05 Linux compatibility layer
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 

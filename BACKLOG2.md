@@ -1074,16 +1074,17 @@ invece dei ~50µs del loopback TCP.
 
 ## MILESTONE 11 — Porting e Compatibility Layer
 
-### ⬜ M11-01 · musl libc
+### ✅ M11-01 · musl libc
 **Priorità:** CRITICA (sblocca ogni programma C esistente)
 
 Porta di **musl libc** come C runtime standard per EnlilOS.
 
-**Stato complessivo attuale:** in corso
+**Stato complessivo attuale:** completata `v1`
 - `M11-01a` completata `v1`
 - `M11-01b` completata `v1`
-- `M11-01c` ancora aperta
-- esito runtime attuale dei test collegati: `musl-abi-core`, `tls-tp`, `crt-startup` verdi
+- `M11-01c` completata `v1`
+- esito runtime attuale dei test collegati: `musl-abi-core`, `tls-tp`, `crt-startup`,
+  `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe` verdi
 
 - `arch/aarch64/`: syscall wrappers AArch64 già presenti in musl, adattati ai numeri EnlilOS
 - `sys/`: `open`, `read`, `write`, `close`, `mmap`, `brk`, `exit`, `fork`, `execve`,
@@ -1091,7 +1092,9 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - `stdio.h`: `printf`, `fopen`, `fclose` su VFS IPC
 - `malloc`: usa `brk()` / `mmap(MAP_ANONYMOUS)` — già implementati
 - `pthread.h`: vedi M11-02
-- Build: `musl-cross-make` con target `aarch64-enlilos-musl`
+- build/runtime `v1`: sysroot bootstrap in-tree (`toolchain/sysroot`), wrapper
+  `aarch64-enlilos-musl-*`, `libc.a` statica minimale e smoke test embedded nell'initrd
+- porting upstream completo di musl/toolchain esterna: rinviato a un refinement successivo
 
 **Scope reale della v1 (riallineato al GAP):**
 - toolchain `aarch64-enlilos-musl-*`
@@ -1186,9 +1189,24 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - test end-to-end su file `/data/CRTDEMO.TXT`
 
 **M11-01c · Toolchain e smoke test**
-- sysroot
-- wrapper `aarch64-enlilos-musl-*`
-- smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`
+- **Stato attuale:** completata `v1`
+- sysroot bootstrap in `toolchain/sysroot/usr/include` + `toolchain/sysroot/usr/lib`
+- wrapper `aarch64-enlilos-musl-gcc`, `aarch64-enlilos-musl-ar`, `aarch64-enlilos-musl-ranlib`
+- `libc.a` minimale bootstrap costruita da `toolchain/enlilos-musl/src`
+- integrazione build con `make musl-sysroot` e `make musl-smoke`
+- smoke test statici embedded nell'initrd:
+  `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
+- validazione runtime nel selftest completo `SUMMARY total=33 pass=33 fail=0`
+
+**Note v1:**
+- profilo static-only, single-thread, pensato per bootstrap e smoke test
+- il wrapper impone `--sysroot` + include `usr/include` del sysroot EnlilOS
+- gli header syscall bootstrap usano un header privato (`enlil_syscalls.h`) per evitare
+  collisioni con gli header kernel del repo
+- gotcha chiuso nel bring-up: la precedence include per la bootstrap libc deve essere
+  `toolchain/enlilos-musl/include` prima di `include/`
+- gotcha runtime chiuso dal selftest `musl-pipe`: una pipe deve restituire i byte
+  disponibili, non aspettare di riempire tutto il buffer richiesto
 
 ---
 
@@ -2742,9 +2760,9 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M11-01c** toolchain musl e smoke test — `a+b` sono chiuse; il pezzo residuo e' la toolchain vera con sysroot e test compilati da musl
-2. **M8-08d..f** glob/fnmatch + build system + integrazione arksh — completa il porting della shell di default
-3. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
+1. **M8-08d..f** glob/fnmatch + build system + integrazione arksh — completa il porting della shell di default
+2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
+3. **M11-02** POSIX Threading (`pthread`) — estende il bootstrap musl attuale al profilo multi-thread
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2812,7 +2830,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | In corso: `M11-01a` + `M11-01b` completate v1; resta `M11-01c` (toolchain/sysroot/smoke test) |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap e smoke test `33/33` |
 | 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 
@@ -2971,8 +2989,8 @@ FASE 10 ──► container + io_uring + power (opzionale)
 **Milestone bloccanti** (fermare tutto e risolvere prima di procedere):
 - ~~M8-01 fork — senza fork nulla funziona~~ ✅ completata
 - ~~M9-01 capability — senza capability i server non sono sicuri~~ ✅ completata
-- M11-01 musl libc — senza libc nessun programma C gira
-- M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più
+- ~~M11-01 musl libc — senza libc nessun programma C gira~~ ✅ completata v1
+- ~~M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più~~ ✅ completata
 
 **Stato FASE 1, FASE 2 e avvio FASE 3 al 2026-04-09:**
 - ✅ M8-01 fork + COW
@@ -2988,4 +3006,5 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M8-08c termios + isatty
 - ✅ M9-03 blkd
 - ✅ M9-04 namespace + mount dinamico v1
-- **Prossimo step:** proseguire FASE 3 con `M11-01`, poi chiudere `M8-08d..f` e aprire rete base con `M10-01`
+- ✅ M11-01 musl/toolchain bootstrap v1
+- **Prossimo step:** chiudere `M8-08d..f`, poi aprire rete base con `M10-01` e il profilo multi-thread con `M11-02`

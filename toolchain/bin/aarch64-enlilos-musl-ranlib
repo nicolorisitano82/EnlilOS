@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SELF_DIR/enlilos-toolchain-common.sh"
+
+exec "$ENLILOS_RANLIB" "$@"

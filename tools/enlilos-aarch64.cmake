@@ -1,0 +1,16 @@
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+get_filename_component(ENLILOS_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+
+set(CMAKE_C_COMPILER "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-gcc")
+set(CMAKE_AR         "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-ar")
+set(CMAKE_RANLIB     "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-ranlib")
+set(CMAKE_SYSROOT    "${ENLILOS_ROOT}/toolchain/sysroot")
+
+set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

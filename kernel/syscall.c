@@ -536,6 +536,13 @@ static ssize_t fd_pipe_read(fd_object_t *obj, void *buf, size_t count)
         pipe->read_pos = (pipe->read_pos + 1U) % PIPE_BUF_SIZE;
         pipe->size--;
 
+        /*
+         * Per una pipe/FIFO restituiamo subito i byte disponibili invece
+         * di attendere di riempire tutto il buffer richiesto.
+         */
+        if (pipe->size == 0U)
+            break;
+
         if (obj->flags & O_NONBLOCK)
             break;
     }

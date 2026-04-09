@@ -17,12 +17,12 @@ Le milestone completate oggi coprono:
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `mreact`, `ksem` e `kmon`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
-- **M11-01a / M11-01b**: ABI minima per musl v1 con `getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`, `PT_TLS`, `TPIDR_EL0`, `auxv` con `AT_RANDOM`/uid/gid e bootstrap C statico `crt1/crti/crtn`.
+- **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=28 pass=28 fail=0`.
+`SUMMARY total=33 pass=33 fail=0`.
 
 ---
 
@@ -90,6 +90,11 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `MUSLABI.ELF`
 - `TLSDEMO.ELF`
 - `CRTDEMO.ELF`
+- `MUSLHELLO.ELF`
+- `MUSLSTDIO.ELF`
+- `MUSLMALLOC.ELF`
+- `MUSLFORK.ELF`
+- `MUSLPIPE.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
@@ -131,6 +136,24 @@ Output principali:
 - `enlil.bin`
 - `boot/initrd.cpio`
 
+### Toolchain bootstrap musl
+
+Per il profilo `M11-01` sono disponibili anche:
+
+```bash
+make musl-sysroot
+make musl-smoke
+```
+
+Questi target generano:
+
+- `toolchain/sysroot/usr/include` con gli header bootstrap EnlilOS/musl
+- `toolchain/sysroot/usr/lib/libc.a` e i runtime object `crt1.o`, `crti.o`, `crtn.o`
+- wrapper `toolchain/bin/aarch64-enlilos-musl-gcc`, `ar`, `ranlib`
+- smoke ELF statici musl-linked in `toolchain/smoke/*.elf`
+
+Il profilo attuale e' volutamente `static-only`, single-thread e pensato per bootstrap C, smoke test e bring-up di software user-space semplice.
+
 Il `Makefile` supporta anche prefissi espliciti:
 
 ```bash
@@ -149,6 +172,8 @@ make CROSS=/opt/homebrew/Cellar/aarch64-elf-gcc/15.2.0/bin/aarch64-elf-
 | `make run-blk` | come `run-gpu` + `virtio-blk` con `disk.img` |
 | `make test` | avvio del kernel selftest sotto QEMU |
 | `make debug` | QEMU in attesa di GDB sulla porta 1234 |
+| `make musl-sysroot` | prepara sysroot/bootstrap libc `M11-01` |
+| `make musl-smoke` | compila i demo smoke musl statici |
 
 Target utili per il disco:
 
@@ -177,6 +202,11 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `nsdemo`
 - `posixdemo`
 - `muslabi`
+- `runelf /MUSLHELLO.ELF`
+- `runelf /MUSLSTDIO.ELF`
+- `runelf /MUSLMALLOC.ELF`
+- `runelf /MUSLFORK.ELF`
+- `runelf /MUSLPIPE.ELF`
 - `runelf PATH`
 - `nsh`
 - `selftest`, `selftest [nome]`
@@ -198,13 +228,14 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 28 casi:
+Esiste una suite di self-test kernel-side che oggi copre 33 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
 - `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`, `vfs-namespace`, `mreact-core`, `cap-core`
 - `ksem-core`, `kmon-core`, `ipc-sync`
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`, `tls-tp`, `crt-startup`
+- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`
 
 La build dedicata e':
 
@@ -216,7 +247,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=28 pass=28 fail=0
+SUMMARY total=33 pass=33 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.
@@ -251,6 +282,7 @@ EnlilOS/
 │   └── selftest.c        # suite integrata
 ├── tools/
 │   └── mkinitrd.py       # builder host-side dell'archivio CPIO
+├── toolchain/            # sysroot/bootstrap libc/wrapper musl v1
 ├── user/                 # ELF userspace statici e dinamici
 ├── BACKLOG.md            # roadmap principale
 └── BACKLOG2.md           # roadmap estesa / extra milestone

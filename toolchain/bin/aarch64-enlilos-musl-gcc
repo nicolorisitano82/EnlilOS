@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SELF_DIR/enlilos-toolchain-common.sh"
+
+link=1
+custom_ldscript=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -c|-E|-S|-M|-MM)
+            link=0
+            ;;
+        -T|-Wl,-T,*)
+            custom_ldscript=1
+            ;;
+    esac
+done
+
+if [ "$link" -eq 0 ]; then
+    exec "$ENLILOS_CC" \
+        --sysroot="$ENLILOS_SYSROOT" \
+        -ffreestanding -fno-builtin -mcpu=cortex-a72 \
+        -isystem "$ENLILOS_SYSROOT/usr/include" \
+        "$@"
+fi
+
+LD_SCRIPT=
+if [ "$custom_ldscript" -eq 0 ]; then
+    LD_SCRIPT="-Wl,-T,$ENLILOS_ROOT/user/user.ld"
+fi
+
+exec "$ENLILOS_CC" \
+    --sysroot="$ENLILOS_SYSROOT" \
+    -ffreestanding -fno-builtin -mcpu=cortex-a72 \
+    -isystem "$ENLILOS_SYSROOT/usr/include" \
+    -nostdlib -nostartfiles -static \
+    ${LD_SCRIPT:+$LD_SCRIPT} \
+    "$ENLILOS_SYSROOT/usr/lib/crti.o" \
+    "$ENLILOS_SYSROOT/usr/lib/crt1.o" \
+    "$@" \
+    -L"$ENLILOS_SYSROOT/usr/lib" -lc -lgcc \
+    "$ENLILOS_SYSROOT/usr/lib/crtn.o"

@@ -214,6 +214,46 @@ static int st_expect_exit_code(const char *case_name, uint32_t pid, int32_t expe
     return 0;
 }
 
+static int st_expect_text_file(const char *case_name, const char *path,
+                               const char *expected, int remove_after)
+{
+    vfs_file_t file;
+    char       buf[160];
+    ssize_t    n;
+    int        rc;
+
+    rc = vfs_open(path, O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open file attesa fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read file attesa fallita");
+    buf[(size_t)n] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected), "contenuto file inatteso");
+    (void)vfs_close(&file);
+
+    if (remove_after) {
+        rc = vfs_unlink(path);
+        ST_CHECK(case_name, rc == 0, "unlink file attesa fallita");
+    }
+    return 0;
+}
+
+static int st_run_user_path(const char *case_name, const char *path, uint64_t timeout_ms)
+{
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, path, PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, timeout_ms);
+    ST_CHECK(case_name, task != NULL, "task user timeout");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa task user");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "exit code task user non e' 0");
+    return 0;
+}
+
 static int selftest_case_rootfs(void)
 {
     static const char case_name[] = "vfs-rootfs";
@@ -1683,6 +1723,82 @@ static int selftest_case_crt_startup(void)
     return 0;
 }
 
+static int selftest_case_musl_hello(void)
+{
+    static const char case_name[] = "musl-hello";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLHELLO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLHELLO.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLHELLO.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLHELLO.TXT",
+                               "musl-hello-ok\n", 1);
+}
+
+static int selftest_case_musl_stdio(void)
+{
+    static const char case_name[] = "musl-stdio";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLSTDIO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLSTDIO.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLSTDIO.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLSTDIO.TXT",
+                               "stdio value=42 hex=2a ok\n", 1);
+}
+
+static int selftest_case_musl_malloc(void)
+{
+    static const char case_name[] = "musl-malloc";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLMALLOC.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLMALLOC.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLMALLOC.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLMALLOC.TXT",
+                               "malloc calloc realloc ok\n", 1);
+}
+
+static int selftest_case_musl_forkexec(void)
+{
+    static const char case_name[] = "musl-forkexec";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLFORK.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLFORK.TXT fallita");
+    rc = vfs_unlink("/data/MUSLHELLO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLHELLO.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLFORK.ELF", 3000ULL) < 0)
+        return -1;
+    if (st_expect_text_file(case_name, "/data/MUSLFORK.TXT",
+                            "fork exec wait ok\n", 1) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLHELLO.TXT",
+                               "musl-hello-ok\n", 1);
+}
+
+static int selftest_case_musl_pipe(void)
+{
+    static const char case_name[] = "musl-pipe";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLPIPE.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLPIPE.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLPIPE.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLPIPE.TXT",
+                               "pipe dup termios ok\n", 1);
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1712,6 +1828,11 @@ static const selftest_case_t selftest_cases[] = {
     { "mmap-file",   selftest_case_mmap_file },
     { "tls-tp",      selftest_case_tls_tp   },
     { "crt-startup", selftest_case_crt_startup },
+    { "musl-hello",  selftest_case_musl_hello },
+    { "musl-stdio",  selftest_case_musl_stdio },
+    { "musl-malloc", selftest_case_musl_malloc },
+    { "musl-forkexec", selftest_case_musl_forkexec },
+    { "musl-pipe",   selftest_case_musl_pipe },
 };
 
 int selftest_run_named(const char *name)

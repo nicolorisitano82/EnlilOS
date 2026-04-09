@@ -21,6 +21,10 @@ CC       = $(CROSS)gcc
 AS       = $(CC)
 LD       = $(shell $(CC) -print-prog-name=ld 2>/dev/null || printf '%s' "$(CROSS)ld")
 LD_PREFIX = $(patsubst %ld,%,$(LD))
+AR       = $(shell p="$$($(CC) -print-prog-name=ar 2>/dev/null)"; \
+                   if [ -z "$$p" ] || [ "$$p" = "ar" ]; then printf '%s' "$(LD_PREFIX)ar"; else printf '%s' "$$p"; fi)
+RANLIB   = $(shell p="$$($(CC) -print-prog-name=ranlib 2>/dev/null)"; \
+                   if [ -z "$$p" ] || [ "$$p" = "ranlib" ]; then printf '%s' "$(LD_PREFIX)ranlib"; else printf '%s' "$$p"; fi)
 OBJCOPY  = $(shell p="$$($(CC) -print-prog-name=objcopy 2>/dev/null)"; \
                    if [ -z "$$p" ] || [ "$$p" = "objcopy" ]; then printf '%s' "$(LD_PREFIX)objcopy"; else printf '%s' "$$p"; fi)
 OBJDUMP  = $(shell p="$$($(CC) -print-prog-name=objdump 2>/dev/null)"; \
@@ -104,6 +108,44 @@ USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
 USER_OBJS             = $(USER_STATIC_OBJS) $(USER_CRT_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
 USER_ELFS             = $(USER_STATIC_ELFS) $(USER_CRT_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
 USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_CRT_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
+MUSL_ROOT             = toolchain/enlilos-musl
+MUSL_BUILD            = toolchain/build/musl
+MUSL_SYSROOT          = toolchain/sysroot
+MUSL_SYSROOT_INC      = $(MUSL_SYSROOT)/usr/include
+MUSL_SYSROOT_LIB      = $(MUSL_SYSROOT)/usr/lib
+MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
+MUSL_WRAPPER_AR       = toolchain/bin/aarch64-enlilos-musl-ar
+MUSL_WRAPPER_RANLIB   = toolchain/bin/aarch64-enlilos-musl-ranlib
+MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
+                        $(MUSL_ROOT)/include/fcntl.h \
+                        $(MUSL_ROOT)/include/stdio.h \
+                        $(MUSL_ROOT)/include/stdlib.h \
+                        $(MUSL_ROOT)/include/string.h \
+                        $(MUSL_ROOT)/include/time.h \
+                        $(MUSL_ROOT)/include/termios.h \
+                        $(MUSL_ROOT)/include/unistd.h \
+                        $(MUSL_ROOT)/include/sys/ioctl.h \
+                        $(MUSL_ROOT)/include/sys/mman.h \
+                        $(MUSL_ROOT)/include/sys/time.h \
+                        $(MUSL_ROOT)/include/sys/types.h \
+                        $(MUSL_ROOT)/include/sys/uio.h \
+                        $(MUSL_ROOT)/include/sys/utsname.h \
+                        $(MUSL_ROOT)/include/sys/wait.h
+MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
+MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
+                        $(MUSL_ROOT)/src/string.c \
+                        $(MUSL_ROOT)/src/syscall.c \
+                        $(MUSL_ROOT)/src/malloc.c \
+                        $(MUSL_ROOT)/src/stdio.c
+MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
+MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
+MUSL_SYSROOT_STAMP    = $(MUSL_BUILD)/sysroot.stamp
+MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
+                        toolchain/smoke/musl_stdio.c \
+                        toolchain/smoke/musl_malloc.c \
+                        toolchain/smoke/musl_fork_exec.c \
+                        toolchain/smoke/musl_pipe_termios.c
+MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -132,7 +174,7 @@ PASS1_SELFTEST_KERNEL = enlil-selftest.pass1.elf
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -169,6 +211,46 @@ $(KSYMS_SELFTEST_OBJ): $(KSYMS_SELFTEST_DATA)
 $(SELFTEST_KERNEL): $(PASS1_SELFTEST_KERNEL) $(KSYMS_SELFTEST_OBJ)
 	$(LD) $(LDFLAGS) -o $@ $(BASE_SELFTEST_OBJS) $(KSYMS_SELFTEST_OBJ)
 
+$(MUSL_SYSROOT_INC)/%: $(MUSL_ROOT)/include/%
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(MUSL_BUILD)/libc/%.o: $(MUSL_ROOT)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -mcpu=cortex-a72 -I$(MUSL_ROOT)/include -Iinclude -c $< -o $@
+
+$(MUSL_SYSROOT_LIB)/crt1.o: user/crt1.o
+	@mkdir -p $(MUSL_SYSROOT_LIB)
+	cp $< $@
+
+$(MUSL_SYSROOT_LIB)/crti.o: user/crti.o
+	@mkdir -p $(MUSL_SYSROOT_LIB)
+	cp $< $@
+
+$(MUSL_SYSROOT_LIB)/crtn.o: user/crtn.o
+	@mkdir -p $(MUSL_SYSROOT_LIB)
+	cp $< $@
+
+$(MUSL_LIBC_A): $(MUSL_LIBC_OBJS)
+	@mkdir -p $(MUSL_SYSROOT_LIB)
+	$(AR) rcs $@ $^
+	$(RANLIB) $@
+
+$(MUSL_SYSROOT_STAMP): $(MUSL_HEADERS) $(MUSL_LIBC_A) \
+                       $(MUSL_SYSROOT_LIB)/crt1.o $(MUSL_SYSROOT_LIB)/crti.o $(MUSL_SYSROOT_LIB)/crtn.o
+	@mkdir -p $(dir $@)
+	@touch $@
+
+musl-sysroot: $(MUSL_SYSROOT_STAMP)
+	@echo "Sysroot bootstrap pronta in $(MUSL_SYSROOT)"
+
+toolchain/smoke/%.elf: toolchain/smoke/%.c $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
+	$(MUSL_WRAPPER_GCC) -O2 -o $@ $<
+
+musl-smoke: $(MUSL_SMOKE_ELFS)
+	@echo "Smoke test buildati: $(MUSL_SMOKE_ELFS)"
+
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
@@ -194,7 +276,7 @@ user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
 
-$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) $(USER_SHARED_LIBS)
+$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS)
 	python3 tools/mkinitrd.py $@ \
 		README.TXT=initrd/README.TXT \
 		BOOT.TXT=initrd/BOOT.TXT \
@@ -219,6 +301,11 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		MUSLABI.ELF=user/musl_abi_demo.elf \
 		TLSDEMO.ELF=user/tls_demo.elf \
 		CRTDEMO.ELF=user/crt_demo.elf \
+		MUSLHELLO.ELF=toolchain/smoke/musl_hello.elf \
+		MUSLSTDIO.ELF=toolchain/smoke/musl_stdio.elf \
+		MUSLMALLOC.ELF=toolchain/smoke/musl_malloc.elf \
+		MUSLFORK.ELF=toolchain/smoke/musl_fork_exec.elf \
+		MUSLPIPE.ELF=toolchain/smoke/musl_pipe_termios.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf
@@ -400,5 +487,6 @@ clean:
 	rm -f $(OBJS) $(SELFTEST_OBJS) $(KERNEL) $(KERNEL_BIN) $(SELFTEST_KERNEL) \
 	      $(PASS1_KERNEL) $(PASS1_SELFTEST_KERNEL) \
 	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO) \
-	      $(KSYMS_DATA) $(KSYMS_SELFTEST_DATA)
+	      $(KSYMS_DATA) $(KSYMS_SELFTEST_DATA) $(MUSL_SMOKE_ELFS)
+	rm -rf $(MUSL_BUILD) $(MUSL_SYSROOT)
 	@echo "Clean completato."
