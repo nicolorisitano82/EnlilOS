@@ -2415,6 +2415,10 @@ static uint64_t sys_execve(uint64_t args[6])
 
     signal_task_reset_for_exec(current_task);
     task_brk[task_idx()] = 0ULL;
+    /* Reset thread pointer: il nuovo processo inizia con TP=0.
+     * crt1/musl lo inizializzeranno durante il proprio startup. */
+    sched_task_set_tpidr(current_task, 0ULL);
+    __asm__ volatile("msr tpidr_el0, xzr" ::: "memory");
     memset(frame->x, 0, sizeof(frame->x));
     frame->x[0] = image.argc;
     frame->x[1] = image.argv;

@@ -1618,6 +1618,25 @@ static int selftest_case_mmap_file(void)
     return 0;
 }
 
+/* ── M11-01b: TLS / TPIDR_EL0 ───────────────────────────────────── */
+static int selftest_case_tls_tp(void)
+{
+    static const char case_name[] = "tls-tp";
+    uint32_t     pid  = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, "/TLSDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 3000ULL);
+    ST_CHECK(case_name, task != NULL, "TLSDEMO.ELF timeout");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa TLSDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "TPIDR_EL0 non preservato correttamente");
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1645,6 +1664,7 @@ static const selftest_case_t selftest_cases[] = {
     { "gpu-stack",   gpu_selftest_run        },
     { "procfs-core", selftest_case_procfs    },
     { "mmap-file",   selftest_case_mmap_file },
+    { "tls-tp",      selftest_case_tls_tp   },
 };
 
 int selftest_run_named(const char *name)

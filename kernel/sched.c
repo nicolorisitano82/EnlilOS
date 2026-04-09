@@ -46,6 +46,7 @@ typedef struct {
     uint64_t    argv;
     uint64_t    envp;
     uint64_t    auxv;
+    uint64_t    tpidr_el0;   /* thread pointer user-space (TPIDR_EL0) — M11-01b */
     uint8_t     is_user;
     uint8_t     resume_from_frame;
     uint8_t     _pad[6];
@@ -506,6 +507,7 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->auxv            = auxv;
     ctx->is_user         = 1U;
     ctx->resume_from_frame = 0U;
+    ctx->tpidr_el0       = 0ULL;   /* musl/crt1 inizializzera' il TP al primo run */
     ctx->parent_pid      = current_task ? current_task->pid : 0U;
     ctx->pgid            = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
     ctx->sid             = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
@@ -568,6 +570,9 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     ctx->auxv              = 0ULL;
     ctx->is_user           = 1U;
     ctx->resume_from_frame = 1U;
+    /* Il figlio eredita il thread pointer del parent.  musl non re-inizializza
+     * TPIDR_EL0 nel figlio di fork() perche' il TLS statico e' gia' valido. */
+    ctx->tpidr_el0         = ctx_of(current_task) ? ctx_of(current_task)->tpidr_el0 : 0ULL;
     ctx->parent_pid        = current_task ? current_task->pid : 0U;
     ctx->pgid              = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
     ctx->sid               = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
@@ -637,18 +642,22 @@ void schedule_locked(uint64_t flags, int reenable_irqs_after_switch)
     mmu_activate_space(sched_task_space(next));
 
     /*
-     * Gli IRQ restano disabilitati durante sched_context_switch per evitare
-     * preemption rientranti tra il salvataggio di prev e il ripristino di next.
-     *
-     * Dopo il context switch distinguiamo due casi:
-     *   - schedule()/yield/block da codice kernel normale:
-     *       riabilitiamo qui gli IRQ prima di tornare al caller.
-     *   - schedule() chiamata da vectors.S durante un'eccezione:
-     *       NON riabilitiamo qui gli IRQ, altrimenti un nuovo timer IRQ puo'
-     *       annidarsi mentre il frame eccezione e' ancora sullo stack.
-     *       In quel path gli IRQ torneranno attivi soltanto con l'ERET.
+     * Save/restore TPIDR_EL0 (thread pointer) around the context switch.
+     * IRQs are already disabled here so this is race-free.
+     * Only user tasks have a meaningful TP; kernel tasks always have 0.
      */
-    sched_context_switch(prev, next);
+    {
+        sched_task_ctx_t *prev_ctx = ctx_of(prev);
+        sched_task_ctx_t *next_ctx = ctx_of(next);
+        if (prev_ctx)
+            __asm__ volatile("mrs %0, tpidr_el0"
+                             : "=r"(prev_ctx->tpidr_el0) :: "memory");
+        sched_context_switch(prev, next);
+        /* After the switch, 'next' is now running — restore its TP. */
+        if (next_ctx)
+            __asm__ volatile("msr tpidr_el0, %0"
+                             :: "r"(next_ctx->tpidr_el0) : "memory");
+    }
     if (reenable_irqs_after_switch) {
         /*
          * Ripristina il DAIF originale del caller kernel-side.
@@ -1017,6 +1026,19 @@ sched_tcb_t *sched_task_at(uint32_t index)
 uint32_t sched_task_count_total(void)
 {
     return task_count;
+}
+
+void sched_task_set_tpidr(sched_tcb_t *t, uint64_t tpidr)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    if (ctx)
+        ctx->tpidr_el0 = tpidr;
+}
+
+uint64_t sched_task_get_tpidr(const sched_tcb_t *t)
+{
+    const sched_task_ctx_t *ctx = ctx_of(t);
+    return ctx ? ctx->tpidr_el0 : 0ULL;
 }
 
 void sched_task_bootstrap(uint64_t entry_reg)

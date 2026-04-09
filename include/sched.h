@@ -209,6 +209,8 @@ int         sched_task_has_pgrp(uint32_t sid, uint32_t pgid);
 int         sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target,
                                uint32_t pgid);
 int         sched_task_setsid(sched_tcb_t *task, uint32_t *out_sid);
+void        sched_task_set_tpidr(sched_tcb_t *t, uint64_t tpidr);
+uint64_t    sched_task_get_tpidr(const sched_tcb_t *t);
 sched_tcb_t *sched_task_at(uint32_t index);
 uint32_t    sched_task_count_total(void);
 
