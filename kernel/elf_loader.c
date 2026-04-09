@@ -24,6 +24,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define PT_LOAD            1U
 #define PT_DYNAMIC         2U
 #define PT_INTERP          3U
+#define PT_TLS             7U   /* Thread-Local Storage template (M11-01b) */
 #define PF_X               0x1U
 #define PF_W               0x2U
 #define PF_R               0x4U
@@ -518,6 +519,89 @@ static int elf_prefault_loaded_image(mm_space_t *space,
     return 0;
 }
 
+/*
+ * elf_map_tls_block — alloca il blocco TLS statico per un ELF con PT_TLS.
+ *
+ * AArch64 TLS variant 1 (usata da musl):
+ *   [TLS data (p_filesz)]  [TLS bss (p_memsz - p_filesz)]  <- indirizzo = tls_va
+ *   thread pointer (TPIDR_EL0) = tls_va + p_memsz  (arrotondato all'allineamento)
+ *
+ * Il blocco viene piazzato subito sotto lo stack, fuori dall'area di crescita
+ * (stack = [stack_base, stack_top)).  La TLS occupa una o più pagine allineate.
+ *
+ * Ritorna 0 e scrive *tpidr_out con il valore da caricare in TPIDR_EL0.
+ * Ritorna -1 in caso di errore.
+ */
+static int elf_map_tls_block(elf_read_fn rd, void *ctx,
+                              mm_space_t *space,
+                              const elf64_phdr_t *phdr,
+                              uintptr_t bias,
+                              uintptr_t *tpidr_out)
+{
+    /* Dimensioni e allineamento del template TLS */
+    uintptr_t tls_align  = (phdr->p_align > 1UL) ? (uintptr_t)phdr->p_align : 1UL;
+    uintptr_t tls_filesz = (uintptr_t)phdr->p_filesz;
+    uintptr_t tls_memsz  = (uintptr_t)phdr->p_memsz;
+
+    /* Arrotonda memsz all'allineamento richiesto dal segmento */
+    uintptr_t tls_rounded = (tls_memsz + tls_align - 1UL) & ~(tls_align - 1UL);
+
+    /* Numero di pagine da allocare (arrotondato a pagine intere) */
+    uintptr_t tls_pages   = (tls_rounded + PAGE_SIZE - 1UL) / PAGE_SIZE;
+    uintptr_t tls_bytes   = tls_pages * PAGE_SIZE;
+
+    /*
+     * Posizione nel VAS: sotto lo stack, con un gap di una pagina di guardia.
+     * stack_base = MMU_USER_STACK_TOP - MMU_USER_STACK_SIZE
+     * TLS block  = stack_base - PAGE_SIZE (guardia) - tls_bytes
+     */
+    uintptr_t tls_va = (MMU_USER_STACK_TOP - MMU_USER_STACK_SIZE)
+                       - PAGE_SIZE          /* pagina di guardia */
+                       - tls_bytes;
+
+    /* Allinea la VA al requisito del segmento */
+    tls_va = (tls_va) & ~(tls_align - 1UL);
+
+    if (mmu_map_user_region(space, tls_va, tls_bytes,
+                             MMU_PROT_USER_R | MMU_PROT_USER_W) < 0) {
+        elf_set_error("map TLS block fallita");
+        return -1;
+    }
+
+    /* Azzera tutto il blocco (bss TLS inizia a zero) */
+    void *dst = mmu_space_resolve_ptr(space, tls_va, tls_bytes);
+    if (!dst) {
+        elf_set_error("resolve TLS VA fallita");
+        return -1;
+    }
+    memset(dst, 0, tls_bytes);
+
+    /* Copia il template TLS (p_filesz byte dall'offset p_offset nel file) */
+    if (tls_filesz > 0UL) {
+        uintptr_t copied = 0UL;
+        uintptr_t src_off = (uintptr_t)phdr->p_offset;
+        while (copied < tls_filesz) {
+            size_t chunk = 512U;
+            if ((uintptr_t)chunk > tls_filesz - copied)
+                chunk = (size_t)(tls_filesz - copied);
+            void *d = mmu_space_resolve_ptr(space, tls_va + copied, chunk);
+            if (!d) {
+                elf_set_error("copy TLS template fuori mapping");
+                return -1;
+            }
+            if (elf_read_exact(rd, ctx, src_off + copied, d, chunk) < 0) {
+                elf_set_error("read TLS template fallita");
+                return -1;
+            }
+            copied += chunk;
+        }
+    }
+
+    /* AArch64 variant 1: TPIDR_EL0 punta subito DOPO il blocco TLS data+bss */
+    *tpidr_out = tls_va + tls_rounded;
+    return 0;
+}
+
 static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
                            const char *const *argv, uint64_t argc,
                            const char *const *envp, uint64_t envc,
@@ -630,6 +714,18 @@ static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
     image.image_end  = image_hi;
     image.phentsize = ehdr.e_phentsize;
     image.phnum     = ehdr.e_phnum;
+
+    /* M11-01b: if the ELF has a PT_TLS segment, allocate the TLS block
+     * and compute the initial thread pointer value. */
+    for (uint32_t i = 0U; i < ehdr.e_phnum; i++) {
+        uintptr_t tpidr = 0UL;
+        if (phdrs[i].p_type != PT_TLS)
+            continue;
+        if (elf_map_tls_block(rd, ctx, space, &phdrs[i], bias, &tpidr) < 0)
+            goto fail;
+        image.tpidr_el0 = tpidr;
+        break;
+    }
 
     if (elf_build_stack(space, argv, argc, envp, envc,
                         &ehdr, phdrs, bias, 0ULL, &image) < 0)
@@ -1314,6 +1410,27 @@ static int elf_load_path_exec_dynamic(const char *path,
     image.phentsize = objects[0].ehdr.e_phentsize;
     image.phnum = objects[0].ehdr.e_phnum;
 
+    /* M11-01b: PT_TLS from main executable (objects[0]).
+     * Re-open the file to use the VFS reader for the TLS template copy. */
+    for (uint32_t i = 0U; i < objects[0].ehdr.e_phnum; i++) {
+        if (objects[0].phdrs[i].p_type != PT_TLS) continue;
+        {
+            vfs_file_t tls_file;
+            uintptr_t  tpidr = 0UL;
+            if (vfs_open(objects[0].path, O_RDONLY, &tls_file) < 0) {
+                elf_set_error("open TLS file fallita");
+                goto fail;
+            }
+            int tls_rc = elf_map_tls_block(elf_vfs_read, &tls_file, space,
+                                           &objects[0].phdrs[i], objects[0].bias,
+                                           &tpidr);
+            (void)vfs_close(&tls_file);
+            if (tls_rc < 0) goto fail;
+            image.tpidr_el0 = tpidr;
+        }
+        break;
+    }
+
     if (elf_build_stack(space, argv, argc, envp, envc,
                         &objects[0].ehdr, objects[0].phdrs, objects[0].bias,
                         (interp_idx >= 0) ? objects[interp_idx].image_lo : 0ULL,
@@ -1402,15 +1519,18 @@ sched_tcb_t *elf64_spawn_image(const char *task_name, const elf_image_t *image,
         return NULL;
     }
 
-    return sched_task_create_user(task_name ? task_name : "user-elf",
-                                  image->space,
-                                  image->entry,
-                                  image->user_sp,
-                                  image->argc,
-                                  image->argv,
-                                  image->envp,
-                                  image->auxv,
-                                  priority);
+    sched_tcb_t *t = sched_task_create_user(task_name ? task_name : "user-elf",
+                                             image->space,
+                                             image->entry,
+                                             image->user_sp,
+                                             image->argc,
+                                             image->argv,
+                                             image->envp,
+                                             image->auxv,
+                                             priority);
+    if (t && image->tpidr_el0 != 0UL)
+        sched_task_set_tpidr(t, image->tpidr_el0);
+    return t;
 }
 
 int elf64_spawn_path(const char *path, const char *argv0,

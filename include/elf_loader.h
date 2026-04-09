@@ -29,6 +29,12 @@
 #define ELF_AT_PAGESZ   6U
 #define ELF_AT_ENTRY    9U
 #define ELF_AT_HWCAP    16U
+/* M11-01b: aggiuntivi per musl bootstrap */
+#define ELF_AT_UID      11U
+#define ELF_AT_EUID     12U
+#define ELF_AT_GID      13U
+#define ELF_AT_EGID     14U
+#define ELF_AT_RANDOM   25U
 
 #define ELF_LOADER_MAX_ARGS   16U
 #define ELF_LOADER_MAX_ENVP   16U
@@ -45,6 +51,7 @@ typedef struct {
     uintptr_t   image_end;
     uintptr_t   stack_base;
     uintptr_t   stack_top;
+    uintptr_t   tpidr_el0;  /* initial thread pointer (0 if no PT_TLS) — M11-01b */
     uint64_t    argc;
     uint16_t    phentsize;
     uint16_t    phnum;
