@@ -16,7 +16,7 @@ tutto ogni sessione.
   - `make` — build normale
   - `make test` — build selftest + lancio QEMU
   - `make run` — boot kernel normale in QEMU
-- Stato validato corrente: `SUMMARY total=26 pass=26 fail=0`
+- Stato validato corrente: `SUMMARY total=27 pass=27 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -232,6 +232,23 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - `ioctl()` v1 supporta `TCGETS`, `TCSETS`, `TIOCGWINSZ`, `TIOCGPGRP`,
   `TIOCSPGRP`, `FIONBIO`; fallback `-ENOTTY`
 - Demo runtime: `/MUSLABI.ELF`, comando boot `muslabi`, selftest `musl-abi-core`
+- `MUSLABI.ELF` ora verifica anche l'`auxv` minima per musl:
+  `AT_RANDOM`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`
+- `AT_RANDOM` viene costruita nel loader ELF direttamente sullo stack user-space:
+  16 byte pseudocasuali scritti in memoria utente e referenziati via puntatore nell'`auxv`
+- `M11-01b` e' ora chiusa in v1: `crt1/crti/crtn`, `environ`, `__enlilos_auxv`,
+  `preinit/init/fini arrays` e startup C statico sono validati da `CRTDEMO.ELF`
+- gotcha critico risolto: il restore di `TPIDR_EL0` non puo' stare "dopo" il
+  `sched_context_switch()` assumendo che quel codice giri nel `next` task;
+  quando la funzione riprende, gira nel task appena tornato in esecuzione.
+  La fix corretta e':
+  - salvare sempre il TP del task uscente prima dello switch
+  - ripristinare `TPIDR_EL0` dal `current_task` reale quando il task riprende
+  - impostare `TPIDR_EL0` anche nel primo ingresso EL0 da `sched_task_bootstrap()`
+- altro gotcha utile: `PT_TLS` con `p_memsz == 0` va ignorato, perche' il linker
+  puo' emetterlo anche per ELF senza TLS reale
+- layout TLS statico v1 funzionante con il toolchain attuale:
+  `[TCB stub 16B][tdata][tbss zeroed/aligned]`, con `TPIDR_EL0` puntato al TCB
 
 ---
 

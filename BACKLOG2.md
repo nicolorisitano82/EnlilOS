@@ -1079,6 +1079,12 @@ invece dei ~50µs del loopback TCP.
 
 Porta di **musl libc** come C runtime standard per EnlilOS.
 
+**Stato complessivo attuale:** in corso
+- `M11-01a` completata `v1`
+- `M11-01b` completata `v1`
+- `M11-01c` ancora aperta
+- esito runtime attuale dei test collegati: `musl-abi-core`, `tls-tp`, `crt-startup` verdi
+
 - `arch/aarch64/`: syscall wrappers AArch64 già presenti in musl, adattati ai numeri EnlilOS
 - `sys/`: `open`, `read`, `write`, `close`, `mmap`, `brk`, `exit`, `fork`, `execve`,
   `waitpid`, `getpid`, `kill`, `sigaction`, `socket`, `connect`, ...
@@ -1154,11 +1160,30 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - `fcntl(F_SETFL)` aggiorna il subset utile al bootstrap libc (`O_NONBLOCK` / `O_APPEND`)
 
 **M11-01b · TLS e startup runtime**
-- `PT_TLS`
-- `TPIDR_EL0` nel contesto task
-- save/restore thread pointer in scheduler/return-to-user
-- `crt1/crti/crtn`
-- verifica `auxv`
+- **Stato attuale:** completata `v1`
+- completati `PT_TLS`, `TPIDR_EL0` nel contesto task e ripristino corretto sia al primo ingresso EL0 sia nei resume dopo context switch
+- `auxv` estesa con `AT_RANDOM`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`
+- bootstrap C statico completato con `crt1`, `crti`, `crtn`, `environ`, `__enlilos_auxv`, `preinit/init/fini arrays`
+- validazione runtime tramite `TLSDEMO.ELF` (`tls-tp`), `MUSLABI.ELF` (`musl-abi-core`) e `CRTDEMO.ELF` (`crt-startup`)
+
+**Note v1:**
+- profilo supportato: ELF statici single-thread con TLS locale-exec
+- il supporto TLS multi-thread resta nel perimetro di `M11-02`
+- layout TLS statico validato col toolchain attuale:
+  `[TCB stub 16B][tdata][tbss zeroed/aligned]`, con `TPIDR_EL0` puntato al TCB
+- i segmenti `PT_TLS` con `p_memsz == 0` vengono ignorati: alcuni ELF li emettono
+  anche senza TLS reale e non devono causare allocazione o fault al bootstrap
+- gotcha architetturale chiuso: il restore di `TPIDR_EL0` va fatto dal `current_task`
+  reale dopo il ritorno da `sched_context_switch()`, e va impostato esplicitamente
+  anche nel primo ingresso EL0 da `sched_task_bootstrap()`
+
+**Deliverable chiusi da considerare done:**
+- loader ELF con allocazione/copia TLS statica per `PT_TLS`
+- save/restore di `TPIDR_EL0` in scheduler, fork ed exec path
+- runtime `crt1/crti/crtn`
+- accesso a `environ` e `__enlilos_auxv`
+- hook constructor/destructor e `init/fini arrays`
+- test end-to-end su file `/data/CRTDEMO.TXT`
 
 **M11-01c · Toolchain e smoke test**
 - sysroot
@@ -2717,7 +2742,7 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M11-01** musl libc — adesso che pipe/cwd/termios base sono stabili, sblocca userland C reale senza wrapper ad hoc
+1. **M11-01c** toolchain musl e smoke test — `a+b` sono chiuse; il pezzo residuo e' la toolchain vera con sysroot e test compilati da musl
 2. **M8-08d..f** glob/fnmatch + build system + integrazione arksh — completa il porting della shell di default
 3. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
 
@@ -2787,7 +2812,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | libc statica + TLS base + ABI minima + toolchain. Da qui ogni programma C diventa compilabile |
+| 15 | **M11-01** musl libc | In corso: `M11-01a` + `M11-01b` completate v1; resta `M11-01c` (toolchain/sysroot/smoke test) |
 | 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 

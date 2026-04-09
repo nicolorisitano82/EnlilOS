@@ -88,6 +88,11 @@ USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mrea
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
+USER_CRT_ASM_SRCS     = user/crti.S user/crtn.S
+USER_CRT_C_SRCS       = user/crt1.c user/crt_demo.c
+USER_CRT_OBJS         = $(USER_CRT_ASM_SRCS:.S=.o) $(USER_CRT_C_SRCS:.c=.o)
+USER_CRT_ELFS         = user/crt_demo.elf
+USER_CRT_EMBEDOBJS    = $(USER_CRT_ELFS:.elf=.embed.o)
 USER_DYNAPP_SRCS      = user/dynamic_demo.c
 USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
 USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
@@ -96,9 +101,9 @@ USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c
 USER_SHARED_PICOBJS   = $(USER_SHARED_SRCS:.c=.pic.o)
 USER_SHARED_LIBS      = $(USER_SHARED_SRCS:.c=.so)
 USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
-USER_OBJS             = $(USER_STATIC_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
-USER_ELFS             = $(USER_STATIC_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
-USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
+USER_OBJS             = $(USER_STATIC_OBJS) $(USER_CRT_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
+USER_ELFS             = $(USER_STATIC_ELFS) $(USER_CRT_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
+USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_CRT_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -167,6 +172,12 @@ $(SELFTEST_KERNEL): $(PASS1_SELFTEST_KERNEL) $(KSYMS_SELFTEST_OBJ)
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
+user/crt_demo.elf: user/crti.o user/crt1.o user/crt_demo.o user/crtn.o user/user.ld
+	$(LD) -T user/user.ld -nostdlib -o $@ user/crti.o user/crt1.o user/crt_demo.o user/crtn.o
+
+user/tls_demo.elf: user/crti.o user/crt1.o user/tls_demo.o user/crtn.o user/user.ld
+	$(LD) -T user/user.ld -nostdlib -o $@ user/crti.o user/crt1.o user/tls_demo.o user/crtn.o
+
 user/%.o: user/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
@@ -207,6 +218,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		POSIXDEMO.ELF=user/posix_demo.elf \
 		MUSLABI.ELF=user/musl_abi_demo.elf \
 		TLSDEMO.ELF=user/tls_demo.elf \
+		CRTDEMO.ELF=user/crt_demo.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf

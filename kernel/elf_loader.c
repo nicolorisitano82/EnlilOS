@@ -374,6 +374,21 @@ static uintptr_t elf_phdr_runtime_va(const elf64_ehdr_t *ehdr,
     return 0ULL;
 }
 
+static void elf_fill_aux_random(uint8_t out[16])
+{
+    uint64_t seed0;
+    uint64_t seed1;
+
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(seed0));
+    seed1 = seed0 ^ timer_now_ticks() ^ (uint64_t)(uintptr_t)out ^
+            0xA5A55A5ADEADBEEFULL;
+
+    for (uint32_t i = 0U; i < 8U; i++) {
+        out[i] = (uint8_t)((seed0 >> (i * 8U)) & 0xFFU);
+        out[8U + i] = (uint8_t)((seed1 >> (i * 8U)) & 0xFFU);
+    }
+}
+
 static int elf_build_stack(mm_space_t *space,
                            const char *const *argv, uint64_t argc,
                            const char *const *envp, uint64_t envc,
@@ -389,7 +404,9 @@ static int elf_build_stack(mm_space_t *space,
     uintptr_t argv_va;
     uintptr_t envp_va;
     uintptr_t auxv_va;
-    elf64_auxv_t auxv[8];
+    uintptr_t random_va;
+    uint8_t   random_bytes[16];
+    elf64_auxv_t auxv[16];
     uint32_t auxc = 0U;
     uint32_t words;
     size_t   table_bytes;
@@ -437,6 +454,19 @@ static int elf_build_stack(mm_space_t *space,
         return -1;
     }
 
+    sp -= sizeof(random_bytes);
+    random_va = sp;
+    {
+        void *dst = mmu_space_resolve_ptr(space, random_va, sizeof(random_bytes));
+        if (!dst) {
+            elf_set_error("AT_RANDOM fuori mapping");
+            return -1;
+        }
+        elf_fill_aux_random(random_bytes);
+        memcpy(dst, random_bytes, sizeof(random_bytes));
+    }
+    sp &= ~0xFULL;
+
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PHDR,   phdr_va };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PHENT,  ehdr->e_phentsize };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PHNUM,  ehdr->e_phnum };
@@ -445,6 +475,11 @@ static int elf_build_stack(mm_space_t *space,
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_ENTRY,  ehdr->e_entry + bias };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PAGESZ, (uint64_t)PAGE_SIZE };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_HWCAP,  ELF64_HWCAP };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_RANDOM, random_va };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_UID,    0ULL };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_EUID,   0ULL };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_GID,    0ULL };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_EGID,   0ULL };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_NULL,   0ULL };
 
     words = 1U + (uint32_t)argc + 1U + (uint32_t)envc + 1U + auxc * 2U;
@@ -522,14 +557,17 @@ static int elf_prefault_loaded_image(mm_space_t *space,
 /*
  * elf_map_tls_block — alloca il blocco TLS statico per un ELF con PT_TLS.
  *
- * AArch64 TLS variant 1 (usata da musl):
- *   [TLS data (p_filesz)]  [TLS bss (p_memsz - p_filesz)]  <- indirizzo = tls_va
- *   thread pointer (TPIDR_EL0) = tls_va + p_memsz  (arrotondato all'allineamento)
+ * Bootstrap TLS AArch64 per il toolchain attuale:
+ *   [TCB stub 16B] [TLS data (p_filesz)] [TLS bss/template tail]
  *
- * Il blocco viene piazzato subito sotto lo stack, fuori dall'area di crescita
- * (stack = [stack_base, stack_top)).  La TLS occupa una o più pagine allineate.
+ * Il codice LE generato da GCC (`R_AARCH64_TLSLE_*`) indirizza le variabili
+ * TLS con offset positivi da TPIDR_EL0, quindi il thread pointer deve puntare
+ * a un piccolo TCB stub davanti al template PT_TLS.  Per la v1 statica ci
+ * basta riservare 16 byte zeroed e copiare il template a partire da TP+16.
  *
- * Ritorna 0 e scrive *tpidr_out con il valore da caricare in TPIDR_EL0.
+ * Il blocco viene piazzato sotto lo stack, fuori dall'area di crescita.
+ *
+ * Ritorna 0 e scrive *tpidr_out con il valore iniziale di TPIDR_EL0.
  * Ritorna -1 in caso di errore.
  */
 static int elf_map_tls_block(elf_read_fn rd, void *ctx,
@@ -538,38 +576,47 @@ static int elf_map_tls_block(elf_read_fn rd, void *ctx,
                               uintptr_t bias,
                               uintptr_t *tpidr_out)
 {
+    const uintptr_t tcb_size = 16UL;
     /* Dimensioni e allineamento del template TLS */
     uintptr_t tls_align  = (phdr->p_align > 1UL) ? (uintptr_t)phdr->p_align : 1UL;
     uintptr_t tls_filesz = (uintptr_t)phdr->p_filesz;
     uintptr_t tls_memsz  = (uintptr_t)phdr->p_memsz;
+    uintptr_t tls_data_off;
+    uintptr_t tls_total_raw;
+    uintptr_t tls_pages;
+    uintptr_t tls_bytes;
+    uintptr_t tp_va;
+    uintptr_t tls_va;
 
-    /* Arrotonda memsz all'allineamento richiesto dal segmento */
-    uintptr_t tls_rounded = (tls_memsz + tls_align - 1UL) & ~(tls_align - 1UL);
+    (void)bias;
 
-    /* Numero di pagine da allocare (arrotondato a pagine intere) */
-    uintptr_t tls_pages   = (tls_rounded + PAGE_SIZE - 1UL) / PAGE_SIZE;
-    uintptr_t tls_bytes   = tls_pages * PAGE_SIZE;
+    if (tls_align < tcb_size)
+        tls_align = tcb_size;
+
+    tls_data_off = (tcb_size + tls_align - 1UL) & ~(tls_align - 1UL);
+    tls_total_raw = tls_data_off + tls_memsz;
+    tls_pages = (tls_total_raw + PAGE_SIZE - 1UL) / PAGE_SIZE;
+    tls_bytes = tls_pages * PAGE_SIZE;
 
     /*
      * Posizione nel VAS: sotto lo stack, con un gap di una pagina di guardia.
      * stack_base = MMU_USER_STACK_TOP - MMU_USER_STACK_SIZE
      * TLS block  = stack_base - PAGE_SIZE (guardia) - tls_bytes
      */
-    uintptr_t tls_va = (MMU_USER_STACK_TOP - MMU_USER_STACK_SIZE)
-                       - PAGE_SIZE          /* pagina di guardia */
-                       - tls_bytes;
+    tp_va = (MMU_USER_STACK_TOP - MMU_USER_STACK_SIZE)
+            - PAGE_SIZE          /* pagina di guardia */
+            - tls_bytes;
+    tp_va &= ~(tls_align - 1UL);
+    tls_va = tp_va + tls_data_off;
 
-    /* Allinea la VA al requisito del segmento */
-    tls_va = (tls_va) & ~(tls_align - 1UL);
-
-    if (mmu_map_user_region(space, tls_va, tls_bytes,
+    if (mmu_map_user_region(space, tp_va, tls_bytes,
                              MMU_PROT_USER_R | MMU_PROT_USER_W) < 0) {
         elf_set_error("map TLS block fallita");
         return -1;
     }
 
     /* Azzera tutto il blocco (bss TLS inizia a zero) */
-    void *dst = mmu_space_resolve_ptr(space, tls_va, tls_bytes);
+    void *dst = mmu_space_resolve_ptr(space, tp_va, tls_bytes);
     if (!dst) {
         elf_set_error("resolve TLS VA fallita");
         return -1;
@@ -597,8 +644,8 @@ static int elf_map_tls_block(elf_read_fn rd, void *ctx,
         }
     }
 
-    /* AArch64 variant 1: TPIDR_EL0 punta subito DOPO il blocco TLS data+bss */
-    *tpidr_out = tls_va + tls_rounded;
+    /* TPIDR_EL0 punta al TCB stub; il template PT_TLS parte a TP+tls_data_off. */
+    *tpidr_out = tp_va;
     return 0;
 }
 
@@ -719,7 +766,7 @@ static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
      * and compute the initial thread pointer value. */
     for (uint32_t i = 0U; i < ehdr.e_phnum; i++) {
         uintptr_t tpidr = 0UL;
-        if (phdrs[i].p_type != PT_TLS)
+        if (phdrs[i].p_type != PT_TLS || phdrs[i].p_memsz == 0ULL)
             continue;
         if (elf_map_tls_block(rd, ctx, space, &phdrs[i], bias, &tpidr) < 0)
             goto fail;
@@ -1413,7 +1460,8 @@ static int elf_load_path_exec_dynamic(const char *path,
     /* M11-01b: PT_TLS from main executable (objects[0]).
      * Re-open the file to use the VFS reader for the TLS template copy. */
     for (uint32_t i = 0U; i < objects[0].ehdr.e_phnum; i++) {
-        if (objects[0].phdrs[i].p_type != PT_TLS) continue;
+        if (objects[0].phdrs[i].p_type != PT_TLS ||
+            objects[0].phdrs[i].p_memsz == 0ULL) continue;
         {
             vfs_file_t tls_file;
             uintptr_t  tpidr = 0UL;

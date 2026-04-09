@@ -17,10 +17,22 @@ typedef unsigned long  u64;
 typedef signed long    s64;
 typedef unsigned int   u32;
 
+typedef struct {
+    u64 a_type;
+    u64 a_val;
+} auxv_t;
+
 #define MUSL_ABI_PATH     "/data/MUSLABI.TXT"
 #define MUSL_ABI_MSG_A    "hello "
 #define MUSL_ABI_MSG_B    "m11a\n"
 #define MUSL_ABI_MSG      "hello m11a\n"
+
+#define AT_NULL           0UL
+#define AT_UID            11UL
+#define AT_EUID           12UL
+#define AT_GID            13UL
+#define AT_EGID           14UL
+#define AT_RANDOM         25UL
 
 static long sys_call0(long nr)
 {
@@ -169,6 +181,32 @@ static void demo_memcpy(void *dst, const void *src, u32 len)
         d[i] = s[i];
 }
 
+static int demo_memcmp(const void *a, const void *b, u32 len)
+{
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+
+    for (u32 i = 0U; i < len; i++) {
+        if (pa[i] != pb[i])
+            return (int)pa[i] - (int)pb[i];
+    }
+    return 0;
+}
+
+static const auxv_t *demo_auxv_find(const auxv_t *auxv, u64 tag)
+{
+    if (!auxv)
+        return (const auxv_t *)0;
+
+    for (u32 i = 0U; i < 64U; i++) {
+        if (auxv[i].a_type == AT_NULL)
+            break;
+        if (auxv[i].a_type == tag)
+            return &auxv[i];
+    }
+    return (const auxv_t *)0;
+}
+
 static u64 demo_timeval_to_us(const timeval_t *tv)
 {
     return (u64)tv->tv_sec * 1000000ULL + (u64)tv->tv_usec;
@@ -179,7 +217,7 @@ static void demo_log(const char *msg)
     (void)sys_write_fd(1, msg, demo_strlen(msg));
 }
 
-static int demo_run(void)
+static int demo_run(const auxv_t *auxv)
 {
     timeval_t tv0;
     timeval_t tv1;
@@ -195,12 +233,39 @@ static int demo_run(void)
     char buf_a[8];
     char buf_b[8];
     char joined[sizeof(MUSL_ABI_MSG)];
+    unsigned char zero_random[16];
+    const auxv_t *at_random;
+    const auxv_t *at_uid;
+    const auxv_t *at_euid;
+    const auxv_t *at_gid;
+    const auxv_t *at_egid;
+    const unsigned char *rand_bytes;
     long pid;
     long ppid;
     long fd;
     long dupfd;
     long rc;
     long flags;
+
+    at_random = demo_auxv_find(auxv, AT_RANDOM);
+    at_uid = demo_auxv_find(auxv, AT_UID);
+    at_euid = demo_auxv_find(auxv, AT_EUID);
+    at_gid = demo_auxv_find(auxv, AT_GID);
+    at_egid = demo_auxv_find(auxv, AT_EGID);
+
+    if (!at_random || at_random->a_val == 0UL)
+        return 29;
+    if (!at_uid || !at_euid || !at_gid || !at_egid)
+        return 30;
+    if (at_uid->a_val != 0UL || at_euid->a_val != 0UL ||
+        at_gid->a_val != 0UL || at_egid->a_val != 0UL)
+        return 31;
+
+    for (u32 i = 0U; i < sizeof(zero_random); i++)
+        zero_random[i] = 0U;
+    rand_bytes = (const unsigned char *)(unsigned long)at_random->a_val;
+    if (demo_memcmp(rand_bytes, zero_random, sizeof(zero_random)) == 0)
+        return 32;
 
     pid = sys_getpid_now();
     ppid = sys_getppid_now();
@@ -304,7 +369,7 @@ static int demo_run(void)
     if (sys_close_fd(fd) < 0)
         return 28;
 
-    demo_log("[M11A] ABI minima musl pronta\n");
+    demo_log("[M11A/B3] ABI minima musl + auxv pronti\n");
     return 0;
 }
 
@@ -313,6 +378,5 @@ void _start(long argc, char **argv, char **envp, void *auxv)
     (void)argc;
     (void)argv;
     (void)envp;
-    (void)auxv;
-    sys_exit_now(demo_run());
+    sys_exit_now(demo_run((const auxv_t *)auxv));
 }

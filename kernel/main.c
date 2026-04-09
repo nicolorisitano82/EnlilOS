@@ -1134,7 +1134,7 @@ static void bootcli_render(void)
                       "append mkdir truncate rm mv fsync sync nsh mreactdemo jobdemo nsdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "posixdemo muslabi",
+                      "posixdemo muslabi crtdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1253,7 +1253,8 @@ static void bootcli_execute_command(void)
         bootcli_push_line("jobdemo   lancia un ELF che verifica groups/sessioni/job control");
         bootcli_push_line("nsdemo    lancia un ELF che verifica mount namespace + pivot_root");
         bootcli_push_line("posixdemo lancia un ELF che verifica pipe/dup/cwd/termios");
-        bootcli_push_line("muslabi   lancia un ELF che verifica la ABI minima M11-01a");
+        bootcli_push_line("muslabi   lancia un ELF che verifica la ABI minima M11-01a/B3");
+        bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
@@ -1514,6 +1515,16 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "crtdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/CRTDEMO.ELF", "/CRTDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "crt demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_startswith(bootcli_input, "runelf ")) {
         char resolved[BOOTCLI_PATH_MAX + 1];
         uint32_t pid = 0U;
@@ -1701,7 +1712,8 @@ static void bootcli_init(void)
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
     bootcli_push_line("M8-04: prova 'jobdemo' per process group, sessione e waitpid(WUNTRACED).");
     bootcli_push_line("M8-08a/b/c: prova 'posixdemo' per pipe, dup/dup2, cwd ed echo/raw termios.");
-    bootcli_push_line("M11-01a: prova 'muslabi' per openat/lseek/readv/writev/fcntl/ioctl/uname.");
+    bootcli_push_line("M11-01b: prova 'crtdemo' per crt1, costruttori, distruttori e TLS statico.");
+    bootcli_push_line("M11-01a/B3: prova 'muslabi' per openat/lseek/readv/writev/fcntl/ioctl/uname/auxv.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");

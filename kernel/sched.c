@@ -507,7 +507,7 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->auxv            = auxv;
     ctx->is_user         = 1U;
     ctx->resume_from_frame = 0U;
-    ctx->tpidr_el0       = 0ULL;   /* musl/crt1 inizializzera' il TP al primo run */
+    ctx->tpidr_el0       = 0ULL;
     ctx->parent_pid      = current_task ? current_task->pid : 0U;
     ctx->pgid            = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
     ctx->sid             = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
@@ -648,15 +648,19 @@ void schedule_locked(uint64_t flags, int reenable_irqs_after_switch)
      */
     {
         sched_task_ctx_t *prev_ctx = ctx_of(prev);
-        sched_task_ctx_t *next_ctx = ctx_of(next);
         if (prev_ctx)
             __asm__ volatile("mrs %0, tpidr_el0"
                              : "=r"(prev_ctx->tpidr_el0) :: "memory");
         sched_context_switch(prev, next);
-        /* After the switch, 'next' is now running — restore its TP. */
-        if (next_ctx)
+        /*
+         * Quando questa funzione riprende dopo sched_context_switch(), siamo
+         * nel task appena tornato in esecuzione, non necessariamente nel
+         * 'next' scelto da questa invocazione.  Ripristina quindi il TP del
+         * task corrente reale.
+         */
+        if (current_task && ctx_of(current_task))
             __asm__ volatile("msr tpidr_el0, %0"
-                             :: "r"(next_ctx->tpidr_el0) : "memory");
+                             :: "r"(ctx_of(current_task)->tpidr_el0) : "memory");
     }
     if (reenable_irqs_after_switch) {
         /*
@@ -1055,11 +1059,15 @@ void sched_task_bootstrap(uint64_t entry_reg)
          */
         __asm__ volatile("msr daifset, #2" ::: "memory");
         ctx->resume_from_frame = 0U;
+        __asm__ volatile("msr tpidr_el0, %0"
+                         :: "r"(ctx->tpidr_el0) : "memory");
         sched_resume_user_frame(&ctx->start_frame);
         while (1) __asm__ volatile("wfe");
     }
 
     if (ctx && ctx->is_user) {
+        __asm__ volatile("msr tpidr_el0, %0"
+                         :: "r"(ctx->tpidr_el0) : "memory");
         sched_enter_user(ctx->argc, ctx->argv, ctx->envp, ctx->auxv,
                          ctx->user_sp, ctx->user_entry);
         while (1) __asm__ volatile("wfe");

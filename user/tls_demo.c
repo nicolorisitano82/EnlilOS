@@ -34,20 +34,13 @@ static void tp_write(u64 v)
     __asm__ volatile("msr tpidr_el0, %0" :: "r"(v) : "memory");
 }
 
-static void print_hex(u64 v)
-{
-    static const char hex[] = "0123456789abcdef";
-    char buf[18];
-    buf[0]  = '0'; buf[1]  = 'x';
-    for (int i = 0; i < 16; i++)
-        buf[2 + i] = hex[(v >> (60 - i * 4)) & 0xF];
-    buf[17] = '\n';
-    user_svc3(SYS_WRITE, 1, (long)buf, 18);
-}
-
-int main(void)
+int main(int argc, char **argv, char **envp)
 {
     const u64 MAGIC = 0xDEADBEEF12345678ULL;
+
+    (void)argc;
+    (void)argv;
+    (void)envp;
 
     /* ── Test 1: preservazione attraverso sched_yield ─────────────── */
     tp_write(MAGIC);

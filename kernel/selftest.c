@@ -1637,6 +1637,52 @@ static int selftest_case_tls_tp(void)
     return 0;
 }
 
+static int selftest_case_crt_startup(void)
+{
+    static const char case_name[] =
+        "crt-startup";
+    static const char expected[] =
+        "ctor-ok\n"
+        "argv-ok\n"
+        "env-ok\n"
+        "crt-ok\n"
+        "tls-ok\n"
+        "dtor-ok\n";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    vfs_file_t   file;
+    char         buf[96];
+    ssize_t      n;
+    int          rc;
+
+    rc = vfs_unlink("/data/CRTDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup CRTDEMO.TXT fallita");
+
+    if (st_spawn_user_task(case_name, "/CRTDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 3000ULL);
+    ST_CHECK(case_name, task != NULL, "CRTDEMO.ELF timeout");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa CRTDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "CRTDEMO exit code non e' 0");
+
+    rc = vfs_open("/data/CRTDEMO.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open CRTDEMO.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read CRTDEMO.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected),
+             "contenuto CRTDEMO.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_unlink("/data/CRTDEMO.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink CRTDEMO.TXT fallita");
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1665,6 +1711,7 @@ static const selftest_case_t selftest_cases[] = {
     { "procfs-core", selftest_case_procfs    },
     { "mmap-file",   selftest_case_mmap_file },
     { "tls-tp",      selftest_case_tls_tp   },
+    { "crt-startup", selftest_case_crt_startup },
 };
 
 int selftest_run_named(const char *name)
