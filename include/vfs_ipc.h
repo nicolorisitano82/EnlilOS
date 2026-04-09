@@ -39,6 +39,7 @@ typedef enum {
     VFSD_REQ_UMOUNT = 11,
     VFSD_REQ_UNSHARE = 12,
     VFSD_REQ_PIVOT_ROOT = 13,
+    VFSD_REQ_LSEEK = 14,
 } vfsd_req_op_t;
 
 typedef struct {

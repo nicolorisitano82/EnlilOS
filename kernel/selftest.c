@@ -325,6 +325,15 @@ static int selftest_case_rootfs(void)
              "/POSIXDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/POSIXDEMO.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/MUSLABI.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /MUSLABI.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /MUSLABI.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/MUSLABI.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/MUSLABI.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -895,6 +904,47 @@ static int selftest_case_posix_ux(void)
              "timeout attesa POSIXDEMO.ELF");
     ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
              "POSIXDEMO exit code non e' 0");
+    return 0;
+}
+
+static int selftest_case_musl_abi(void)
+{
+    static const char case_name[] = "musl-abi-core";
+    static const char expected[] = "hello m11a\n";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    vfs_file_t   file;
+    char         buf[32];
+    ssize_t      n;
+    int          rc;
+
+    rc = vfs_unlink("/data/MUSLABI.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLABI.TXT fallita");
+
+    if (st_spawn_user_task(case_name, "/MUSLABI.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 3000ULL);
+    if (!(task && task->state == TCB_STATE_ZOMBIE))
+        st_log_task_diag(case_name, task);
+    ST_CHECK(case_name, task != NULL, "task MUSLABI.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa MUSLABI.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "MUSLABI exit code non e' 0");
+
+    rc = vfs_open("/data/MUSLABI.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open MUSLABI.TXT fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read MUSLABI.TXT fallita");
+    buf[(n < (ssize_t)(sizeof(buf) - 1U)) ? (size_t)n : (sizeof(buf) - 1U)] = '\0';
+    ST_CHECK(case_name, st_streq(buf, expected),
+             "contenuto MUSLABI.TXT inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_unlink("/data/MUSLABI.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink MUSLABI.TXT fallita");
     return 0;
 }
 
@@ -1584,6 +1634,7 @@ static const selftest_case_t selftest_cases[] = {
     { "signal-core", selftest_case_signal    },
     { "jobctl-core", selftest_case_jobctl    },
     { "posix-ux",    selftest_case_posix_ux  },
+    { "musl-abi-core", selftest_case_musl_abi },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },

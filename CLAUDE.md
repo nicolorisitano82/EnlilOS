@@ -16,6 +16,7 @@ tutto ogni sessione.
   - `make` — build normale
   - `make test` — build selftest + lancio QEMU
   - `make run` — boot kernel normale in QEMU
+- Stato validato corrente: `SUMMARY total=26 pass=26 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -135,6 +136,8 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 1–20    base POSIX (write/read/exit/open/close/fstat/mmap/munmap/brk/execve/
          fork/waitpid/clock_gettime/getdents/task_snapshot/spawn/
          sigaction/sigprocmask/sigreturn/yield)
+39–55   ABI minima musl v1 (getpid/getppid/gettimeofday/nanosleep/uids/
+         lseek/readv/writev/fcntl/openat/fstatat/ioctl/uname)
 60–64   capability (cap_alloc/cap_send/cap_revoke/cap_derive/cap_query)
 80–84   mreact (subscribe/wait/cancel/subscribe_all/subscribe_any)
 85–94   ksem (create/open/close/unlink/post/wait/timedwait/trywait/getvalue/anon)
@@ -149,6 +152,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 140–142 IPC (port_lookup/ipc_wait/ipc_reply)
 150–155 VFS boot (vfs_boot_open/read/write/readdir/stat/close)
 156–159 BLK boot (blk_boot_read/write/flush/sectors) — solo owner porta "block"
+160–161 VFS boot extra (taskinfo/lseek)
 ```
 
 ### Wrapper EL0 (`include/user_svc.h`)
@@ -206,6 +210,28 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Usa syscall `vfs_boot_*` (150–155) per accedere al VFS kernel-side
 - Selftest `vfsd-core` verifica che il server risponda correttamente a open/read/stat
 - Bootstrap: spawned da `kernel/main.c` come primo task user-space
+- Nota critica da M11-01a: `lseek()` sui fd remoti richiede sia `VFSD_REQ_LSEEK`
+  lato IPC sia l'aggiornamento del `file.pos` shadow nel kernel dopo `read/write`.
+  Se aggiorni solo il remote handle e non lo shadow, `SEEK_CUR` parte da una posizione
+  stantia e i demo ELF falliscono in modo intermittente.
+
+## ABI minima musl (`M11-01a`)
+
+**File**: [kernel/syscall.c](kernel/syscall.c), [include/syscall.h](include/syscall.h),
+[user/musl_abi_demo.c](user/musl_abi_demo.c)
+
+- Implementato il pacchetto v1: `getpid/getppid/gettimeofday/nanosleep`,
+  `getuid/getgid/geteuid/getegid`, `lseek`, `readv`, `writev`, `fcntl`,
+  `openat`, `fstatat/newfstatat`, `ioctl`, `uname`
+- `O_CLOEXEC` / `FD_CLOEXEC` sono reali: `open/openat` li memorizzano sul fd entry
+  e `execve()` chiude i fd marcati solo sul path di successo
+- `fcntl` v1 supporta `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`,
+  `F_DUPFD`, `F_DUPFD_CLOEXEC`
+- `openat()` v1 supporta `AT_FDCWD` e path assoluti; i dirfd relativi veri sono rinviati
+- `fstatat()` v1 supporta `AT_FDCWD` e `AT_EMPTY_PATH`
+- `ioctl()` v1 supporta `TCGETS`, `TCSETS`, `TIOCGWINSZ`, `TIOCGPGRP`,
+  `TIOCSPGRP`, `FIONBIO`; fallback `-ENOTTY`
+- Demo runtime: `/MUSLABI.ELF`, comando boot `muslabi`, selftest `musl-abi-core`
 
 ---
 

@@ -170,6 +170,11 @@ static long sys_vfs_boot_close_now(u32 handle)
     return sys_call1(SYS_VFS_BOOT_CLOSE, (long)handle);
 }
 
+static long sys_vfs_boot_lseek_now(u32 handle, s64 offset, u32 whence)
+{
+    return sys_call3(SYS_VFS_BOOT_LSEEK, (long)handle, (long)offset, (long)whence);
+}
+
 static long sys_vfs_boot_taskinfo_now(u32 pid, vfsd_taskinfo_t *info)
 {
     return sys_call2(SYS_VFS_BOOT_TASKINFO, (long)pid, (long)info);
@@ -1006,6 +1011,22 @@ void _start(void)
             rc = sys_vfs_boot_close_now((u32)req->handle);
             resp.status = (int)rc;
             break;
+        case VFSD_REQ_LSEEK: {
+            s64 offset = 0;
+
+            vfsd_memcpy(&offset, req->u.data, sizeof(offset));
+            rc = sys_vfs_boot_lseek_now((u32)req->handle, offset, req->arg0);
+            if (rc < 0) {
+                resp.status = (int)rc;
+            } else {
+                s64 new_pos = (s64)rc;
+
+                resp.status = 0;
+                resp.data_len = (u32)sizeof(new_pos);
+                vfsd_memcpy(resp.u.data, &new_pos, sizeof(new_pos));
+            }
+            break;
+        }
         case VFSD_REQ_RESOLVE: {
             char backend[VFSD_PATH_BYTES];
             char virtual_path[VFSD_IO_BYTES];

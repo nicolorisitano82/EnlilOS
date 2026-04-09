@@ -84,7 +84,11 @@ typedef struct {
 
 typedef struct {
     fd_object_t *obj;
+    uint8_t      fd_flags;
+    uint8_t      _pad0[7];
 } fd_entry_t;
+
+#define FD_ENTRY_CLOEXEC   0x01U
 
 typedef struct {
     uint8_t  in_use;
@@ -220,6 +224,21 @@ static fd_entry_t *fd_entry_get(int fd)
 }
 
 /* Restituisce l'oggetto fd corrente, NULL se fuori range o free */
+static void fd_entry_set_cloexec(fd_entry_t *e, int enabled)
+{
+    if (!e)
+        return;
+    if (enabled)
+        e->fd_flags |= FD_ENTRY_CLOEXEC;
+    else
+        e->fd_flags &= (uint8_t)~FD_ENTRY_CLOEXEC;
+}
+
+static int fd_entry_cloexec(const fd_entry_t *e)
+{
+    return (e && (e->fd_flags & FD_ENTRY_CLOEXEC) != 0U) ? 1 : 0;
+}
+
 static fd_object_t *fd_get(int fd)
 {
     fd_entry_t *e = fd_entry_get(fd);
@@ -262,6 +281,20 @@ static int fd_alloc_in_slot(int idx)
     return -1;
 }
 
+static int fd_alloc_from_in_slot(int idx, int start)
+{
+    if (idx < 0 || idx >= SCHED_MAX_TASKS)
+        return -EINVAL;
+    if (start < 0)
+        start = 0;
+
+    for (int i = start; i < MAX_FD; i++) {
+        if (fd_tables[idx][i].obj == NULL)
+            return i;
+    }
+    return -1;
+}
+
 static int fd_alloc(void)
 {
     return fd_alloc_in_slot(task_idx());
@@ -269,8 +302,10 @@ static int fd_alloc(void)
 
 static void fd_clear(fd_entry_t *e)
 {
-    if (e)
+    if (e) {
         e->obj = NULL;
+        e->fd_flags = 0U;
+    }
 }
 
 static void fd_object_put(fd_object_t *obj)
@@ -317,6 +352,7 @@ static void fd_release_slot(fd_entry_t *e)
 
     fd_object_put(e->obj);
     e->obj = NULL;
+    e->fd_flags = 0U;
 }
 
 static int fd_attach_object(fd_entry_t *e, fd_object_t *obj)
@@ -388,8 +424,10 @@ static void fd_clone_task_table(int dst_idx, int src_idx)
         fd_object_t *obj = fd_tables[src_idx][i].obj;
 
         fd_tables[dst_idx][i].obj = NULL;
+        fd_tables[dst_idx][i].fd_flags = 0U;
         if (obj)
             (void)fd_attach_object(&fd_tables[dst_idx][i], obj);
+        fd_tables[dst_idx][i].fd_flags = fd_tables[src_idx][i].fd_flags;
     }
 }
 
@@ -983,6 +1021,207 @@ static int vfsd_proxy_close(uint32_t handle)
     return resp.status;
 }
 
+static int64_t vfsd_proxy_lseek(uint32_t handle, int64_t offset, int whence)
+{
+    vfsd_request_t  req;
+    vfsd_response_t resp;
+    int             rc;
+    int64_t         result = 0LL;
+
+    memset(&req, 0, sizeof(req));
+    req.op = VFSD_REQ_LSEEK;
+    req.handle = (int32_t)handle;
+    req.arg0 = (uint32_t)whence;
+    memcpy(req.u.data, &offset, sizeof(offset));
+
+    rc = vfsd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return (int64_t)rc;
+    if (resp.status < 0)
+        return (int64_t)resp.status;
+    if (resp.data_len != sizeof(result))
+        return -EIO;
+
+    memcpy(&result, resp.u.data, sizeof(result));
+    return result;
+}
+
+static void fd_split_open_flags(uint16_t in_flags, uint16_t *file_flags,
+                                uint8_t *fd_flags)
+{
+    if (file_flags)
+        *file_flags = (uint16_t)(in_flags & (uint16_t)~O_CLOEXEC);
+    if (fd_flags)
+        *fd_flags = ((in_flags & O_CLOEXEC) != 0U) ? FD_ENTRY_CLOEXEC : 0U;
+}
+
+static int fd_open_path_current(const char *path, uint16_t file_flags,
+                                uint8_t fd_flags)
+{
+    char     resolved_buf[VFSD_IO_BYTES];
+    uint32_t remote_handle = 0U;
+    int      idx = task_idx();
+    int      fd;
+    int      rc;
+
+    if (!path || path[0] == '\0')
+        return -ENOENT;
+
+    fd = fd_alloc();
+    if (fd < 0)
+        return -ENFILE;
+
+    if (vfsd_proxy_available()) {
+        rc = vfsd_proxy_open(path, file_flags, &remote_handle);
+        if (rc < 0)
+            return rc;
+
+        rc = fd_bind_remote(&fd_tables[idx][fd], remote_handle, file_flags);
+        if (rc >= 0) {
+            rc = vfsd_proxy_resolve(path, resolved_buf, sizeof(resolved_buf));
+            if (rc >= 0)
+                rc = fd_bind_remote_shadow(&fd_tables[idx][fd], resolved_buf, file_flags);
+            if (rc < 0) {
+                (void)vfsd_proxy_close(remote_handle);
+                fd_release_slot(&fd_tables[idx][fd]);
+            }
+        }
+    } else {
+        rc = fd_bind_path(&fd_tables[idx][fd], path, file_flags);
+    }
+
+    if (rc < 0)
+        return rc;
+
+    fd_tables[idx][fd].fd_flags = fd_flags;
+    return fd;
+}
+
+static void fd_close_cloexec_in_slot(int idx)
+{
+    if (idx < 0 || idx >= SCHED_MAX_TASKS)
+        return;
+
+    for (int fd = 0; fd < MAX_FD; fd++) {
+        if (!fd_entry_cloexec(&fd_tables[idx][fd]))
+            continue;
+        fd_release_slot(&fd_tables[idx][fd]);
+    }
+}
+
+static int vfs_file_do_seek(vfs_file_t *file, int64_t offset,
+                            int whence, uint64_t *new_pos_out)
+{
+    uint64_t base = 0ULL;
+    uint64_t new_pos;
+    stat_t   st;
+    int      rc;
+
+    if (!file || !new_pos_out)
+        return -EINVAL;
+
+    switch (whence) {
+    case SEEK_SET:
+        base = 0ULL;
+        break;
+    case SEEK_CUR:
+        base = file->pos;
+        break;
+    case SEEK_END:
+        rc = vfs_stat(file, &st);
+        if (rc < 0)
+            return rc;
+        base = st.st_size;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (offset < 0 && (uint64_t)(-offset) > base)
+        return -EINVAL;
+
+    new_pos = (offset < 0) ? (base - (uint64_t)(-offset))
+                           : (base + (uint64_t)offset);
+    file->pos = new_pos;
+    *new_pos_out = new_pos;
+    return 0;
+}
+
+static int fd_object_seek(fd_object_t *obj, int64_t offset,
+                          int whence, uint64_t *new_pos_out)
+{
+    stat_t   st;
+    uint64_t base = 0ULL;
+    uint64_t new_pos;
+    int64_t  remote_pos;
+    int      rc;
+
+    if (!obj || !new_pos_out)
+        return -EINVAL;
+    if (obj->type == FD_TYPE_PIPE)
+        return -ESPIPE;
+    if (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD)
+        return -EBADF;
+
+    switch (whence) {
+    case SEEK_SET:
+        base = 0ULL;
+        break;
+    case SEEK_CUR:
+        base = obj->file.pos;
+        break;
+    case SEEK_END:
+        if (obj->file.mount) {
+            rc = vfs_stat(&obj->file, &st);
+            if (rc < 0)
+                return rc;
+            base = st.st_size;
+        } else if (obj->type == FD_TYPE_VFSD) {
+            rc = vfsd_proxy_stat(obj->remote_handle, &st);
+            if (rc < 0)
+                return rc;
+            base = st.st_size;
+        } else {
+            return -EINVAL;
+        }
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (offset < 0 && (uint64_t)(-offset) > base)
+        return -EINVAL;
+    new_pos = (offset < 0) ? (base - (uint64_t)(-offset))
+                           : (base + (uint64_t)offset);
+
+    if (obj->type == FD_TYPE_VFSD) {
+        remote_pos = vfsd_proxy_lseek(obj->remote_handle, (int64_t)new_pos, SEEK_SET);
+        if (remote_pos < 0)
+            return (int)remote_pos;
+        obj->file.pos = (uint64_t)remote_pos;
+        *new_pos_out = (uint64_t)remote_pos;
+        return 0;
+    }
+
+    obj->file.pos = new_pos;
+    *new_pos_out = new_pos;
+    return 0;
+}
+
+static void syscall_copy_fixed_string(char *dst, size_t cap, const char *src)
+{
+    size_t i = 0U;
+
+    if (!dst || cap == 0U)
+        return;
+
+    while (src && src[i] != '\0' && i + 1U < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static int user_copy_bytes(uintptr_t uva, void *dst, size_t size)
 {
     mm_space_t *space;
@@ -1257,6 +1496,8 @@ static uint64_t sys_write(uint64_t args[6])
 
     if (obj->type == FD_TYPE_VFSD) {
         rc = vfsd_proxy_write(obj->remote_handle, src, (size_t)count);
+        if (rc > 0)
+            obj->file.pos += (uint64_t)rc;
     } else if (obj->type == FD_TYPE_VFS) {
         rc = vfs_write(&obj->file, src, count);
     } else if (obj->type == FD_TYPE_PIPE) {
@@ -1305,6 +1546,8 @@ static uint64_t sys_read(uint64_t args[6])
 
     if (obj->type == FD_TYPE_VFSD) {
         rc = vfsd_proxy_read(obj->remote_handle, dst, (size_t)cnt);
+        if (rc > 0)
+            obj->file.pos += (uint64_t)rc;
     } else if (obj->type == FD_TYPE_VFS) {
         rc = vfs_read(&obj->file, dst, cnt);
     } else if (obj->type == FD_TYPE_PIPE) {
@@ -1359,9 +1602,8 @@ static uint64_t sys_open(uint64_t args[6])
     const char *path     = (const char *)(uintptr_t)args[0];
     const char *path_arg = path;
     char        path_buf[EXEC_MAX_PATH];
-    char        resolved_buf[VFSD_IO_BYTES];
-    uint16_t    oflags   = (uint16_t)args[1];
-    int         idx      = task_idx();
+    uint16_t    oflags   = 0U;
+    uint8_t     fd_flags = 0U;
     int         rc;
 
     if (!path) return ERR(EFAULT);
@@ -1372,31 +1614,9 @@ static uint64_t sys_open(uint64_t args[6])
         path_arg = path_buf;
     }
 
-    int fd = fd_alloc();
-    if (fd < 0) return ERR(ENFILE);
-
-    if (vfsd_proxy_available()) {
-        uint32_t remote_handle = 0U;
-
-        rc = vfsd_proxy_open(path_arg, oflags, &remote_handle);
-        if (rc < 0)
-            return ERR(-rc);
-        rc = fd_bind_remote(&fd_tables[idx][fd], remote_handle, oflags);
-        if (rc >= 0) {
-            rc = vfsd_proxy_resolve(path_arg, resolved_buf, sizeof(resolved_buf));
-            if (rc >= 0)
-                rc = fd_bind_remote_shadow(&fd_tables[idx][fd], resolved_buf, oflags);
-            if (rc < 0) {
-                (void)vfsd_proxy_close(remote_handle);
-                fd_release_slot(&fd_tables[idx][fd]);
-            }
-        }
-    } else {
-        rc = fd_bind_path(&fd_tables[idx][fd], path_arg, oflags);
-    }
-    if (rc < 0) return ERR(-rc);
-
-    return (uint64_t)fd;
+    fd_split_open_flags((uint16_t)args[1], &oflags, &fd_flags);
+    rc = fd_open_path_current(path_arg, oflags, fd_flags);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)rc;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1460,6 +1680,468 @@ static uint64_t sys_fstat(uint64_t args[6])
             return ERR(-rc);
     }
     return 0;
+}
+
+static uint64_t sys_getpid(uint64_t args[6])
+{
+    (void)args;
+    return current_task ? (uint64_t)current_task->pid : 0ULL;
+}
+
+static uint64_t sys_getppid(uint64_t args[6])
+{
+    (void)args;
+    return current_task ? (uint64_t)sched_task_parent_pid(current_task) : 0ULL;
+}
+
+static uint64_t sys_gettimeofday(uint64_t args[6])
+{
+    uintptr_t  tv_uva = (uintptr_t)args[0];
+    timeval_t *tv     = (timeval_t *)(uintptr_t)args[0];
+    timeval_t  local_tv;
+    uint64_t   ns     = timer_now_ns();
+    int        rc;
+
+    (void)args[1];
+
+    if (!tv)
+        return 0;
+
+    if (current_task && sched_task_is_user(current_task))
+        tv = &local_tv;
+
+    tv->tv_sec  = (int64_t)(ns / 1000000000ULL);
+    tv->tv_usec = (int64_t)((ns % 1000000000ULL) / 1000ULL);
+
+    if (tv == &local_tv) {
+        rc = user_store_bytes(tv_uva, &local_tv, sizeof(local_tv));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    return 0;
+}
+
+static uint64_t sys_nanosleep(uint64_t args[6])
+{
+    uintptr_t   req_uva = (uintptr_t)args[0];
+    uintptr_t   rem_uva = (uintptr_t)args[1];
+    timespec_t  req;
+    timespec_t  rem;
+    uint64_t    start_ns;
+    uint64_t    duration_ns;
+    int         rc;
+
+    if (!req_uva)
+        return ERR(EFAULT);
+
+    rc = user_copy_bytes(req_uva, &req, sizeof(req));
+    if (rc < 0)
+        return ERR(-rc);
+    if (req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1000000000LL)
+        return ERR(EINVAL);
+
+    duration_ns = (uint64_t)req.tv_sec * 1000000000ULL + (uint64_t)req.tv_nsec;
+    start_ns = timer_now_ns();
+
+    for (;;) {
+        uint64_t now_ns = timer_now_ns();
+
+        if (now_ns - start_ns >= duration_ns)
+            break;
+        if (signal_has_unblocked_pending(current_task)) {
+            if (rem_uva != 0U) {
+                uint64_t left_ns = duration_ns - (now_ns - start_ns);
+
+                rem.tv_sec = (int64_t)(left_ns / 1000000000ULL);
+                rem.tv_nsec = (int64_t)(left_ns % 1000000000ULL);
+                rc = user_store_bytes(rem_uva, &rem, sizeof(rem));
+                if (rc < 0)
+                    return ERR(-rc);
+            }
+            return ERR(EINTR);
+        }
+        sched_yield();
+    }
+
+    if (rem_uva != 0U) {
+        rem.tv_sec = 0;
+        rem.tv_nsec = 0;
+        rc = user_store_bytes(rem_uva, &rem, sizeof(rem));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    return 0;
+}
+
+static uint64_t sys_getuid(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+static uint64_t sys_getgid(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+static uint64_t sys_geteuid(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+static uint64_t sys_getegid(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+static uint64_t sys_lseek(uint64_t args[6])
+{
+    int          fd     = (int)args[0];
+    int64_t      off    = (int64_t)args[1];
+    int          whence = (int)args[2];
+    fd_object_t *obj    = fd_get(fd);
+    uint64_t     new_pos = 0ULL;
+    int          rc;
+
+    if (!obj)
+        return ERR(EBADF);
+
+    rc = fd_object_seek(obj, off, whence, &new_pos);
+    return (rc < 0) ? ERR(-rc) : new_pos;
+}
+
+static uint64_t sys_rw_vector(uint64_t args[6], int is_write)
+{
+    int      fd      = (int)args[0];
+    uintptr_t iov_uva = (uintptr_t)args[1];
+    int      iovcnt  = (int)args[2];
+    iovec_t  iov[IOV_MAX];
+    uint64_t total = 0ULL;
+    int      rc;
+
+    if (!fd_get(fd))
+        return ERR(EBADF);
+    if (!iov_uva)
+        return ERR(EFAULT);
+    if (iovcnt < 0 || iovcnt > IOV_MAX)
+        return ERR(EINVAL);
+    if (iovcnt == 0)
+        return 0ULL;
+
+    rc = user_copy_bytes(iov_uva, iov, (size_t)iovcnt * sizeof(iov[0]));
+    if (rc < 0)
+        return ERR(-rc);
+
+    for (int i = 0; i < iovcnt; i++) {
+        uintptr_t base = (uintptr_t)iov[i].iov_base;
+        size_t    remain = iov[i].iov_len;
+
+        while (remain > 0U) {
+            uint64_t call_args[6] = { 0 };
+            size_t   chunk = (remain > 4096U) ? 4096U : remain;
+            uint64_t n;
+
+            call_args[0] = (uint64_t)fd;
+            call_args[1] = (uint64_t)base;
+            call_args[2] = (uint64_t)chunk;
+
+            n = is_write ? sys_write(call_args) : sys_read(call_args);
+            if ((int64_t)n < 0) {
+                if (total != 0ULL)
+                    return total;
+                return n;
+            }
+            if (n == 0ULL)
+                return total;
+
+            total += n;
+            base += (uintptr_t)n;
+            remain -= (size_t)n;
+            if (n < (uint64_t)chunk)
+                break;
+        }
+    }
+
+    return total;
+}
+
+static uint64_t sys_readv(uint64_t args[6])
+{
+    return sys_rw_vector(args, 0);
+}
+
+static uint64_t sys_writev(uint64_t args[6])
+{
+    return sys_rw_vector(args, 1);
+}
+
+static uint64_t sys_fcntl(uint64_t args[6])
+{
+    int         fd  = (int)args[0];
+    int         cmd = (int)args[1];
+    int64_t     arg = (int64_t)args[2];
+    int         idx = task_idx();
+    fd_entry_t *e   = NULL;
+    fd_object_t *obj = NULL;
+    int         newfd;
+    uint32_t    keep_flags;
+
+    if (fd < 0 || fd >= MAX_FD)
+        return ERR(EBADF);
+    e = &fd_tables[idx][fd];
+    obj = e->obj;
+    if (!obj)
+        return ERR(EBADF);
+
+    switch (cmd) {
+    case F_GETFD:
+        return fd_entry_cloexec(e) ? FD_CLOEXEC : 0ULL;
+    case F_SETFD:
+        fd_entry_set_cloexec(e, ((uint32_t)arg & FD_CLOEXEC) != 0U);
+        return 0ULL;
+    case F_GETFL:
+        return (uint64_t)obj->flags;
+    case F_SETFL:
+        keep_flags = obj->flags & (O_RDONLY | O_WRONLY | O_RDWR);
+        obj->flags = (uint16_t)(keep_flags |
+                                ((uint32_t)arg & (O_APPEND | O_NONBLOCK)));
+        if (obj->type == FD_TYPE_VFS || obj->type == FD_TYPE_VFSD)
+            obj->file.flags = obj->flags;
+        return 0ULL;
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
+        if (arg < 0 || arg >= MAX_FD)
+            return ERR(EINVAL);
+        newfd = fd_alloc_from_in_slot(idx, (int)arg);
+        if (newfd < 0)
+            return ERR(ENFILE);
+        if (fd_attach_object(&fd_tables[idx][newfd], obj) < 0)
+            return ERR(ENFILE);
+        fd_tables[idx][newfd].fd_flags =
+            (cmd == F_DUPFD_CLOEXEC) ? FD_ENTRY_CLOEXEC : 0U;
+        return (uint64_t)newfd;
+    default:
+        return ERR(ENOSYS);
+    }
+}
+
+static uint64_t sys_openat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    const char *path_arg = path;
+    char        path_buf[EXEC_MAX_PATH];
+    uint16_t    oflags = 0U;
+    uint8_t     fd_flags = 0U;
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path_arg = path_buf;
+    }
+
+    if (path_arg[0] == '\0')
+        return ERR(ENOENT);
+    if (path_arg[0] != '/' && dirfd != AT_FDCWD) {
+        if (!fd_get(dirfd))
+            return ERR(EBADF);
+        return ERR(ENOSYS);
+    }
+
+    fd_split_open_flags((uint16_t)args[2], &oflags, &fd_flags);
+    rc = fd_open_path_current(path_arg, oflags, fd_flags);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)rc;
+}
+
+static uint64_t sys_fstatat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    const char *path_arg = path;
+    uintptr_t   stat_uva = (uintptr_t)args[2];
+    uint32_t    flags = (uint32_t)args[3];
+    char        path_buf[EXEC_MAX_PATH];
+    uint64_t    stat_args[6] = { 0 };
+    uint64_t    close_args[6] = { 0 };
+    uint64_t    rc;
+    int         fd;
+    int         copy_rc;
+
+    if (!stat_uva)
+        return ERR(EFAULT);
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return ERR(EINVAL);
+
+    if (path) {
+        if (current_task && sched_task_is_user(current_task)) {
+            copy_rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+            if (copy_rc < 0)
+                return ERR(-copy_rc);
+            path_arg = path_buf;
+        }
+    } else {
+        path_arg = "";
+    }
+
+    if (path_arg[0] == '\0') {
+        if ((flags & AT_EMPTY_PATH) == 0U)
+            return ERR(ENOENT);
+        if (dirfd == AT_FDCWD) {
+            path_arg = ".";
+        } else {
+            stat_args[0] = (uint64_t)dirfd;
+            stat_args[1] = stat_uva;
+            return sys_fstat(stat_args);
+        }
+    }
+
+    if (path_arg[0] != '/' && dirfd != AT_FDCWD) {
+        if (!fd_get(dirfd))
+            return ERR(EBADF);
+        return ERR(ENOSYS);
+    }
+
+    fd = fd_open_path_current(path_arg, O_RDONLY, 0U);
+    if (fd < 0)
+        return ERR(-fd);
+
+    stat_args[0] = (uint64_t)fd;
+    stat_args[1] = stat_uva;
+    rc = sys_fstat(stat_args);
+
+    close_args[0] = (uint64_t)fd;
+    (void)sys_close(close_args);
+    return rc;
+}
+
+static uint64_t sys_ioctl(uint64_t args[6])
+{
+    int         fd      = (int)args[0];
+    uint64_t    req     = args[1];
+    uintptr_t   arg_uva = (uintptr_t)args[2];
+    fd_object_t *obj    = fd_get(fd);
+    int         rc;
+
+    if (!obj)
+        return ERR(EBADF);
+
+    switch (req) {
+    case TCGETS: {
+        termios_t term;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        if (!fd_is_tty_object(obj))
+            return ERR(ENOTTY);
+        rc = tty_tcgetattr(&term);
+        if (rc < 0)
+            return ERR(-rc);
+        rc = user_store_bytes(arg_uva, &term, sizeof(term));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TCSETS: {
+        termios_t term;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        if (!fd_is_tty_object(obj))
+            return ERR(ENOTTY);
+        rc = user_copy_bytes(arg_uva, &term, sizeof(term));
+        if (rc < 0)
+            return ERR(-rc);
+        rc = tty_tcsetattr(TCSANOW, &term);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCGPGRP: {
+        uint32_t pgid;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        if (!fd_is_tty_object(obj))
+            return ERR(ENOTTY);
+        pgid = tty_tcgetpgrp();
+        rc = user_store_bytes(arg_uva, &pgid, sizeof(pgid));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCSPGRP: {
+        uint32_t pgid;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        if (!fd_is_tty_object(obj))
+            return ERR(ENOTTY);
+        rc = user_copy_bytes(arg_uva, &pgid, sizeof(pgid));
+        if (rc < 0)
+            return ERR(-rc);
+        rc = tty_tcsetpgrp_current(pgid);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCGWINSZ: {
+        winsize_t ws;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        if (!fd_is_tty_object(obj))
+            return ERR(ENOTTY);
+        ws.ws_row = 25U;
+        ws.ws_col = 80U;
+        ws.ws_xpixel = 0U;
+        ws.ws_ypixel = 0U;
+        rc = user_store_bytes(arg_uva, &ws, sizeof(ws));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case FIONBIO: {
+        uint32_t enable = 0U;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        rc = user_copy_bytes(arg_uva, &enable, sizeof(enable));
+        if (rc < 0)
+            return ERR(-rc);
+        if (enable)
+            obj->flags |= O_NONBLOCK;
+        else
+            obj->flags &= (uint16_t)~O_NONBLOCK;
+        if (obj->type == FD_TYPE_VFS || obj->type == FD_TYPE_VFSD)
+            obj->file.flags = obj->flags;
+        return 0ULL;
+    }
+    default:
+        return ERR(ENOTTY);
+    }
+}
+
+static uint64_t sys_uname(uint64_t args[6])
+{
+    uintptr_t  uts_uva = (uintptr_t)args[0];
+    utsname_t  uts;
+    int        rc;
+
+    if (!uts_uva)
+        return ERR(EFAULT);
+
+    memset(&uts, 0, sizeof(uts));
+    syscall_copy_fixed_string(uts.sysname, sizeof(uts.sysname), "EnlilOS");
+    syscall_copy_fixed_string(uts.nodename, sizeof(uts.nodename), "enlil");
+    syscall_copy_fixed_string(uts.release, sizeof(uts.release), "0.1.0");
+    syscall_copy_fixed_string(uts.version, sizeof(uts.version), "Microkernel");
+    syscall_copy_fixed_string(uts.machine, sizeof(uts.machine), "aarch64");
+    syscall_copy_fixed_string(uts.domainname, sizeof(uts.domainname), "localdomain");
+
+    rc = user_store_bytes(uts_uva, &uts, sizeof(uts));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1710,6 +2392,8 @@ static uint64_t sys_execve(uint64_t args[6])
         kfree(copy);
         return ERR(EIO);
     }
+
+    fd_close_cloexec_in_slot(task_idx());
 
     old_mm = sched_task_space(current_task);
     if (sched_task_rebind_user(current_task, image.space,
@@ -2370,6 +3054,7 @@ static uint64_t sys_dup(uint64_t args[6])
 
     if (fd_attach_object(&fd_tables[task_idx()][newfd], obj) < 0)
         return ERR(ENFILE);
+    fd_tables[task_idx()][newfd].fd_flags = 0U;
     return (uint64_t)newfd;
 }
 
@@ -2390,6 +3075,7 @@ static uint64_t sys_dup2(uint64_t args[6])
     fd_release_slot(&fd_tables[idx][newfd]);
     if (fd_attach_object(&fd_tables[idx][newfd], obj) < 0)
         return ERR(ENFILE);
+    fd_tables[idx][newfd].fd_flags = 0U;
     return (uint64_t)newfd;
 }
 
@@ -2403,7 +3089,7 @@ static uint64_t sys_tcgetattr(uint64_t args[6])
     if (!term_uva)
         return ERR(EFAULT);
     if (!fd_is_tty_object(fd_get(fd)))
-        return ERR(ENOTDIR);
+        return ERR(ENOTTY);
 
     rc = tty_tcgetattr(&term);
     if (rc < 0)
@@ -2425,7 +3111,7 @@ static uint64_t sys_tcsetattr(uint64_t args[6])
     if (!term_uva)
         return ERR(EFAULT);
     if (!fd_is_tty_object(fd_get(fd)))
-        return ERR(ENOTDIR);
+        return ERR(ENOTTY);
 
     rc = user_copy_bytes(term_uva, &term, sizeof(term));
     if (rc < 0)
@@ -3043,6 +3729,23 @@ static uint64_t sys_vfs_boot_close(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_vfs_boot_lseek(uint64_t args[6])
+{
+    vfs_srv_handle_t *h;
+    uint64_t          new_pos = 0ULL;
+    int               rc;
+
+    if (!vfs_srv_owner_ok())
+        return ERR(EPERM);
+
+    h = vfs_srv_handle_get((uint32_t)args[0]);
+    if (!h)
+        return ERR(EBADF);
+
+    rc = vfs_file_do_seek(&h->file, (int64_t)args[1], (int)args[2], &new_pos);
+    return (rc < 0) ? ERR(-rc) : new_pos;
+}
+
 static uint64_t sys_vfs_boot_taskinfo(uint64_t args[6])
 {
     uint32_t         pid = (uint32_t)args[0];
@@ -3289,8 +3992,56 @@ void syscall_init(void)
     syscall_table[SYS_TCSETATTR] = (syscall_entry_t){
         sys_tcsetattr, 0, "tcsetattr"
     };
+    syscall_table[SYS_GETPID] = (syscall_entry_t){
+        sys_getpid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getpid"
+    };
+    syscall_table[SYS_GETPPID] = (syscall_entry_t){
+        sys_getppid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getppid"
+    };
     syscall_table[SYS_ISATTY] = (syscall_entry_t){
         sys_isatty, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "isatty"
+    };
+    syscall_table[SYS_GETTIMEOFDAY] = (syscall_entry_t){
+        sys_gettimeofday, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "gettimeofday"
+    };
+    syscall_table[SYS_NANOSLEEP] = (syscall_entry_t){
+        sys_nanosleep, 0, "nanosleep"
+    };
+    syscall_table[SYS_GETUID] = (syscall_entry_t){
+        sys_getuid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getuid"
+    };
+    syscall_table[SYS_GETGID] = (syscall_entry_t){
+        sys_getgid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getgid"
+    };
+    syscall_table[SYS_GETEUID] = (syscall_entry_t){
+        sys_geteuid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "geteuid"
+    };
+    syscall_table[SYS_GETEGID] = (syscall_entry_t){
+        sys_getegid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getegid"
+    };
+    syscall_table[SYS_LSEEK] = (syscall_entry_t){
+        sys_lseek, 0, "lseek"
+    };
+    syscall_table[SYS_READV] = (syscall_entry_t){
+        sys_readv, 0, "readv"
+    };
+    syscall_table[SYS_WRITEV] = (syscall_entry_t){
+        sys_writev, 0, "writev"
+    };
+    syscall_table[SYS_FCNTL] = (syscall_entry_t){
+        sys_fcntl, 0, "fcntl"
+    };
+    syscall_table[SYS_OPENAT] = (syscall_entry_t){
+        sys_openat, 0, "openat"
+    };
+    syscall_table[SYS_FSTATAT] = (syscall_entry_t){
+        sys_fstatat, 0, "fstatat"
+    };
+    syscall_table[SYS_IOCTL] = (syscall_entry_t){
+        sys_ioctl, 0, "ioctl"
+    };
+    syscall_table[SYS_UNAME] = (syscall_entry_t){
+        sys_uname, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "uname"
     };
     syscall_table[SYS_MOUNT] = (syscall_entry_t){
         sys_mount, 0, "mount"
@@ -3336,6 +4087,9 @@ void syscall_init(void)
     };
     syscall_table[SYS_VFS_BOOT_TASKINFO] = (syscall_entry_t){
         sys_vfs_boot_taskinfo, SYSCALL_FLAG_RT, "vfs_boot_taskinfo"
+    };
+    syscall_table[SYS_VFS_BOOT_LSEEK] = (syscall_entry_t){
+        sys_vfs_boot_lseek, 0, "vfs_boot_lseek"
     };
     syscall_table[SYS_BLK_BOOT_READ] = (syscall_entry_t){
         sys_blk_boot_read, 0, "blk_boot_read"
@@ -3433,7 +4187,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 74 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty registrate\n");
+    uart_puts("[SYSCALL] 91 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 task slot\n");
 }
 

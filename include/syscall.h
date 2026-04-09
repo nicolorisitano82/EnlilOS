@@ -62,7 +62,24 @@
 #define SYS_DUP2            36
 #define SYS_TCGETATTR       37
 #define SYS_TCSETATTR       38
+#define SYS_GETPID          39
+#define SYS_GETPPID         40
 #define SYS_ISATTY          41
+#define SYS_GETTIMEOFDAY    42
+#define SYS_NANOSLEEP       43
+#define SYS_GETUID          44
+#define SYS_GETGID          45
+#define SYS_GETEUID         46
+#define SYS_GETEGID         47
+#define SYS_LSEEK           48
+#define SYS_READV           49
+#define SYS_WRITEV          50
+#define SYS_FCNTL           51
+#define SYS_OPENAT          52
+#define SYS_FSTATAT         53
+#define SYS_NEWFSTATAT      SYS_FSTATAT
+#define SYS_IOCTL           54
+#define SYS_UNAME           55
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -106,6 +123,7 @@
 #define SYS_BLK_BOOT_FLUSH     158
 #define SYS_BLK_BOOT_SECTORS   159
 #define SYS_VFS_BOOT_TASKINFO  160
+#define SYS_VFS_BOOT_LSEEK     161
 
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
@@ -146,6 +164,8 @@
 #define ENOTEMPTY           39
 #define EIO                 5
 #define ENOSYS              38
+#define ENOTTY              25
+#define ESPIPE              29
 #define ETIMEDOUT           110
 
 #define ERR(e)  ((uint64_t)(-(int64_t)(e)))
@@ -159,6 +179,7 @@
 #define O_TRUNC     (1 << 9)
 #define O_APPEND    (1 << 10)
 #define O_NONBLOCK  (1 << 11)
+#define O_CLOEXEC   (1 << 12)
 
 /* ── Flag mmap() ────────────────────────────────────────────────────── */
 
@@ -186,6 +207,32 @@
 
 #define CLONE_NEWNS     0x00020000U
 
+/* ── lseek / openat / fcntl / ioctl ─────────────────────────────── */
+
+#define SEEK_SET    0
+#define SEEK_CUR    1
+#define SEEK_END    2
+
+#define AT_FDCWD    (-100)
+#define AT_SYMLINK_NOFOLLOW  0x0100
+#define AT_EMPTY_PATH        0x1000
+
+#define FD_CLOEXEC          1
+
+#define F_DUPFD             0
+#define F_GETFD             1
+#define F_SETFD             2
+#define F_GETFL             3
+#define F_SETFL             4
+#define F_DUPFD_CLOEXEC     1030
+
+#define TCGETS              0x5401UL
+#define TCSETS              0x5402UL
+#define TIOCGPGRP           0x540FUL
+#define TIOCSPGRP           0x5410UL
+#define TIOCGWINSZ          0x5413UL
+#define FIONBIO             0x5421UL
+
 /* ── Clock IDs per clock_gettime() ─────────────────────────────────── */
 
 #define CLOCK_REALTIME      0
@@ -207,6 +254,37 @@ typedef struct {
     int64_t tv_sec;
     int64_t tv_nsec;
 } timespec_t;
+
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} timeval_t;
+
+typedef int64_t off_t;
+
+typedef struct {
+    void   *iov_base;
+    size_t  iov_len;
+} iovec_t;
+
+#define IOV_MAX     16
+
+typedef struct {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+} winsize_t;
+
+#define UTSNAME_FIELD_LEN  65
+typedef struct {
+    char sysname[UTSNAME_FIELD_LEN];
+    char nodename[UTSNAME_FIELD_LEN];
+    char release[UTSNAME_FIELD_LEN];
+    char version[UTSNAME_FIELD_LEN];
+    char machine[UTSNAME_FIELD_LEN];
+    char domainname[UTSNAME_FIELD_LEN];
+} utsname_t;
 
 /* ── struct stat minimale (M5-02) ──────────────────────────────────── */
 

@@ -1087,19 +1087,83 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - `pthread.h`: vedi M11-02
 - Build: `musl-cross-make` con target `aarch64-enlilos-musl`
 
+**Scope reale della v1 (riallineato al GAP):**
+- toolchain `aarch64-enlilos-musl-*`
+- linking **statico** con `crt1/crti/crtn` + `libc.a`
+- startup ABI corretto sopra `argc/argv/envp/auxv`
+- runtime C single-thread con `stdio`, `malloc`, `fork/exec/wait`, pipe e termios
+- niente `pthread`, `futex`, `dlopen` o linker dinamico user-space in questa milestone
+
+**Prerequisito critico anticipato dal GAP:**
+- **TLS base gia' in M11-01**, non in M11-02:
+  - supporto `PT_TLS`
+  - `TPIDR_EL0` come thread pointer user-space
+  - save/restore del TP nei context switch
+  - reset/riinizializzazione coerente su `fork()` e `execve()`
+
+**Deliverable attesi:**
+- sysroot `musl` per EnlilOS
+- wrapper toolchain (`aarch64-enlilos-musl-gcc`, `ar`, `ranlib`)
+- 4-6 smoke test musl-linked inseriti in initrd o build separata
+- target tipo `make musl-smoke`
+
 **Syscall di compatibilità aggiuntive necessarie:**
 
 | Nr | Nome | Note |
 |----|------|-------|
 | 39 | `getpid` | Sì — O(1): legge `current->pid` |
 | 40 | `getppid` | Sì — O(1) |
-| 56 | `clone` | Alias `fork()` con flags; base per thread |
-| 96 | `gettimeofday` | Alias `clock_gettime(CLOCK_REALTIME)` |
-| 162 | `nanosleep` | Sì bounded: blocca task e risveglia via timer |
-| 172 | `getuid` | Sempre 0 (root) per ora |
-| 173 | `getgid` | Sempre 0 |
-| 174 | `geteuid` | Sempre 0 |
-| 175 | `getegid` | Sempre 0 |
+| 42 | `gettimeofday` | Alias `clock_gettime(CLOCK_REALTIME)` |
+| 43 | `nanosleep` | bounded cooperative sleep con interrupt via signal |
+| 44 | `getuid` | Sempre 0 (root) per ora |
+| 45 | `getgid` | Sempre 0 |
+| 46 | `geteuid` | Sempre 0 |
+| 47 | `getegid` | Sempre 0 |
+
+**ABI kernel / libc da aggiungere esplicitamente (emersi dal GAP):**
+- `lseek()` — necessaria per `fseek/ftell` e `stdio`
+- `readv()` / `writev()` — fortemente raccomandate per ridurre patch invasive su musl
+- `fcntl()` minimo: `F_GETFL`, `F_SETFL`, `F_DUPFD`, `F_SETFD`
+- `openat()` minimo con `AT_FDCWD`
+- `fstatat/newfstatat()` minimo per wrapper libc moderni
+- `ioctl()` minimo: default `-ENOTTY`, con crescita futura verso tty/winsize
+- `uname()` minimale (`sysname=EnlilOS`, `machine=aarch64`)
+
+**Loader / auxv da completare:**
+- verificare e, se necessario, aggiungere `AT_RANDOM`
+- valutare `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`
+
+**Sottofasi consigliate per l'implementazione:**
+
+**✅ M11-01a · ABI kernel minima per musl**
+- implementata v1 nel kernel con syscall `39–55`
+- `getpid/getppid/gettimeofday/nanosleep/getuid/getgid/geteuid/getegid`
+- `lseek`, `readv`, `writev`
+- `fcntl` v1: `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`, `F_DUPFD_CLOEXEC`
+- `openat` v1 con `AT_FDCWD` e path assoluti
+- `fstatat/newfstatat` v1 con `AT_FDCWD` + `AT_EMPTY_PATH`
+- `ioctl` v1: `TCGETS`, `TCSETS`, `TIOCGWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONBIO`, fallback `-ENOTTY`
+- `uname`
+- `O_CLOEXEC` / `FD_CLOEXEC` con close-on-exec applicato in `execve()`
+- seek coerente anche su fd remoti dietro `vfsd`, tramite estensione IPC `VFSD_REQ_LSEEK`
+- demo `/MUSLABI.ELF`, comando boot `muslabi`, selftest `musl-abi-core`
+
+**Limiti v1 dichiarati:**
+- `openat()` su dirfd diversi da `AT_FDCWD` resta rinviata
+- `fstatat()` non implementa ancora semantica completa `dirfd` relativa oltre `AT_FDCWD`
+- `fcntl(F_SETFL)` aggiorna il subset utile al bootstrap libc (`O_NONBLOCK` / `O_APPEND`)
+
+**M11-01b · TLS e startup runtime**
+- `PT_TLS`
+- `TPIDR_EL0` nel contesto task
+- save/restore thread pointer in scheduler/return-to-user
+- `crt1/crti/crtn`
+- verifica `auxv`
+
+**M11-01c · Toolchain e smoke test**
+- sysroot
+- wrapper `aarch64-enlilos-musl-*`
+- smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`
 
 ---
 
@@ -1112,7 +1176,7 @@ Thread implementati sopra il syscall `clone()` con mapping diretto su task kerne
 - `pthread_join()` → `waitpid()` sul TID
 - `pthread_mutex_t` → futex (vedi sotto) oppure porta IPC con priority inheritance
 - `pthread_cond_t` → futex broadcast
-- Thread-local storage (TLS): segmento `PT_TLS`, `TPIDR_EL0` come puntatore TLS
+- TLS multi-thread sopra la base gia' introdotta in `M11-01`
 - Priorità: `pthread_setschedparam()` mappa su `sched_set_priority(tid, prio)`
 
 **Futex (Fast Userspace Mutex):**
@@ -1344,6 +1408,14 @@ Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreut
 EnlilOS ha già i numeri Linux — mancano solo le implementazioni delle syscall
 non ancora pianificate. Lista completa di quelle richieste dai binari Linux comuni:
 
+**Nota di riallineamento dal GAP M11-01:**
+- alcune primitive che in origine vivevano solo in questa sezione vengono anticipate
+  in `M11-01` perché servono già al bootstrap musl: `ioctl` minimo, `uname`,
+  `fcntl` minimo, `openat` minimo
+- il GAP ha anche reso espliciti prerequisiti prima non visibili nel backlog:
+  `lseek`, `readv/writev`, `newfstatat/fstatat` e verifica `auxv` (`AT_RANDOM`)
+- in questa milestone resta il completamento ABI Linux più ampio, non il primo supporto libc
+
 | Nr Linux | Nome | Stato EnlilOS | Note implementazione |
 |---|---|---|---|
 | 17 | `getcwd` | ✅ M8-08b v1 | syscall EnlilOS disponibile come `SYS_GETCWD` |
@@ -1364,11 +1436,11 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 | 54 | `setsockopt` | ⬜ M10-03 | pianificata |
 | 55 | `getsockopt` | ⬜ M10-03 | pianificata |
 | 61 | `wait4` | ⬜ | `waitpid` + `rusage` stub |
-| 63 | `uname` | ⬜ | ritorna `EnlilOS` / `aarch64` |
+| 63 | `uname` | ⬜ M11-01 | minimale per bootstrap libc; ABI Linux completa qui |
 | 64 | `semget` | ⬜ | System V sem — wrappa ksem (M8-06) |
 | 65 | `semop` | ⬜ | System V semop — wrappa ksem |
 | 66 | `semctl` | ⬜ | controllo semaforo System V |
-| 72 | `fcntl` | ⬜ | `F_DUPFD`, `F_GETFL`, `F_SETFL`, `F_SETFD` |
+| 72 | `fcntl` | ⬜ M11-01 | subset libc in M11-01, estensioni/compat Linux qui |
 | 73 | `flock` | ⬜ | advisory lock su fd — stub OK |
 | 74 | `fsync` | ⬜ | flush dirty pages al VFS server |
 | 76 | `truncate` | ⬜ | tronca file a N byte |
@@ -1405,7 +1477,7 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 | 261 | `faccessat` | ⬜ | access con dirfd |
 | 263 | `unlinkat` | ⬜ | unlink con dirfd |
 | 267 | `readlinkat` | ⬜ | readlink con dirfd |
-| 277 | `openat` | ⬜ | open con dirfd — richiesto da glibc moderna |
+| 277 | `openat` | ⬜ M11-01 | minimo libc in M11-01, dirfd/compat avanzata qui |
 | 280 | `utimensat` | ⬜ | aggiorna timestamp file |
 | 291 | `epoll_create` | ⬜ | alias epoll_create1 |
 
@@ -2606,7 +2678,7 @@ M8-06 + M2-03 → M8-07 (kmon — monitor kernel)
 M8-01 + M6-02 + M11-01 + M8-03 + M5-02 + M4-03 → M8-08 (arksh porting — shell default)
 M9-01 (capability) → M9-02 (vfsd) → M9-03 (blkd) → M9-04 (namespace)
 M10-01 (virtio-net) → M10-02 (TCP/IP) → M10-03 (socket API)
-M8-01 + M9-01 → M11-01 (musl libc)
+M6-01 + M8-01 + M8-08a + M8-08b + M8-08c + M9-01 → M11-01 (musl libc)
 M11-01 + M8-01 + M8-06 + M8-07 → M11-02 (pthread + futex + sem_t POSIX + monitor C++)
 M11-02 → M11-03 (dynamic linker)
 M6-01 + M11-01 + M11-02 + M11-03 → M11-04 (Mach-O compat)
@@ -2715,7 +2787,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | La più importante di tutto il backlog. Da qui ogni programma C diventa compilabile |
+| 15 | **M11-01** musl libc | libc statica + TLS base + ABI minima + toolchain. Da qui ogni programma C diventa compilabile |
 | 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 
