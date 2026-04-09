@@ -341,7 +341,7 @@ usabile ma il timer-wheel dedicato resta un margine di miglioramento futuro.
 > **Livello 1 — `ksem` (questa milestone):** primitiva kernel nativa con syscall proprie,
 > pool statico, RT-safe, priority inheritance integrata. Non richiede musl libc.
 > **Livello 2 — `sem_t` POSIX:** wrapper musl sopra `ksem`, esposto via `<semaphore.h>`.
-> Implementato automaticamente in M11-01 una volta che `ksem` è disponibile.
+> Implementato in `M11-02d`, quando il layer `pthread`/POSIX viene chiuso lato musl.
 
 I semafori Mach (-36/-37) previsti in M11-04d come trap stub vengono **rimossi** da
 quel layer e mappati direttamente su `ksem` — coerenza garantita su tutti i path.
@@ -463,7 +463,7 @@ kernel/syscall.c    — ksem_init() + syscall 85-94 al boot
 ```
 
 **Dipende da:** M3-01 (syscall dispatcher), M2-03 (sched_block/unblock), M2-02 (timer per timedwait)
-**Sblocca:** M11-01 (musl sem_t → ksem), M8-07 (monitor usa ksem come lock interno opzionale)
+**Sblocca:** M11-02 (`sem_t` POSIX sopra `ksem`), M8-07 (monitor usa ksem come lock interno opzionale)
 
 ---
 
@@ -721,7 +721,8 @@ typedef struct {
 **Limiti v1 dichiarati:**
 - `VMIN/VTIME` non hanno ancora una semantica completa POSIX
 - lo stato `termios` è globale sulla console, non ancora per-open-file o per-pty
-- il supporto REPL avanzato di arksh richiederà ancora `glob/fnmatch` e la toolchain libc (M11-01)
+- il supporto REPL avanzato di arksh richiederà ancora il build system dedicato e
+  l'integrazione shell di `M8-08e/M8-08f`; `glob/fnmatch` bootstrap sono già disponibili
 
 **Sequenze ANSI necessarie per il REPL arksh:**
 - `\e[A`/`\e[B` — su/giù (history navigation)
@@ -739,11 +740,24 @@ di input; le sequenze ANSI di output sono semplice `write()` verso fd=1.
 
 Necessari per l'espansione wildcard (`*.c`, `src/**/*.h`).
 
+**Stato attuale:** completata `v1`
+
 Implementati interamente in **musl user-space** sopra `opendir`/`readdir` già disponibili:
 - `glob(pattern, flags, errfunc, pglob)` — espande wildcard chiamando `readdir` sul VFS
 - `fnmatch(pattern, string, flags)` — matching puro su stringhe, zero syscall
 - `FNM_PATHNAME`, `FNM_NOESCAPE`, `FNM_PERIOD` — flag standard supportati
 - Nessuna syscall aggiuntiva: si costruisce sopra M5-02 VFS `readdir`
+
+**Deliverable chiusi nella v1:**
+- header bootstrap `dirent.h`, `fnmatch.h`, `glob.h` nel sysroot musl minimale
+- `readdir()` user-space sopra `SYS_GETDENTS`, senza introdurre nuove syscall per wildcard
+- supporto `GLOB_MARK` e `GLOB_APPEND` oltre al subset minimo richiesto
+- smoke `/MUSLGLOB.ELF`, comando boot `muslglob`, selftest `musl-glob`
+
+**Nota tecnica importante:**
+- il `malloc()` bootstrap usa `mmap()` per ogni allocazione; `glob()` quindi non può
+  permettersi un modello "una allocazione per match". La v1 usa uno store compatto unico
+  per `gl_pathv` + string pool, così evita `GLOB_NOSPACE` e frammentazione artificiale
 
 ---
 
@@ -1196,7 +1210,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime nel selftest completo `SUMMARY total=33 pass=33 fail=0`
+- validazione runtime nel selftest completo `SUMMARY total=35 pass=35 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1210,30 +1224,138 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 
 ---
 
-### ⬜ M11-02 · POSIX Threading (`pthread`)
+### 🟡 M11-02 · POSIX Threading (`pthread`)
 **Priorità:** ALTA (dipende da M8-01 e M11-01)
 
-Thread implementati sopra il syscall `clone()` con mapping diretto su task kernel:
+Thread implementati sopra `clone()` e `futex`, ma con una correzione
+architetturale importante rispetto alla formulazione iniziale del backlog:
 
-- `pthread_create()` → `clone(CLONE_VM | CLONE_FILES | CLONE_SIGHAND)` + stack separato
-- `pthread_join()` → `waitpid()` sul TID
-- `pthread_mutex_t` → futex (vedi sotto) oppure porta IPC con priority inheritance
-- `pthread_cond_t` → futex broadcast
-- TLS multi-thread sopra la base gia' introdotta in `M11-01`
-- Priorità: `pthread_setschedparam()` mappa su `sched_set_priority(tid, prio)`
+- `pthread_create()` non puo' appoggiarsi solo al TCB corrente: serve uno stato
+  condiviso di processo (`mm/files/sighand/fs`) per supportare davvero
+  `CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
+- `pthread_join()` non va modellata su `waitpid()`: il path corretto e'
+  `CLONE_CHILD_CLEARTID + set_tid_address() + futex(FUTEX_WAIT)`
+- `getpid()` deve diventare `tgid`, mentre `gettid()` va aggiunta come syscall dedicata
+- `sem_t` POSIX va chiusa sopra `ksem`
+- `pthread_mutex_t` / `pthread_cond_t` vanno chiuse sopra `futex`
+- TLS multi-thread estende la base gia' introdotta in `M11-01`
+
+**Studio di implementazione dettagliato:** vedi [M11-02.md](M11-02.md)
+
+**Stato reale ad oggi:**
+- `M11-02a` e' completata `v1`
+- `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e` restano aperte
+- baseline kernel gia' presente:
+  - `getpid()` = `tgid`, nuova `gettid()`
+  - `clone()` subset thread-oriented
+  - stato condiviso di processo via `proc_slot` statico (`mm`, fd table, `brk`, namespace/cwd `vfsd`, signal dispositions)
+  - selftest `clone-thread` e demo `/CLONEDEMO.ELF`
+
+**Scope reale consigliato per la `v1`:**
+- `pthread_create`
+- `pthread_join`
+- `pthread_detach`
+- `pthread_self`
+- `pthread_equal`
+- `pthread_kill`
+- `pthread_sigmask`
+- `pthread_mutex_*` baseline
+- `pthread_cond_*` baseline
+- `sem_t` POSIX
+
+**Fuori scope `v1`:**
+- robust futex list
+- `FUTEX_LOCK_PI`
+- `pthread_cancel`
+- affinity e scheduler attributes completi
+- `clone3()`
+- process-shared pthread objects
+
+**Prerequisiti tecnici dentro la milestone:**
+- gia' chiusi in `M11-02a`:
+  - stato condiviso `processo + thread-group`
+  - `clone`
+  - `gettid`
+- ancora aperti:
+  - `set_tid_address`
+  - `exit_group`
+  - `tgkill`
+  - `futex`
+  - `mprotect` minimale per stack guard page thread
+
+**Proposta numerazione syscall coerente con lo spazio libero attuale:**
+
+| Nr | Syscall | Note |
+|----|---------|------|
+| 56 | `clone` | subset thread-oriented |
+| 57 | `gettid` | TID reale del thread |
+| 58 | `set_tid_address` | `clear_child_tid` per join |
+| 59 | `exit_group` | distingue process-exit da thread-exit |
+| 65 | `futex` | evita collisione con `cap` e `kmon` |
+| 66 | `tgkill` | segnale thread-directed |
+| 67 | `mprotect` | minimo necessario per guard page |
 
 **Futex (Fast Userspace Mutex):**
 
 | Nr | Nome | RT-safe | Note |
 |----|------|---------|------|
-| 98 | `futex` | Sì (FUTEX_WAKE) | `FUTEX_WAIT` blocca, `FUTEX_WAKE` sveglia — base di tutti i lock user-space |
+| 65 | `futex` | Sì (solo `WAKE`) | `WAIT/WAKE/REQUEUE` base per mutex, condvar e join |
 
 Implementazione kernel:
 - Hash table statica di 256 bucket su `(uaddr & 0xFF) * sizeof(futex_bucket_t)`
 - Ogni bucket: lista di task bloccati su quella uaddr (senza allocazione)
 - `FUTEX_WAIT`: controlla `*uaddr == val`, se uguale blocca su bucket
 - `FUTEX_WAKE(n)`: sblocca i primi `n` task nel bucket, ri-schedula
-- Priority inheritance su `FUTEX_LOCK_PI` (richiede inserimento in ordered wait list)
+- `FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE`: supporto consigliato per condvar/broadcast
+- `FUTEX_LOCK_PI`: rinviato oltre la `v1`
+
+**Blocchi consigliati:**
+
+**M11-02a · Processo condiviso + `clone()` kernel**
+`✅ Completata v1`
+
+- introdotto `tgid`, con `getpid()` riallineato al process id logico
+- aggiunta `gettid()` per il TID reale del thread
+- introdotto stato condiviso di processo via `proc_slot` statico:
+  `mm`, fd table, `brk`, namespace/cwd `vfsd`, signal dispositions
+- `clone()` subset thread-oriented implementata per
+  `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
+- supporto `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
+  `CLONE_CHILD_CLEARTID` lato memoria utente
+- `fork()` e `execve()` rifiutano con `-EBUSY` i processi multi-thread finche'
+  non viene chiuso il lifecycle completo in `M11-02b`
+- selftest `clone-thread` verde, demo `/CLONEDEMO.ELF` disponibile dalla boot console
+
+**Limiti dichiarati della v1:**
+- nessun wake futex su `clear_child_tid` finche' non arriva `M11-02b/c`
+- `set_tid_address()`, `exit_group()` e `tgkill()` non ancora implementate
+- niente `pthread_join()/detach()` finche' non arriva `M11-02b/d`
+- i metadati di processo zombie restano vivi fino al reap per non rompere
+  `waitpid()`, `SIGCHLD` e job control
+
+**M11-02b · Lifecycle thread + join**
+- `set_tid_address()`
+- `exit_group()`
+- `tgkill()`
+- `clear_child_tid` + wake
+- cleanup differenziato thread/processo
+
+**M11-02c · Futex core**
+- `WAIT`
+- `WAKE`
+- `REQUEUE` / `CMP_REQUEUE`
+
+**M11-02d · musl `pthread` + `sem_t`**
+- `pthread_create/join/detach`
+- mutex/condvar sopra `futex`
+- `sem_t` sopra `ksem`
+
+**M11-02e · Selftest e smoke multi-thread**
+- selftest kernel `clone-thread`
+- selftest kernel `futex-core`
+- demo `PTHREADDEMO.ELF`
+- demo `SEMDEMO.ELF`
+- demo `TLSMTDEMO.ELF`
 
 ---
 
@@ -2760,9 +2882,9 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M8-08d..f** glob/fnmatch + build system + integrazione arksh — completa il porting della shell di default
+1. **M8-08e..f** build system + integrazione arksh — completa il porting della shell di default dopo `glob/fnmatch`
 2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
-3. **M11-02** POSIX Threading (`pthread`) — estende il bootstrap musl attuale al profilo multi-thread
+3. **M11-02b** lifecycle thread + join — completa la baseline `clone()` e rende il modello thread davvero usabile da musl/pthread
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2830,8 +2952,8 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap e smoke test `33/33` |
-| 16 | **M8-08d..f** glob + CMake + integrazione | Completa arksh porting dopo pipe/termios/libc |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `34/34` |
+| 16 | **M8-08e..f** CMake + integrazione | Completa arksh porting dopo pipe/termios/libc e wildcard bootstrap |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 
 Nota: **M8-04 Job Control** e' gia' completata e disponibile come base per `CTRL+Z`,
@@ -2848,7 +2970,7 @@ Python, server applicativi.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 19 | **M11-02** pthread + futex + sem_t | Dipende da M11-01 + M8-06 + M8-07. Sblocca ogni programma multi-thread |
+| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a` completata v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `clone-thread`). Restano `M11-02b..e` |
 | 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
 | 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |
@@ -3007,4 +3129,4 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M9-03 blkd
 - ✅ M9-04 namespace + mount dinamico v1
 - ✅ M11-01 musl/toolchain bootstrap v1
-- **Prossimo step:** chiudere `M8-08d..f`, poi aprire rete base con `M10-01` e il profilo multi-thread con `M11-02`
+- **Prossimo step:** chiudere `M8-08e..f`, poi aprire rete base con `M10-01` e il profilo multi-thread con `M11-02`

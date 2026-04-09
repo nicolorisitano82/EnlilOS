@@ -330,6 +330,15 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, st.st_size > 0ULL, "/CAPDEMO.ELF ha size zero");
     (void)vfs_close(&file);
 
+    rc = vfs_open("/MUSLGLOB.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /MUSLGLOB.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /MUSLGLOB.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/MUSLGLOB.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/MUSLGLOB.ELF ha size zero");
+    (void)vfs_close(&file);
+
     rc = vfs_open("/VFSD.ELF", O_RDONLY, &file);
     ST_CHECK(case_name, rc == 0, "open /VFSD.ELF fallita");
     rc = vfs_stat(&file, &st);
@@ -373,6 +382,15 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
              "/MUSLABI.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/MUSLABI.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/CLONEDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /CLONEDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /CLONEDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/CLONEDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/CLONEDEMO.ELF ha size zero");
     (void)vfs_close(&file);
     return 0;
 }
@@ -986,6 +1004,13 @@ static int selftest_case_musl_abi(void)
     rc = vfs_unlink("/data/MUSLABI.TXT");
     ST_CHECK(case_name, rc == 0, "unlink MUSLABI.TXT fallita");
     return 0;
+}
+
+static int selftest_case_clone_thread(void)
+{
+    static const char case_name[] = "clone-thread";
+
+    return st_run_user_path(case_name, "/CLONEDEMO.ELF", 4000ULL);
 }
 
 static int selftest_case_vfsd(void)
@@ -1799,6 +1824,20 @@ static int selftest_case_musl_pipe(void)
                                "pipe dup termios ok\n", 1);
 }
 
+static int selftest_case_musl_glob(void)
+{
+    static const char case_name[] = "musl-glob";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLGLOB.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLGLOB.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLGLOB.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLGLOB.TXT",
+                               "glob fnmatch ok\n", 1);
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -1816,6 +1855,7 @@ static const selftest_case_t selftest_cases[] = {
     { "jobctl-core", selftest_case_jobctl    },
     { "posix-ux",    selftest_case_posix_ux  },
     { "musl-abi-core", selftest_case_musl_abi },
+    { "clone-thread", selftest_case_clone_thread },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },
@@ -1833,6 +1873,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-malloc", selftest_case_musl_malloc },
     { "musl-forkexec", selftest_case_musl_forkexec },
     { "musl-pipe",   selftest_case_musl_pipe },
+    { "musl-glob",   selftest_case_musl_glob },
 };
 
 int selftest_run_named(const char *name)

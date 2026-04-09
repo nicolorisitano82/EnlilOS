@@ -63,6 +63,7 @@
 #define TCB_FLAG_IDLE       (1 << 1)    /* task idle                     */
 #define TCB_FLAG_RT         (1 << 2)    /* hard real-time                */
 #define TCB_FLAG_USER       (1 << 3)    /* task user-space (EL0)         */
+#define TCB_FLAG_THREAD     (1 << 4)    /* thread in thread-group        */
 
 /* ── Priorità predefinite ───────────────────────────────────────── */
 #define PRIO_MAX            0           /* massima priorità              */
@@ -152,6 +153,12 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
 sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
                                   const exception_frame_t *frame,
                                   uint8_t priority);
+sched_tcb_t *sched_task_clone_user_thread(const char *name,
+                                          const exception_frame_t *frame,
+                                          uintptr_t child_sp,
+                                          uint64_t child_tpidr,
+                                          uintptr_t child_tid_uva,
+                                          uint8_t priority);
 
 /*
  * schedule() — seleziona ed esegue il task con priorità massima. O(1).
@@ -202,8 +209,12 @@ int         sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
                                    uintptr_t envp, uintptr_t auxv);
 int         sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out);
 uint32_t    sched_task_parent_pid(const sched_tcb_t *t);
+uint32_t    sched_task_tgid(const sched_tcb_t *t);
 uint32_t    sched_task_pgid(const sched_tcb_t *t);
 uint32_t    sched_task_sid(const sched_tcb_t *t);
+uint32_t    sched_task_proc_slot(const sched_tcb_t *t);
+uint32_t    sched_task_proc_refcount(const sched_tcb_t *t);
+int         sched_task_is_thread(const sched_tcb_t *t);
 int         sched_task_has_session(uint32_t sid);
 int         sched_task_has_pgrp(uint32_t sid, uint32_t pgid);
 int         sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target,

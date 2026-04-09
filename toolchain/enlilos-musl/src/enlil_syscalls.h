@@ -10,6 +10,7 @@
 #define SYS_EXECVE          10
 #define SYS_FORK            11
 #define SYS_WAITPID         12
+#define SYS_GETDENTS        14
 #define SYS_CHDIR           28
 #define SYS_GETCWD          29
 #define SYS_PIPE            34

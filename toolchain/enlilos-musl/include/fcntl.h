@@ -17,6 +17,10 @@
 #define AT_SYMLINK_NOFOLLOW  0x0100
 #define AT_EMPTY_PATH        0x1000
 
+#define SEEK_SET    0
+#define SEEK_CUR    1
+#define SEEK_END    2
+
 #define FD_CLOEXEC          1
 
 #define F_DUPFD             0

@@ -58,6 +58,7 @@ typedef struct {
 void signal_init(void);
 void signal_task_init(sched_tcb_t *task, uint32_t parent_pid);
 void signal_task_fork(sched_tcb_t *child, const sched_tcb_t *parent);
+void signal_task_clone_thread(sched_tcb_t *child, const sched_tcb_t *parent);
 void signal_task_reset_for_exec(sched_tcb_t *task);
 void signal_task_exit(sched_tcb_t *task);
 

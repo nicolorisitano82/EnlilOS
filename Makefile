@@ -88,7 +88,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
@@ -117,7 +117,10 @@ MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
 MUSL_WRAPPER_AR       = toolchain/bin/aarch64-enlilos-musl-ar
 MUSL_WRAPPER_RANLIB   = toolchain/bin/aarch64-enlilos-musl-ranlib
 MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
+                        $(MUSL_ROOT)/include/dirent.h \
                         $(MUSL_ROOT)/include/fcntl.h \
+                        $(MUSL_ROOT)/include/fnmatch.h \
+                        $(MUSL_ROOT)/include/glob.h \
                         $(MUSL_ROOT)/include/stdio.h \
                         $(MUSL_ROOT)/include/stdlib.h \
                         $(MUSL_ROOT)/include/string.h \
@@ -133,6 +136,9 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/sys/wait.h
 MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
 MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
+                        $(MUSL_ROOT)/src/dirent.c \
+                        $(MUSL_ROOT)/src/fnmatch.c \
+                        $(MUSL_ROOT)/src/glob.c \
                         $(MUSL_ROOT)/src/string.c \
                         $(MUSL_ROOT)/src/syscall.c \
                         $(MUSL_ROOT)/src/malloc.c \
@@ -144,7 +150,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_stdio.c \
                         toolchain/smoke/musl_malloc.c \
                         toolchain/smoke/musl_fork_exec.c \
-                        toolchain/smoke/musl_pipe_termios.c
+                        toolchain/smoke/musl_pipe_termios.c \
+                        toolchain/smoke/musl_glob_fnmatch.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
@@ -300,12 +307,14 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		POSIXDEMO.ELF=user/posix_demo.elf \
 		MUSLABI.ELF=user/musl_abi_demo.elf \
 		TLSDEMO.ELF=user/tls_demo.elf \
+		CLONEDEMO.ELF=user/clone_demo.elf \
 		CRTDEMO.ELF=user/crt_demo.elf \
 		MUSLHELLO.ELF=toolchain/smoke/musl_hello.elf \
 		MUSLSTDIO.ELF=toolchain/smoke/musl_stdio.elf \
 		MUSLMALLOC.ELF=toolchain/smoke/musl_malloc.elf \
 		MUSLFORK.ELF=toolchain/smoke/musl_fork_exec.elf \
 		MUSLPIPE.ELF=toolchain/smoke/musl_pipe_termios.elf \
+		MUSLGLOB.ELF=toolchain/smoke/musl_glob_fnmatch.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf

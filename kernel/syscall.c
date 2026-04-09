@@ -3,8 +3,8 @@
  *
  * Implementa:
  *   - syscall_table[256]: dispatch O(1)
- *   - fd_table[SCHED_MAX_TASKS][MAX_FD]: file descriptor per task
- *   - task_brk[SCHED_MAX_TASKS]: program break per task
+ *   - fd_table[SCHED_MAX_TASKS][MAX_FD]: file descriptor per processo condiviso
+ *   - task_brk[SCHED_MAX_TASKS]: program break per processo condiviso
  *   - syscall base + estensioni user-space per M7-02
  *
  * RT: nessuna allocazione nel dispatch path. WCET = O(1).
@@ -102,8 +102,8 @@ typedef struct {
 } pipe_t;
 
 /*
- * Indicizzata per [pid % SCHED_MAX_TASKS][fd].
- * Tutti i task partono con 0/1/2 preimpostati come CONSOLE.
+ * Indicizzata per [proc_slot][fd].
+ * Tutti i processi partono con 0/1/2 preimpostati come CONSOLE.
  */
 static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
 static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
@@ -119,11 +119,11 @@ static int blk_srv_owner_ok(void)
         return 0;
 
     port = mk_port_lookup("block");
-    return (port && port->owner_tid == current_task->pid) ? 1 : 0;
+    return (port && port->owner_tid == sched_task_tgid(current_task)) ? 1 : 0;
 }
 
 /*
- * Program break per task (indirizzato come sopra).
+ * Program break per processo (indirizzato come sopra).
  * brk=0 → non ancora inizializzato.
  */
 static uint64_t task_brk[SCHED_MAX_TASKS];
@@ -192,16 +192,11 @@ static void stat_fill(stat_t *st, uint32_t mode, uint64_t size,
     st->st_blocks  = (size + (uint64_t)blksize - 1ULL) / (uint64_t)blksize;
 }
 
-/* Indice nel fd_table per il task corrente */
+/* Indice nel fd_table/spazi condivisi per il processo corrente */
 static inline int task_idx(void)
 {
     if (!current_task) return 0;
-    return (int)(current_task->pid % SCHED_MAX_TASKS);
-}
-
-static int task_idx_from_pid(uint32_t pid)
-{
-    return (int)(pid % SCHED_MAX_TASKS);
+    return (int)(sched_task_proc_slot(current_task) % SCHED_MAX_TASKS);
 }
 
 static int syscall_streq(const char *a, const char *b)
@@ -595,7 +590,7 @@ void syscall_task_cleanup(sched_tcb_t *task)
     if (!task)
         return;
 
-    idx = task_idx_from_pid(task->pid);
+    idx = (int)(sched_task_proc_slot(task) % SCHED_MAX_TASKS);
     fd_reset_slot_defaults(idx);
     task_brk[idx] = 0ULL;
 }
@@ -604,7 +599,7 @@ static int vfs_srv_task_slot(void)
 {
     if (!current_task)
         return -1;
-    return (int)(current_task->pid % SCHED_MAX_TASKS);
+    return (int)(sched_task_proc_slot(current_task) % SCHED_MAX_TASKS);
 }
 
 static int vfs_srv_owner_ok(void)
@@ -615,7 +610,7 @@ static int vfs_srv_owner_ok(void)
         return 0;
 
     port = mk_port_lookup("vfs");
-    return (port && port->owner_tid == current_task->pid) ? 1 : 0;
+    return (port && port->owner_tid == sched_task_tgid(current_task)) ? 1 : 0;
 }
 
 static vfs_srv_handle_t *vfs_srv_handle_get(uint32_t handle)
@@ -679,7 +674,7 @@ static int vfsd_proxy_available(void)
     port = mk_port_lookup("vfs");
     if (!port || port->owner_tid == 0U)
         return 0;
-    if (port->owner_tid == current_task->pid)
+    if (port->owner_tid == sched_task_tgid(current_task))
         return 0;
     return 1;
 }
@@ -1305,6 +1300,34 @@ static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
     return 0;
 }
 
+static int user_probe_write(uintptr_t uva, size_t size)
+{
+    mm_space_t *space;
+    size_t      checked = 0U;
+
+    if (size == 0U)
+        return 0;
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EFAULT;
+
+    space = sched_task_space(current_task);
+    while (checked < size) {
+        uintptr_t cur = uva + checked;
+        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
+        size_t    chunk = PAGE_SIZE - page_off;
+
+        if (chunk > size - checked)
+            chunk = size - checked;
+        if (mmu_space_prepare_write(space, cur, chunk) < 0)
+            return -EFAULT;
+        if (!mmu_space_resolve_ptr(space, cur, chunk))
+            return -EFAULT;
+        checked += chunk;
+    }
+
+    return 0;
+}
+
 static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
 {
     size_t i = 0U;
@@ -1692,13 +1715,19 @@ static uint64_t sys_fstat(uint64_t args[6])
 static uint64_t sys_getpid(uint64_t args[6])
 {
     (void)args;
-    return current_task ? (uint64_t)current_task->pid : 0ULL;
+    return current_task ? (uint64_t)sched_task_tgid(current_task) : 0ULL;
 }
 
 static uint64_t sys_getppid(uint64_t args[6])
 {
     (void)args;
     return current_task ? (uint64_t)sched_task_parent_pid(current_task) : 0ULL;
+}
+
+static uint64_t sys_gettid(uint64_t args[6])
+{
+    (void)args;
+    return current_task ? (uint64_t)current_task->pid : 0ULL;
 }
 
 static uint64_t sys_gettimeofday(uint64_t args[6])
@@ -2239,7 +2268,7 @@ static uint64_t sys_mmap(uint64_t args[6])
         if (prot & PROT_EXEC)   vma_flags |= VMA_FLAG_EXEC;
 
         /* Registra la VMA per il write-back (msync/munmap) */
-        (void)vmm_map_file(current_task->pid, user_va, aligned,
+        (void)vmm_map_file(sched_task_proc_slot(current_task), user_va, aligned,
                            vma_flags, file_offset, &obj->file);
 
         return (uint64_t)user_va;
@@ -2269,7 +2298,7 @@ static uint64_t sys_munmap(uint64_t args[6])
 
     /* Se la regione era file-backed MAP_SHARED: scrive le pagine sporche */
     if (space)
-        (void)vmm_unmap_range(current_task->pid, space,
+        (void)vmm_unmap_range(sched_task_proc_slot(current_task), space,
                               (uintptr_t)addr, (size_t)length);
 
     /* Il rilascio fisico delle pagine avviene alla distruzione di mm_space */
@@ -2301,7 +2330,7 @@ static uint64_t sys_msync(uint64_t args[6])
     space = sched_task_space(current_task);
     if (!space) return ERR(EINVAL);
 
-    return (uint64_t)(int64_t)vmm_msync(current_task->pid, space, addr, length);
+    return (uint64_t)(int64_t)vmm_msync(sched_task_proc_slot(current_task), space, addr, length);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -2367,6 +2396,8 @@ static uint64_t sys_execve(uint64_t args[6])
 
     if (!current_task || !sched_task_is_user(current_task) || !frame)
         return ERR(ENOSYS);
+    if (sched_task_proc_refcount(current_task) > 1U)
+        return ERR(EBUSY);
 
     copy = (exec_copy_t *)kmalloc((uint32_t)sizeof(exec_copy_t));
     if (!copy)
@@ -2460,6 +2491,8 @@ static uint64_t sys_fork(uint64_t args[6])
         return ERR(ENOSYS);
     if (current_task->flags & TCB_FLAG_RT)
         kdebug_panic("fork() vietato su task hard-RT");
+    if (sched_task_proc_refcount(current_task) > 1U)
+        return ERR(EBUSY);
 
     parent_mm = sched_task_space(current_task);
     child_mm = mmu_space_clone_cow(parent_mm, frame->sp);
@@ -2474,12 +2507,77 @@ static uint64_t sys_fork(uint64_t args[6])
     }
 
     parent_idx = task_idx();
-    child_idx = (int)(child->pid % SCHED_MAX_TASKS);
+    child_idx = (int)(sched_task_proc_slot(child) % SCHED_MAX_TASKS);
     fd_clone_task_table(child_idx, parent_idx);
     task_brk[child_idx] = task_brk[parent_idx];
     signal_task_fork(child, current_task);
 
     return (uint64_t)child->pid;
+}
+
+static uint64_t sys_clone(uint64_t args[6])
+{
+    static const uint32_t required =
+        CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
+    static const uint32_t supported =
+        required | CLONE_SYSVSEM | CLONE_SETTLS |
+        CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+
+    uint32_t          flags = (uint32_t)args[0];
+    uintptr_t         child_stack = (uintptr_t)args[1];
+    uintptr_t         parent_tid_uva = (uintptr_t)args[2];
+    uint64_t          child_tpidr = args[3];
+    uintptr_t         child_tid_uva = (uintptr_t)args[4];
+    exception_frame_t *frame = active_syscall_frame;
+    sched_tcb_t       *child;
+    uint32_t           child_tid;
+    int                rc;
+
+    if (!current_task || !sched_task_is_user(current_task) || !frame)
+        return ERR(ENOSYS);
+    if ((flags & required) != required)
+        return ERR(EINVAL);
+    if ((flags & ~supported) != 0U)
+        return ERR(EINVAL);
+    if (sched_task_proc_refcount(current_task) >= SCHED_MAX_TASKS)
+        return ERR(EAGAIN);
+    if (child_stack != 0U &&
+        (child_stack < MMU_USER_BASE || child_stack >= MMU_USER_LIMIT))
+        return ERR(EINVAL);
+    if ((flags & CLONE_PARENT_SETTID) != 0U) {
+        rc = user_probe_write(parent_tid_uva, sizeof(uint32_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) != 0U) {
+        rc = user_probe_write(child_tid_uva, sizeof(uint32_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    if ((flags & CLONE_SETTLS) == 0U)
+        child_tpidr = sched_task_get_tpidr(current_task);
+
+    child = sched_task_clone_user_thread(current_task->name ? current_task->name : "user-thread",
+                                         frame,
+                                         child_stack,
+                                         child_tpidr,
+                                         ((flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) != 0U)
+                                             ? child_tid_uva : 0U,
+                                         current_task->priority);
+    if (!child)
+        return ERR(ENOMEM);
+
+    signal_task_clone_thread(child, current_task);
+    child_tid = child->pid;
+
+    if ((flags & CLONE_PARENT_SETTID) != 0U) {
+        rc = user_store_bytes(parent_tid_uva, &child_tid, sizeof(child_tid));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    return (uint64_t)child_tid;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -2506,7 +2604,7 @@ static uint64_t sys_waitpid(uint64_t args[6])
     if (!current_task)
         return ERR(ECHILD);
 
-    caller_pid = current_task->pid;
+    caller_pid = sched_task_tgid(current_task);
     deadline = (timeout_ms > 0U) ? (timer_now_ms() + timeout_ms) : (uint64_t)-1ULL;
 
     for (;;) {
@@ -2521,11 +2619,13 @@ static uint64_t sys_waitpid(uint64_t args[6])
 
             if (!t)
                 continue;
+            if (sched_task_is_thread(t))
+                continue;
             if (sched_task_parent_pid(t) != caller_pid)
                 continue;
 
             if (pid_arg > 0)
-                match = ((uint32_t)pid_arg == t->pid);
+                match = ((uint32_t)pid_arg == sched_task_tgid(t));
             else if (pid_arg == 0)
                 match = (sched_task_pgid(t) == sched_task_pgid(current_task));
             else if (pid_arg == -1)
@@ -2847,7 +2947,7 @@ static uint64_t sys_setpgid(uint64_t args[6])
     if (!current_task || !sched_task_is_user(current_task))
         return ERR(EPERM);
     if (pid_arg == 0)
-        pid_arg = (int32_t)current_task->pid;
+        pid_arg = (int32_t)sched_task_tgid(current_task);
 
     target = sched_task_find((uint32_t)pid_arg);
     if (!target)
@@ -3776,6 +3876,7 @@ static uint64_t sys_vfs_boot_taskinfo(uint64_t args[6])
 
     memset(&info, 0, sizeof(info));
     info.pid = pid;
+    info.tgid = sched_task_tgid(task);
     info.parent_pid = sched_task_parent_pid(task);
     info.pgid = sched_task_pgid(task);
     info.sid = sched_task_sid(task);
@@ -4054,6 +4155,12 @@ void syscall_init(void)
     syscall_table[SYS_UNAME] = (syscall_entry_t){
         sys_uname, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "uname"
     };
+    syscall_table[SYS_CLONE] = (syscall_entry_t){
+        sys_clone, 0, "clone"
+    };
+    syscall_table[SYS_GETTID] = (syscall_entry_t){
+        sys_gettid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "gettid"
+    };
     syscall_table[SYS_MOUNT] = (syscall_entry_t){
         sys_mount, 0, "mount"
     };
@@ -4198,8 +4305,8 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 91 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl registrate\n");
-    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 task slot\n");
+    uart_puts("[SYSCALL] 93 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
+    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 proc slot\n");
 }
 
 /* ════════════════════════════════════════════════════════════════════

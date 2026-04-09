@@ -21,6 +21,7 @@
 #include "vmm.h"
 
 extern void *memset(void *dst, int value, size_t n);
+extern void *memcpy(void *dst, const void *src, size_t n);
 extern void syscall_task_cleanup(sched_tcb_t *task);
 
 /* ── Costanti interne ────────────────────────────────────────────── */
@@ -47,17 +48,28 @@ typedef struct {
     uint64_t    envp;
     uint64_t    auxv;
     uint64_t    tpidr_el0;   /* thread pointer user-space (TPIDR_EL0) — M11-01b */
+    uint64_t    child_tid_uva;
     uint8_t     is_user;
     uint8_t     resume_from_frame;
-    uint8_t     _pad[6];
+    uint8_t     proc_slot;
+    uint8_t     _pad[5];
     int32_t     exit_code;
-    uint32_t    parent_pid;
-    uint32_t    pgid;
-    uint32_t    sid;
     exception_frame_t start_frame;
 } sched_task_ctx_t;
 
+typedef struct {
+    mm_space_t *mm;
+    uint32_t    tgid;
+    uint32_t    parent_pid;
+    uint32_t    pgid;
+    uint32_t    sid;
+    uint16_t    refcount;
+    uint8_t     in_use;
+    uint8_t     _pad0;
+} sched_proc_ctx_t;
+
 static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
+static sched_proc_ctx_t proc_ctx[SCHED_MAX_TASKS];
 
 /* ── Scheduler state ─────────────────────────────────────────────── */
 
@@ -91,16 +103,37 @@ static inline sched_task_ctx_t *ctx_of(const sched_tcb_t *t)
     return &task_ctx[task_slot(t)];
 }
 
-static inline uint32_t pgid_of(const sched_tcb_t *t)
+static inline sched_proc_ctx_t *proc_of(const sched_tcb_t *t)
 {
     sched_task_ctx_t *ctx = ctx_of(t);
-    return ctx ? ctx->pgid : 0U;
+
+    if (!ctx || ctx->proc_slot >= SCHED_MAX_TASKS)
+        return NULL;
+    return proc_ctx[ctx->proc_slot].in_use ? &proc_ctx[ctx->proc_slot] : NULL;
+}
+
+static inline uint32_t tgid_of(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? proc->tgid : (t ? t->pid : 0U);
+}
+
+static inline uint32_t parent_pid_of(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? proc->parent_pid : 0U;
+}
+
+static inline uint32_t pgid_of(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? proc->pgid : 0U;
 }
 
 static inline uint32_t sid_of(const sched_tcb_t *t)
 {
-    sched_task_ctx_t *ctx = ctx_of(t);
-    return ctx ? ctx->sid : 0U;
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? proc->sid : 0U;
 }
 
 static inline uint8_t eff_prio_of(const sched_tcb_t *t)
@@ -262,6 +295,105 @@ static uint64_t sched_alloc_kernel_stack(void)
     return phys_alloc_pages(TASK_STACK_ORDER);
 }
 
+static int proc_alloc(mm_space_t *mm, uint32_t tgid, uint32_t parent_pid,
+                      uint32_t pgid, uint32_t sid)
+{
+    for (uint32_t i = 0U; i < SCHED_MAX_TASKS; i++) {
+        sched_proc_ctx_t *proc = &proc_ctx[i];
+
+        if (proc->in_use)
+            continue;
+
+        memset(proc, 0, sizeof(*proc));
+        proc->mm        = mm ? mm : mmu_kernel_space();
+        proc->tgid      = tgid;
+        proc->parent_pid = parent_pid;
+        proc->pgid      = pgid;
+        proc->sid       = sid;
+        proc->refcount  = 1U;
+        proc->in_use    = 1U;
+        return (int)i;
+    }
+
+    return -1;
+}
+
+static int proc_retain(uint8_t slot)
+{
+    if (slot >= SCHED_MAX_TASKS || !proc_ctx[slot].in_use)
+        return -1;
+    proc_ctx[slot].refcount++;
+    return 0;
+}
+
+static int proc_release(uint8_t slot)
+{
+    mm_space_t *mm;
+
+    if (slot >= SCHED_MAX_TASKS || !proc_ctx[slot].in_use || proc_ctx[slot].refcount == 0U)
+        return 0;
+
+    proc_ctx[slot].refcount--;
+    if (proc_ctx[slot].refcount != 0U)
+        return 0;
+
+    mm = proc_ctx[slot].mm;
+    proc_ctx[slot].mm = mmu_kernel_space();
+    if (mm && mm != mmu_kernel_space())
+        mmu_space_destroy(mm);
+    return 1;
+}
+
+static int task_bind_new_process(sched_tcb_t *t, mm_space_t *mm,
+                                 uint32_t parent_pid, uint32_t pgid,
+                                 uint32_t sid)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    int               slot;
+
+    if (!t || !ctx)
+        return -1;
+
+    slot = proc_alloc(mm, t->pid, parent_pid,
+                      (pgid != 0U) ? pgid : t->pid,
+                      (sid != 0U) ? sid : t->pid);
+    if (slot < 0)
+        return -1;
+
+    ctx->mm = mm ? mm : mmu_kernel_space();
+    ctx->proc_slot = (uint8_t)slot;
+    return 0;
+}
+
+static int task_bind_shared_process(sched_tcb_t *t, const sched_tcb_t *owner)
+{
+    sched_task_ctx_t *ctx;
+    sched_proc_ctx_t *proc;
+    uint8_t           slot;
+
+    if (!t || !owner)
+        return -1;
+
+    ctx = ctx_of(owner);
+    proc = proc_of(owner);
+    if (!ctx || !proc)
+        return -1;
+
+    slot = ctx->proc_slot;
+    if (proc_retain(slot) < 0)
+        return -1;
+
+    ctx = ctx_of(t);
+    if (!ctx) {
+        (void)proc_release(slot);
+        return -1;
+    }
+
+    ctx->mm = proc->mm;
+    ctx->proc_slot = slot;
+    return 0;
+}
+
 /* ── Allocazione task dal pool ───────────────────────────────────── */
 
 static sched_tcb_t *task_alloc(void)
@@ -294,12 +426,11 @@ static sched_tcb_t *task_alloc(void)
     task_ctx[slot].argv            = 0ULL;
     task_ctx[slot].envp            = 0ULL;
     task_ctx[slot].auxv            = 0ULL;
+    task_ctx[slot].child_tid_uva   = 0ULL;
     task_ctx[slot].is_user         = 0U;
     task_ctx[slot].resume_from_frame = 0U;
+    task_ctx[slot].proc_slot       = 0xFFU;
     task_ctx[slot].exit_code       = 0;
-    task_ctx[slot].parent_pid      = 0U;
-    task_ctx[slot].pgid            = t->pid;
-    task_ctx[slot].sid             = t->pid;
     memset(&task_ctx[slot].start_frame, 0, sizeof(task_ctx[slot].start_frame));
     donated_priority[slot]         = 0xFFU;
     return t;
@@ -360,6 +491,8 @@ void sched_init(void)
     kern->state     = TCB_STATE_RUNNING;
     kern->flags     = TCB_FLAG_KERNEL;
     kern->ticks_left = SCHED_TICK_QUANTUM;
+    if (task_bind_new_process(kern, mmu_kernel_space(), 0U, kern->pid, kern->pid) < 0)
+        while (1) __asm__ volatile("wfe");
     /* sp = 0: non è ancora stato salvato; sched_context_switch lo salverà */
     current_task = kern;
     signal_task_init(kern, 0U);
@@ -379,6 +512,8 @@ void sched_init(void)
     idle->state     = TCB_STATE_READY;
     idle->flags     = TCB_FLAG_KERNEL | TCB_FLAG_IDLE;
     idle->ticks_left = 0xFF; /* quantum illimitato per l'idle */
+    if (task_bind_new_process(idle, mmu_kernel_space(), 0U, idle->pid, idle->pid) < 0)
+        while (1) __asm__ volatile("wfe");
     signal_task_init(idle, 0U);
 
     uint8_t *idle_top = idle_stack + TASK_STACK_SIZE;
@@ -438,12 +573,14 @@ sched_tcb_t *sched_task_create(const char *name, sched_fn entry, uint8_t priorit
     t->flags     = TCB_FLAG_KERNEL;
     t->ticks_left = SCHED_TICK_QUANTUM;
     ctx = ctx_of(t);
-    ctx->mm = mmu_kernel_space();
     ctx->kernel_stack_pa = stack_pa;
     ctx->is_user = 0U;
-    ctx->parent_pid = current_task ? current_task->pid : 0U;
-    ctx->pgid = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
-    ctx->sid = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
+    if (task_bind_new_process(t, mmu_kernel_space(), 0U,
+                              (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid,
+                              (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid) < 0) {
+        uart_puts("[SCHED] PANIC: proc slot esauriti\n");
+        while (1) __asm__ volatile("wfe");
+    }
     signal_task_init(t, 0U);
 
     task_setup_stack(t, stack_top, entry);
@@ -505,14 +642,19 @@ sched_tcb_t *sched_task_create_user(const char *name, mm_space_t *mm,
     ctx->argv            = argv;
     ctx->envp            = envp;
     ctx->auxv            = auxv;
+    ctx->child_tid_uva   = 0ULL;
     ctx->is_user         = 1U;
     ctx->resume_from_frame = 0U;
     ctx->tpidr_el0       = 0ULL;
-    ctx->parent_pid      = current_task ? current_task->pid : 0U;
-    ctx->pgid            = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
-    ctx->sid             = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
+    if (task_bind_new_process(t, mm,
+                              current_task ? tgid_of(current_task) : 0U,
+                              (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid,
+                              (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid) < 0) {
+        uart_puts("[SCHED] PANIC: proc slot user esauriti\n");
+        while (1) __asm__ volatile("wfe");
+    }
     signal_task_init(t, (current_task && sched_task_is_user(current_task)) ?
-                        current_task->pid : 0U);
+                        tgid_of(current_task) : 0U);
 
     task_setup_stack(t, stack_top, (sched_fn)0);
     {
@@ -568,14 +710,19 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     ctx->argv              = 0ULL;
     ctx->envp              = 0ULL;
     ctx->auxv              = 0ULL;
+    ctx->child_tid_uva     = 0ULL;
     ctx->is_user           = 1U;
     ctx->resume_from_frame = 1U;
     /* Il figlio eredita il thread pointer del parent.  musl non re-inizializza
      * TPIDR_EL0 nel figlio di fork() perche' il TLS statico e' gia' valido. */
     ctx->tpidr_el0         = ctx_of(current_task) ? ctx_of(current_task)->tpidr_el0 : 0ULL;
-    ctx->parent_pid        = current_task ? current_task->pid : 0U;
-    ctx->pgid              = (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid;
-    ctx->sid               = (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid;
+    if (task_bind_new_process(t, mm,
+                              current_task ? tgid_of(current_task) : 0U,
+                              (current_task && pgid_of(current_task) != 0U) ? pgid_of(current_task) : t->pid,
+                              (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid) < 0) {
+        uart_puts("[SCHED] PANIC: proc slot fork esauriti\n");
+        while (1) __asm__ volatile("wfe");
+    }
     ctx->start_frame       = *frame;
     ctx->start_frame.x[0]  = 0ULL;
 
@@ -594,6 +741,75 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
     pr_dec(t->pid);
     uart_puts(" prio=");
     pr_dec(priority);
+    uart_puts(" kstack=");
+    pr_hex64(stack_pa);
+    uart_puts("\n");
+
+    return t;
+}
+
+sched_tcb_t *sched_task_clone_user_thread(const char *name,
+                                          const exception_frame_t *frame,
+                                          uintptr_t child_sp,
+                                          uint64_t child_tpidr,
+                                          uintptr_t child_tid_uva,
+                                          uint8_t priority)
+{
+    sched_tcb_t       *t = task_alloc();
+    sched_task_ctx_t  *ctx;
+    uint64_t           stack_pa;
+    uint8_t           *stack_top;
+
+    if (!t || !frame || !current_task || !sched_task_is_user(current_task)) {
+        uart_puts("[SCHED] PANIC: impossibile clonare thread user\n");
+        while (1) __asm__ volatile("wfe");
+    }
+
+    stack_pa = sched_alloc_kernel_stack();
+    stack_top = (uint8_t *)(uintptr_t)(stack_pa + TASK_STACK_SIZE);
+
+    t->name       = name;
+    t->priority   = priority;
+    t->state      = TCB_STATE_READY;
+    t->flags      = TCB_FLAG_USER | TCB_FLAG_THREAD;
+    t->ticks_left = SCHED_TICK_QUANTUM;
+
+    if (task_bind_shared_process(t, current_task) < 0) {
+        uart_puts("[SCHED] PANIC: impossibile condividere proc slot\n");
+        while (1) __asm__ volatile("wfe");
+    }
+
+    ctx = ctx_of(t);
+    ctx->kernel_stack_pa   = stack_pa;
+    ctx->user_entry        = frame->pc;
+    ctx->user_sp           = child_sp ? child_sp : frame->sp;
+    ctx->argc              = 0ULL;
+    ctx->argv              = 0ULL;
+    ctx->envp              = 0ULL;
+    ctx->auxv              = 0ULL;
+    ctx->child_tid_uva     = child_tid_uva;
+    ctx->is_user           = 1U;
+    ctx->resume_from_frame = 1U;
+    ctx->tpidr_el0         = child_tpidr;
+    ctx->start_frame       = *frame;
+    ctx->start_frame.x[0]  = 0ULL;
+    ctx->start_frame.sp    = child_sp ? child_sp : frame->sp;
+
+    task_setup_stack(t, stack_top, (sched_fn)0);
+    {
+        uint64_t flags = irq_save();
+        rq_push(t);
+        if (current_task && eff_prio_of(t) < eff_prio_of(current_task))
+            need_resched = 1;
+        irq_restore(flags);
+    }
+
+    uart_puts("[SCHED] Thread user clonato: '");
+    uart_puts(name ? name : "user-thread");
+    uart_puts("' tid=");
+    pr_dec(t->pid);
+    uart_puts(" tgid=");
+    pr_dec(tgid_of(t));
     uart_puts(" kstack=");
     pr_hex64(stack_pa);
     uart_puts("\n");
@@ -881,10 +1097,10 @@ uint32_t sched_task_snapshot(sched_task_info_t *out, uint32_t max_entries)
 
 mm_space_t *sched_task_space(const sched_tcb_t *t)
 {
-    sched_task_ctx_t *ctx = ctx_of(t);
-    if (!ctx || !ctx->mm)
+    sched_proc_ctx_t *proc = proc_of(t);
+    if (!proc || !proc->mm)
         return mmu_kernel_space();
-    return ctx->mm;
+    return proc->mm;
 }
 
 int sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
@@ -892,14 +1108,16 @@ int sched_task_rebind_user(sched_tcb_t *t, mm_space_t *mm,
                            uintptr_t argc, uintptr_t argv,
                            uintptr_t envp, uintptr_t auxv)
 {
-    sched_task_ctx_t *ctx = ctx_of(t);
+    sched_task_ctx_t  *ctx = ctx_of(t);
+    sched_proc_ctx_t  *proc = proc_of(t);
 
-    if (!ctx || !mm)
+    if (!ctx || !proc || !mm)
         return -1;
 
     t->flags &= (uint8_t)~TCB_FLAG_KERNEL;
     t->flags |= TCB_FLAG_USER;
     ctx->mm         = mm;
+    proc->mm        = mm;
     ctx->user_entry = entry;
     ctx->user_sp    = user_sp;
     ctx->argc       = argc;
@@ -923,8 +1141,12 @@ int sched_task_get_exit_code(const sched_tcb_t *t, int32_t *out)
 
 uint32_t sched_task_parent_pid(const sched_tcb_t *t)
 {
-    sched_task_ctx_t *ctx = ctx_of(t);
-    return ctx ? ctx->parent_pid : 0U;
+    return parent_pid_of(t);
+}
+
+uint32_t sched_task_tgid(const sched_tcb_t *t)
+{
+    return tgid_of(t);
 }
 
 uint32_t sched_task_pgid(const sched_tcb_t *t)
@@ -935,6 +1157,23 @@ uint32_t sched_task_pgid(const sched_tcb_t *t)
 uint32_t sched_task_sid(const sched_tcb_t *t)
 {
     return sid_of(t);
+}
+
+uint32_t sched_task_proc_slot(const sched_tcb_t *t)
+{
+    sched_task_ctx_t *ctx = ctx_of(t);
+    return ctx ? (uint32_t)ctx->proc_slot : 0U;
+}
+
+uint32_t sched_task_proc_refcount(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? (uint32_t)proc->refcount : 0U;
+}
+
+int sched_task_is_thread(const sched_tcb_t *t)
+{
+    return (t && (t->flags & TCB_FLAG_THREAD) != 0U) ? 1 : 0;
 }
 
 int sched_task_has_session(uint32_t sid)
@@ -973,51 +1212,53 @@ int sched_task_has_pgrp(uint32_t sid, uint32_t pgid)
 
 int sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target, uint32_t pgid)
 {
-    sched_task_ctx_t       *target_ctx;
-    const sched_task_ctx_t *caller_ctx;
+    sched_proc_ctx_t       *target_proc;
+    sched_proc_ctx_t       *caller_proc;
 
     if (!caller || !target)
         return -EINVAL;
     if (!sched_task_is_user(caller) || !sched_task_is_user(target))
         return -EPERM;
 
-    caller_ctx = ctx_of(caller);
-    target_ctx = ctx_of(target);
-    if (!caller_ctx || !target_ctx)
+    caller_proc = proc_of(caller);
+    target_proc = proc_of(target);
+    if (!caller_proc || !target_proc)
         return -EINVAL;
-    if (target != caller && target_ctx->parent_pid != caller->pid)
+    if (target != caller && target_proc->parent_pid != caller_proc->tgid)
         return -EPERM;
-    if (target_ctx->sid == target->pid)
+    if (target->pid != target_proc->tgid)
+        return -EPERM;
+    if (target_proc->sid == target_proc->tgid)
         return -EPERM;
 
     if (pgid == 0U)
-        pgid = target->pid;
+        pgid = target_proc->tgid;
 
-    if (target_ctx->sid != caller_ctx->sid)
+    if (target_proc->sid != caller_proc->sid)
         return -EPERM;
-    if (pgid != target->pid && !sched_task_has_pgrp(target_ctx->sid, pgid))
+    if (pgid != target_proc->tgid && !sched_task_has_pgrp(target_proc->sid, pgid))
         return -EPERM;
 
-    target_ctx->pgid = pgid;
+    target_proc->pgid = pgid;
     return 0;
 }
 
 int sched_task_setsid(sched_tcb_t *task, uint32_t *out_sid)
 {
-    sched_task_ctx_t *ctx = ctx_of(task);
+    sched_proc_ctx_t *proc = proc_of(task);
 
-    if (!task || !ctx)
+    if (!task || !proc)
         return -EINVAL;
     if (!sched_task_is_user(task))
         return -EPERM;
-    if (ctx->pgid == task->pid)
+    if (proc->pgid == proc->tgid)
         return -EPERM;
 
-    ctx->sid = task->pid;
-    ctx->pgid = task->pid;
+    proc->sid = proc->tgid;
+    proc->pgid = proc->tgid;
     if (out_sid)
-        *out_sid = ctx->sid;
-    return (int)ctx->sid;
+        *out_sid = proc->sid;
+    return (int)proc->sid;
 }
 
 sched_tcb_t *sched_task_at(uint32_t index)
@@ -1045,6 +1286,22 @@ uint64_t sched_task_get_tpidr(const sched_tcb_t *t)
     return ctx ? ctx->tpidr_el0 : 0ULL;
 }
 
+static void sched_task_store_child_tid(sched_task_ctx_t *ctx, uint32_t value)
+{
+    void *dst;
+
+    if (!ctx || !ctx->mm || ctx->child_tid_uva == 0ULL)
+        return;
+    if (ctx->child_tid_uva < MMU_USER_BASE || ctx->child_tid_uva + sizeof(uint32_t) > MMU_USER_LIMIT)
+        return;
+    if (mmu_space_prepare_write(ctx->mm, (uintptr_t)ctx->child_tid_uva, sizeof(uint32_t)) < 0)
+        return;
+    dst = mmu_space_resolve_ptr(ctx->mm, (uintptr_t)ctx->child_tid_uva, sizeof(uint32_t));
+    if (!dst)
+        return;
+    memcpy(dst, &value, sizeof(value));
+}
+
 void sched_task_bootstrap(uint64_t entry_reg)
 {
     sched_task_ctx_t *ctx = ctx_of(current_task);
@@ -1059,6 +1316,8 @@ void sched_task_bootstrap(uint64_t entry_reg)
          */
         __asm__ volatile("msr daifset, #2" ::: "memory");
         ctx->resume_from_frame = 0U;
+        if (ctx->child_tid_uva != 0ULL)
+            sched_task_store_child_tid(ctx, current_task->pid);
         __asm__ volatile("msr tpidr_el0, %0"
                          :: "r"(ctx->tpidr_el0) : "memory");
         sched_resume_user_frame(&ctx->start_frame);
@@ -1085,16 +1344,26 @@ void sched_task_bootstrap(uint64_t entry_reg)
 void sched_task_exit_with_code(int32_t code)
 {
     sched_task_ctx_t *ctx = ctx_of(current_task);
+    uint32_t          proc_slot = 0U;
+    int               last_thread = 0;
 
     if (current_task) {
         if (ctx)
             ctx->exit_code = code;
+        if (ctx)
+            proc_slot = ctx->proc_slot;
+        if (ctx && ctx->child_tid_uva != 0ULL)
+            sched_task_store_child_tid(ctx, 0U);
         kmon_task_cleanup(current_task);
         ksem_task_cleanup(current_task);
         mreact_task_cleanup(current_task);
-        vmm_cleanup_task(current_task->pid);
-        syscall_task_cleanup(current_task);
         signal_task_exit(current_task);
+        if (ctx)
+            last_thread = proc_release(ctx->proc_slot);
+        if (last_thread) {
+            vmm_cleanup_task(proc_slot);
+            syscall_task_cleanup(current_task);
+        }
         current_task->state = TCB_STATE_ZOMBIE;
     }
 

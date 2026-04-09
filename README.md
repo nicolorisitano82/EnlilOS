@@ -15,14 +15,15 @@ Le milestone completate oggi coprono:
 - **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
-- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `mreact`, `ksem` e `kmon`.
+- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, `mreact`, `ksem` e `kmon`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
+- **M11-02a**: baseline kernel per il profilo multi-thread, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `vfsd` namespace-aware per processo e selftest `clone-thread`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=33 pass=33 fail=0`.
+`SUMMARY total=35 pass=35 fail=0`.
 
 ---
 
@@ -95,6 +96,8 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `MUSLMALLOC.ELF`
 - `MUSLFORK.ELF`
 - `MUSLPIPE.ELF`
+- `MUSLGLOB.ELF`
+- `CLONEDEMO.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
@@ -152,7 +155,9 @@ Questi target generano:
 - wrapper `toolchain/bin/aarch64-enlilos-musl-gcc`, `ar`, `ranlib`
 - smoke ELF statici musl-linked in `toolchain/smoke/*.elf`
 
-Il profilo attuale e' volutamente `static-only`, single-thread e pensato per bootstrap C, smoke test e bring-up di software user-space semplice.
+Il profilo attuale resta volutamente `static-only` lato musl/libc, ma da `M11-02a`
+il kernel ha gia' la baseline thread-group (`tgid`, `gettid`, `clone()` subset e
+stato processo condiviso) su cui chiudere `pthread` nelle milestone successive.
 
 Il `Makefile` supporta anche prefissi espliciti:
 
@@ -202,11 +207,14 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `nsdemo`
 - `posixdemo`
 - `muslabi`
+- `muslglob`
+- `clonedemo`
 - `runelf /MUSLHELLO.ELF`
 - `runelf /MUSLSTDIO.ELF`
 - `runelf /MUSLMALLOC.ELF`
 - `runelf /MUSLFORK.ELF`
 - `runelf /MUSLPIPE.ELF`
+- `runelf /MUSLGLOB.ELF`
 - `runelf PATH`
 - `nsh`
 - `selftest`, `selftest [nome]`
@@ -228,14 +236,14 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 33 casi:
+Esiste una suite di self-test kernel-side che oggi copre 35 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
 - `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`, `vfs-namespace`, `mreact-core`, `cap-core`
 - `ksem-core`, `kmon-core`, `ipc-sync`
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`, `tls-tp`, `crt-startup`
-- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`
+- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`, `clone-thread`
 
 La build dedicata e':
 
@@ -247,7 +255,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=33 pass=33 fail=0
+SUMMARY total=35 pass=35 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

@@ -18,7 +18,7 @@ tutto ogni sessione.
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
   - `make musl-smoke` — compila i demo statici musl-linked
-- Stato validato corrente: `SUMMARY total=33 pass=33 fail=0`
+- Stato validato corrente: `SUMMARY total=35 pass=35 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -142,6 +142,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
          sigaction/sigprocmask/sigreturn/yield)
 39–55   ABI minima musl v1 (getpid/getppid/gettimeofday/nanosleep/uids/
          lseek/readv/writev/fcntl/openat/fstatat/ioctl/uname)
+56–59   baseline threading (clone/gettid/set_tid_address/exit_group)
 60–64   capability (cap_alloc/cap_send/cap_revoke/cap_derive/cap_query)
 80–84   mreact (subscribe/wait/cancel/subscribe_all/subscribe_any)
 85–94   ksem (create/open/close/unlink/post/wait/timedwait/trywait/getvalue/anon)
@@ -214,6 +215,8 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Usa syscall `vfs_boot_*` (150–155) per accedere al VFS kernel-side
 - Selftest `vfsd-core` verifica che il server risponda correttamente a open/read/stat
 - Bootstrap: spawned da `kernel/main.c` come primo task user-space
+- Da `M11-02a`, `vfsd` deve ragionare per `tgid` e non per singolo sender TID:
+  tutti i thread dello stesso processo condividono `cwd` e mount namespace.
 - Nota critica da M11-01a: `lseek()` sui fd remoti richiede sia `VFSD_REQ_LSEEK`
   lato IPC sia l'aggiornamento del `file.pos` shadow nel kernel dopo `read/write`.
   Se aggiorni solo il remote handle e non lo shadow, `SEEK_CUR` parte da una posizione
@@ -280,10 +283,56 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - `environ` e' definita dal runtime `crt1`; nella libc bootstrap va solo dichiarata
   `extern`, altrimenti il link fallisce per simbolo duplicato.
 - I smoke test runtime attuali sono:
-  `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`.
+  `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`,
+  `MUSLGLOB.ELF`.
 - Bug reale emerso dal bring-up: `fd_pipe_read()` non deve tentare di riempire tutto
   il buffer richiesto su una pipe. Deve tornare appena ha letto i byte disponibili,
   altrimenti `musl-pipe` resta bloccato dopo aver consumato il payload presente.
+- `dirent.h` / `dirent.c` della bootstrap libc sono volutamente minimali e leggono
+  directory entry per entry via `SYS_GETDENTS`; il contratto pratico oggi e' allineato
+  al payload kernel `name[32] + mode`.
+- `glob()` / `fnmatch()` sono gia' disponibili in v1 per il bootstrap shell-side:
+  `fnmatch()` gestisce `* ? []` con `FNM_PATHNAME`, `FNM_NOESCAPE`, `FNM_PERIOD`,
+  mentre `glob()` espande wildcard sopra `opendir/readdir` senza nuove syscall.
+- Gotcha fondamentale di `glob()`: il `malloc()` bootstrap fa un `mmap()` per ogni
+  allocazione. Un modello "una stringa, una allocazione" esplode presto in `GLOB_APPEND`.
+  La soluzione valida e' uno store compatto unico che contiene sia `gl_pathv` sia il
+  pool delle stringhe matchate.
+
+## Thread-group baseline (`M11-02a`)
+
+**File**: [kernel/sched.c](kernel/sched.c), [include/sched.h](include/sched.h),
+[kernel/syscall.c](kernel/syscall.c), [kernel/signal.c](kernel/signal.c),
+[user/vfsd.c](user/vfsd.c), [user/clone_demo.c](user/clone_demo.c)
+
+- `M11-02a` non introduce ancora `pthread`, ma chiude la base kernel:
+  `getpid()` ora ritorna il `tgid`, mentre `gettid()` espone il TID reale.
+- Lo stato condiviso di processo non e' un oggetto heap dinamico: vive in
+  `proc_ctx[SCHED_MAX_TASKS]` dentro `kernel/sched.c`, referenziato da `proc_slot`.
+  Tutto cio' che deve essere condiviso tra thread va agganciato a `proc_slot`,
+  non a `pid`.
+- Dopo `M11-02a`, `fd_tables`, `task_brk`, `vfs_srv_tables` e ownership VMM/VFS
+  sono keyed per `proc_slot`, non per TID.
+- Le signal dispositions (`sigaction`) sono condivise per processo slot; i campi
+  `pending`, `blocked` e lo stato stop/resto restano per-thread.
+- `signal_send_pid()` deve distinguere tra delivery thread-directed e process-directed:
+  prima prova il TID esatto, poi ricade sul primo task con `tgid` corrispondente.
+- `clone()` v1 supporta solo il subset thread-oriented:
+  `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
+  piu' `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
+  `CLONE_CHILD_CLEARTID`.
+- `fork()` ed `execve()` ritornano `-EBUSY` nei processi multi-thread finche' non
+  esiste il lifecycle completo in `M11-02b`.
+- Gotcha critico: non liberare subito i metadati del processo quando l'ultimo thread
+  esce. Se azzeri il `proc_slot` troppo presto, rompi `waitpid()`, `SIGCHLD`,
+  job control e demo come `nsdemo`/`musl-forkexec`. La parte da rilasciare subito e'
+  l'`mm`; i metadati zombie devono restare vivi fino al reap.
+- `CLONE_CHILD_CLEARTID` in questa fase fa solo il clear in memoria utente; il wake
+  via `futex` appartiene a `M11-02b/c`.
+- Validazione attuale:
+  - selftest `clone-thread`
+  - demo `/CLONEDEMO.ELF`
+  - suite completa `34/34`
 
 ---
 
@@ -410,6 +459,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 31. `musl-malloc` — smoke `malloc/calloc/realloc`
 32. `musl-forkexec` — smoke `fork/execve/waitpid`
 33. `musl-pipe` — smoke `pipe/dup2/termios`
+34. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
 
 ### Helper macro
 ```c
@@ -426,15 +476,15 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-09)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04 e `M11-01` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01` e `M8-08d` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=33 pass=33 fail=0
+SUMMARY total=35 pass=35 fail=0
 ```
 
 **Prossime priorità**:
-1. M8-08d..f glob/fnmatch + build system + integrazione arksh
+1. M8-08e..f build system + integrazione arksh
 2. M10-01 VirtIO network driver
 3. M11-02 POSIX Threading (pthread)
 4. M11-03 dynamic linker user-space / `.so`

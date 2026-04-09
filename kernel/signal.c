@@ -35,10 +35,10 @@ typedef struct {
     uint8_t     stop_reported;
     uint8_t     stop_sig;
     uint8_t     active_sig;
-    sigaction_t actions[ENLILOS_NSIG];
 } signal_state_t;
 
 static signal_state_t signal_state[SCHED_MAX_TASKS];
+static sigaction_t    signal_actions[SCHED_MAX_TASKS][ENLILOS_NSIG];
 
 static inline uint32_t signal_slot_pid(uint32_t pid)
 {
@@ -48,6 +48,16 @@ static inline uint32_t signal_slot_pid(uint32_t pid)
 static inline uint32_t signal_slot_task(const sched_tcb_t *task)
 {
     return signal_slot_pid(task ? task->pid : 0U);
+}
+
+static inline uint32_t signal_proc_slot_task(const sched_tcb_t *task)
+{
+    return task ? sched_task_proc_slot(task) % SCHED_MAX_TASKS : 0U;
+}
+
+static inline sigaction_t *signal_actions_for_task(const sched_tcb_t *task)
+{
+    return signal_actions[signal_proc_slot_task(task)];
 }
 
 static inline uint64_t signal_bit(int sig)
@@ -138,13 +148,13 @@ static int signal_copy_to_user(mm_space_t *space, uintptr_t uva,
     return 0;
 }
 
-static void signal_reset_actions(signal_state_t *st)
+static void signal_reset_actions(uint32_t proc_slot)
 {
     for (uint32_t i = 0U; i < ENLILOS_NSIG; i++) {
-        st->actions[i].sa_handler = SIG_DFL;
-        st->actions[i].sa_mask    = 0ULL;
-        st->actions[i].sa_flags   = 0U;
-        st->actions[i]._pad       = 0U;
+        signal_actions[proc_slot][i].sa_handler = SIG_DFL;
+        signal_actions[proc_slot][i].sa_mask    = 0ULL;
+        signal_actions[proc_slot][i].sa_flags   = 0U;
+        signal_actions[proc_slot][i]._pad       = 0U;
     }
 }
 
@@ -163,7 +173,8 @@ static int signal_pick_pending(signal_state_t *st)
     return 1 + __builtin_ctzll(ready);
 }
 
-static int signal_has_deliverable_pending(const signal_state_t *st)
+static int signal_has_deliverable_pending(const signal_state_t *st,
+                                         const sched_tcb_t *task)
 {
     uint64_t ready;
 
@@ -175,7 +186,7 @@ static int signal_has_deliverable_pending(const signal_state_t *st)
 
     while (ready != 0ULL) {
         int sig = 1 + __builtin_ctzll(ready);
-        sigaction_t act = st->actions[sig - 1];
+        sigaction_t act = signal_actions_for_task(task)[sig - 1];
 
         if (!(act.sa_handler == SIG_IGN ||
               (act.sa_handler == SIG_DFL && signal_default_ignore(sig))))
@@ -257,7 +268,7 @@ static int signal_install_user_frame(signal_state_t *st, exception_frame_t *fram
     st->active_sig = (uint8_t)sig;
 
     if (act->sa_flags & SA_RESETHAND)
-        st->actions[sig - 1].sa_handler = SIG_DFL;
+        signal_actions_for_task(current_task)[sig - 1].sa_handler = SIG_DFL;
 
     frame->sp   = sig_sp;
     frame->pc   = (uint64_t)(uintptr_t)act->sa_handler;
@@ -271,6 +282,7 @@ static int signal_install_user_frame(signal_state_t *st, exception_frame_t *fram
 void signal_init(void)
 {
     memset(signal_state, 0, sizeof(signal_state));
+    memset(signal_actions, 0, sizeof(signal_actions));
     uart_puts("[SIGNAL] Core POSIX minimale pronto\n");
 }
 
@@ -284,13 +296,15 @@ void signal_task_init(sched_tcb_t *task, uint32_t parent_pid)
     st = &signal_state[signal_slot_task(task)];
     memset(st, 0, sizeof(*st));
     st->parent_pid = parent_pid;
-    signal_reset_actions(st);
+    signal_reset_actions(signal_proc_slot_task(task));
 }
 
 void signal_task_fork(sched_tcb_t *child, const sched_tcb_t *parent)
 {
     signal_state_t       *dst;
     const signal_state_t *src;
+    sigaction_t          *child_actions;
+    sigaction_t          *parent_actions;
 
     if (!child || !parent)
         return;
@@ -304,7 +318,25 @@ void signal_task_fork(sched_tcb_t *child, const sched_tcb_t *parent)
     dst->stop_reported = 0U;
     dst->stop_sig  = 0U;
     dst->active_sig  = 0U;
-    dst->parent_pid  = parent->pid;
+    dst->parent_pid  = sched_task_tgid(parent);
+    child_actions = signal_actions_for_task(child);
+    parent_actions = signal_actions_for_task(parent);
+    memcpy(child_actions, parent_actions, sizeof(signal_actions[0]));
+}
+
+void signal_task_clone_thread(sched_tcb_t *child, const sched_tcb_t *parent)
+{
+    signal_state_t       *dst;
+    const signal_state_t *src;
+
+    if (!child || !parent)
+        return;
+
+    src = &signal_state[signal_slot_task(parent)];
+    dst = &signal_state[signal_slot_task(child)];
+    memset(dst, 0, sizeof(*dst));
+    dst->blocked    = src->blocked;
+    dst->parent_pid = src->parent_pid;
 }
 
 void signal_task_reset_for_exec(sched_tcb_t *task)
@@ -322,7 +354,7 @@ void signal_task_reset_for_exec(sched_tcb_t *task)
     memset(st, 0, sizeof(*st));
     st->blocked = signal_strip_unmaskable(blocked);
     st->parent_pid = parent_pid;
-    signal_reset_actions(st);
+    signal_reset_actions(signal_proc_slot_task(task));
 }
 
 void signal_task_exit(sched_tcb_t *task)
@@ -338,7 +370,7 @@ void signal_task_exit(sched_tcb_t *task)
     st->stopped = 0U;
     st->stop_reported = 0U;
     st->stop_sig = 0U;
-    if (st->parent_pid != 0U)
+    if (st->parent_pid != 0U && sched_task_proc_refcount(task) <= 1U)
         (void)signal_send_pid(st->parent_pid, SIGCHLD);
 }
 
@@ -351,6 +383,19 @@ int signal_send_pid(uint32_t pid, int sig)
         return -EINVAL;
 
     task = sched_task_find(pid);
+    if (!task || !sched_task_is_user(task) || task->state == TCB_STATE_ZOMBIE) {
+        task = NULL;
+        for (uint32_t i = 0U; i < sched_task_count_total(); i++) {
+            sched_tcb_t *cur = sched_task_at(i);
+
+            if (!cur || !sched_task_is_user(cur) || cur->state == TCB_STATE_ZOMBIE)
+                continue;
+            if (sched_task_tgid(cur) != pid)
+                continue;
+            task = cur;
+            break;
+        }
+    }
     if (!task)
         return -ESRCH;
     if (!sched_task_is_user(task))
@@ -411,7 +456,7 @@ int signal_has_unblocked_pending(const sched_tcb_t *task)
         return 0;
 
     st = &signal_state[signal_slot_task(task)];
-    return signal_has_deliverable_pending(st);
+    return signal_has_deliverable_pending(st, task);
 }
 
 int signal_deliver_pending(exception_frame_t *frame)
@@ -434,7 +479,7 @@ int signal_deliver_pending(exception_frame_t *frame)
 
         st->pending &= ~signal_bit(sig);
 
-        act = st->actions[sig - 1];
+        act = signal_actions_for_task(current_task)[sig - 1];
         if (act.sa_handler == SIG_IGN || (act.sa_handler == SIG_DFL && signal_default_ignore(sig)))
             continue;
 
@@ -521,16 +566,12 @@ int signal_task_consume_stop_report(const sched_tcb_t *task, int *sig_out)
 
 int signal_sigaction_current(int sig, const sigaction_t *act, sigaction_t *old)
 {
-    signal_state_t *st;
-
     if (!current_task || !sched_task_is_user(current_task))
         return -EPERM;
     if (!signal_valid(sig))
         return -EINVAL;
-
-    st = &signal_state[signal_slot_task(current_task)];
     if (old)
-        *old = st->actions[sig - 1];
+        *old = signal_actions_for_task(current_task)[sig - 1];
 
     if (!act)
         return 0;
@@ -538,9 +579,9 @@ int signal_sigaction_current(int sig, const sigaction_t *act, sigaction_t *old)
     if (sig == SIGKILL || sig == SIGSTOP)
         return -EINVAL;
 
-    st->actions[sig - 1] = *act;
-    st->actions[sig - 1].sa_mask = signal_strip_unmaskable(act->sa_mask);
-    st->actions[sig - 1]._pad = 0U;
+    signal_actions_for_task(current_task)[sig - 1] = *act;
+    signal_actions_for_task(current_task)[sig - 1].sa_mask = signal_strip_unmaskable(act->sa_mask);
+    signal_actions_for_task(current_task)[sig - 1]._pad = 0U;
     return 0;
 }
 

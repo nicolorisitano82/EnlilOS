@@ -40,7 +40,7 @@ typedef struct {
 typedef struct {
     u8   in_use;
     u8   _pad0[3];
-    u32  pid;
+    u32  tgid;
     u32  parent_pid;
     u32  ns_id;
     char cwd[VFSD_IO_BYTES];
@@ -583,10 +583,10 @@ static int vfsd_namespace_resolve(vfsd_namespace_t *ns, const char *virtual_path
     return 0;
 }
 
-static vfsd_client_t *vfsd_client_find(u32 pid)
+static vfsd_client_t *vfsd_client_find(u32 tgid)
 {
     for (u32 i = 0U; i < VFSD_MAX_CLIENTS; i++) {
-        if (g_clients[i].in_use && g_clients[i].pid == pid)
+        if (g_clients[i].in_use && g_clients[i].tgid == tgid)
             return &g_clients[i];
     }
     return NULL;
@@ -617,13 +617,17 @@ static vfsd_client_t *vfsd_client_get_or_create(u32 pid)
     if (sys_vfs_boot_taskinfo_now(pid, &info) < 0)
         return NULL;
 
+    client = vfsd_client_find(info.tgid);
+    if (client)
+        return client;
+
     client = vfsd_client_alloc();
     if (!client)
         return NULL;
 
     vfsd_bzero(client, sizeof(*client));
     client->in_use = 1U;
-    client->pid = pid;
+    client->tgid = info.tgid;
     client->parent_pid = info.parent_pid;
 
     parent = vfsd_client_find(info.parent_pid);

@@ -44,6 +44,7 @@ typedef enum {
 
 typedef struct {
     uint32_t pid;
+    uint32_t tgid;
     uint32_t parent_pid;
     uint32_t pgid;
     uint32_t sid;

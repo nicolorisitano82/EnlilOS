@@ -80,6 +80,10 @@
 #define SYS_NEWFSTATAT      SYS_FSTATAT
 #define SYS_IOCTL           54
 #define SYS_UNAME           55
+#define SYS_CLONE           56
+#define SYS_GETTID          57
+#define SYS_SET_TID_ADDRESS 58
+#define SYS_EXIT_GROUP      59
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
 #define SYS_MREACT_CANCEL         82
@@ -206,6 +210,16 @@
 #define MS_BIND         4096U
 
 #define CLONE_NEWNS     0x00020000U
+#define CLONE_VM        0x00000100U
+#define CLONE_FS        0x00000200U
+#define CLONE_FILES     0x00000400U
+#define CLONE_SIGHAND   0x00000800U
+#define CLONE_THREAD    0x00010000U
+#define CLONE_SYSVSEM   0x00040000U
+#define CLONE_SETTLS    0x00080000U
+#define CLONE_PARENT_SETTID  0x00100000U
+#define CLONE_CHILD_CLEARTID 0x00200000U
+#define CLONE_CHILD_SETTID   0x01000000U
 
 /* ── lseek / openat / fcntl / ioctl ─────────────────────────────── */
 
