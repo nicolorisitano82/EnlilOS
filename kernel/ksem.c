@@ -87,6 +87,19 @@ static int ksem_has_current_task(void)
     return current_task != NULL;
 }
 
+static uint32_t ksem_owner_id_for(const sched_tcb_t *task)
+{
+    uint32_t tgid;
+
+    if (!task)
+        return 0U;
+    if (!sched_task_is_user(task))
+        return task->pid;
+
+    tgid = sched_task_tgid(task);
+    return (tgid != 0U) ? tgid : task->pid;
+}
+
 static uint64_t ksem_timeout_to_ms(uint64_t timeout_ns)
 {
     if (timeout_ns == 0ULL)
@@ -172,7 +185,7 @@ static ksem_ref_t *ksem_alloc_ref_locked(ksem_entry_t *sem)
 
         memset(ref, 0, sizeof(*ref));
         ref->active = 1U;
-        ref->owner_pid = current_task->pid;
+        ref->owner_pid = ksem_owner_id_for(current_task);
         ref->handle = ksem_next_handle++;
         ref->sem = sem;
         if (ksem_next_handle == 0U)
@@ -357,7 +370,7 @@ static int ksem_wait_common_current(ksem_t handle, uint64_t timeout_ns, int try_
         return -EPERM;
 
     flags = irq_save();
-    ref = ksem_find_ref_locked(current_task->pid, handle);
+    ref = ksem_find_ref_locked(ksem_owner_id_for(current_task), handle);
     if (!ref) {
         irq_restore(flags);
         return -ENOENT;
@@ -486,7 +499,9 @@ void ksem_task_cleanup(sched_tcb_t *task)
     }
 
     for (uint32_t i = 0U; i < KSEM_MAX_HANDLE_REFS; i++) {
-        if (ksem_refs[i].active && ksem_refs[i].owner_pid == task->pid)
+        if (ksem_refs[i].active &&
+            ksem_refs[i].owner_pid == ksem_owner_id_for(task) &&
+            (!sched_task_is_user(task) || sched_task_proc_refcount(task) <= 1U))
             ksem_drop_ref_locked(&ksem_refs[i]);
     }
 
@@ -585,7 +600,7 @@ int ksem_close_current(ksem_t handle)
         return -EPERM;
 
     irqf = irq_save();
-    ref = ksem_find_ref_locked(current_task->pid, handle);
+    ref = ksem_find_ref_locked(ksem_owner_id_for(current_task), handle);
     if (!ref) {
         irq_restore(irqf);
         return -ENOENT;
@@ -633,7 +648,7 @@ int ksem_post_current(ksem_t handle)
         return -EPERM;
 
     irqf = irq_save();
-    ref = ksem_find_ref_locked(current_task->pid, handle);
+    ref = ksem_find_ref_locked(ksem_owner_id_for(current_task), handle);
     if (!ref) {
         irq_restore(irqf);
         return -ENOENT;
@@ -695,7 +710,7 @@ int ksem_getvalue_current(ksem_t handle, int32_t *value_out)
         return -EINVAL;
 
     irqf = irq_save();
-    ref = ksem_find_ref_locked(current_task->pid, handle);
+    ref = ksem_find_ref_locked(ksem_owner_id_for(current_task), handle);
     if (!ref) {
         irq_restore(irqf);
         return -ENOENT;

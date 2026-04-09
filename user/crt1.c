@@ -7,6 +7,7 @@ typedef void (*crt_hook_t)(void);
 extern int main(int argc, char **argv, char **envp);
 extern void _init(void);
 extern void _fini(void);
+extern void __enlilos_thread_runtime_init(void) __attribute__((weak));
 
 extern crt_hook_t __preinit_array_start[];
 extern crt_hook_t __preinit_array_end[];
@@ -41,6 +42,8 @@ __attribute__((noreturn)) void _start(long argc, char **argv, char **envp, void 
 
     environ = envp;
     __enlilos_auxv = auxv;
+    if (__enlilos_thread_runtime_init)
+        __enlilos_thread_runtime_init();
 
     crt_run_hooks_forward(__preinit_array_start, __preinit_array_end);
     _init();

@@ -11,6 +11,9 @@
 #define SYS_FORK            11
 #define SYS_WAITPID         12
 #define SYS_GETDENTS        14
+#define SYS_SIGACTION       17
+#define SYS_SIGPROCMASK     18
+#define SYS_YIELD           20
 #define SYS_CHDIR           28
 #define SYS_GETCWD          29
 #define SYS_PIPE            34
@@ -34,6 +37,23 @@
 #define SYS_OPENAT          52
 #define SYS_IOCTL           54
 #define SYS_UNAME           55
+#define SYS_CLONE           56
+#define SYS_GETTID          57
+#define SYS_SET_TID_ADDRESS 58
+#define SYS_EXIT_GROUP      59
+#define SYS_FUTEX           65
+#define SYS_TGKILL          66
+#define SYS_KSEM_CREATE     85
+#define SYS_KSEM_OPEN       86
+#define SYS_KSEM_CLOSE      87
+#define SYS_KSEM_UNLINK     88
+#define SYS_KSEM_POST       89
+#define SYS_KSEM_WAIT       90
+#define SYS_KSEM_TIMEDWAIT  91
+#define SYS_KSEM_TRYWAIT    92
+#define SYS_KSEM_GETVALUE   93
+#define SYS_KSEM_ANON       94
+#define SYS_KILL            134
 
 #define MAP_FAILED_VA ((unsigned long)(-1L))
 

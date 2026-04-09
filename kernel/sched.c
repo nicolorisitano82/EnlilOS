@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "futex.h"
 #include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
@@ -1438,8 +1439,12 @@ static void sched_task_finish_exit(sched_tcb_t *task, int32_t code)
         (void)rq_remove(task, eff_prio_of(task));
     irq_restore(flags);
 
-    if (ctx && ctx->clear_child_tid_uva != 0ULL)
+    futex_task_cleanup(task);
+
+    if (ctx && ctx->clear_child_tid_uva != 0ULL) {
         sched_task_store_clear_tid(ctx, 0U);
+        (void)futex_wake_task_uaddr(task, (uintptr_t)ctx->clear_child_tid_uva, 1U);
+    }
 
     kmon_task_cleanup(task);
     ksem_task_cleanup(task);

@@ -18,12 +18,12 @@ Le milestone completate oggi coprono:
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, `mreact`, `ksem` e `kmon`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
-- **M11-02a/b**: baseline kernel per il profilo multi-thread, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, cleanup differenziato thread/processo, `clear_child_tid` e selftest `clone-thread` + `thread-lifecycle`.
+- **M11-02a/b/c/d**: baseline multi-thread completa `v1`, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond` e smoke `musl-pthread` + `musl-sem`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=36 pass=36 fail=0`.
+`SUMMARY total=39 pass=39 fail=0`.
 
 ---
 
@@ -99,6 +99,9 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `MUSLGLOB.ELF`
 - `CLONEDEMO.ELF`
 - `THREADLIFE.ELF`
+- `FUTEXDEMO.ELF`
+- `PTHREADDEMO.ELF`
+- `SEMDEMO.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
@@ -156,12 +159,18 @@ Questi target generano:
 - wrapper `toolchain/bin/aarch64-enlilos-musl-gcc`, `ar`, `ranlib`
 - smoke ELF statici musl-linked in `toolchain/smoke/*.elf`
 
-Il profilo attuale resta volutamente `static-only` lato musl/libc, ma da `M11-02a`
-il kernel ha gia' la baseline thread-group (`tgid`, `gettid`, `clone()` subset e
-stato processo condiviso) su cui chiudere `pthread` nelle milestone successive.
-Da `M11-02b`, il lifecycle thread e' gia' coerente con `set_tid_address()`,
-`exit_group()` e `tgkill()`, mentre il wake di `clear_child_tid` resta legato al
-blocco `futex` di `M11-02c`.
+Il profilo attuale resta volutamente `static-only` lato musl/libc, ma da `M11-02d`
+la bootstrap libc espone gia' `<pthread.h>`, `<signal.h>` e `<semaphore.h>`, con:
+
+- `pthread_create/join/detach/self/equal/kill/sigmask`
+- `pthread_mutex_*` e `pthread_cond_*` sopra `futex`
+- `sem_t` named/anon sopra `ksem`
+- smoke `PTHREADDEMO.ELF` e `SEMDEMO.ELF`
+
+Limite importante della `v1`: i thread figli usano ancora un piccolo stub in
+`TPIDR_EL0` per il runtime `pthread`, ma non ricevono ancora una copia completa del
+template TLS statico per `__thread`. Quindi la `v1` e' adatta a bootstrap POSIX reale,
+non ancora alla compat piena di carichi multi-thread che dipendono fortemente da TLS statico.
 
 Il `Makefile` supporta anche prefissi espliciti:
 
@@ -214,6 +223,9 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `muslglob`
 - `clonedemo`
 - `threadlife`
+- `futexdemo`
+- `pthreaddemo`
+- `semdemo`
 - `runelf /MUSLHELLO.ELF`
 - `runelf /MUSLSTDIO.ELF`
 - `runelf /MUSLMALLOC.ELF`
@@ -241,14 +253,15 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 35 casi:
+Esiste una suite di self-test kernel-side che oggi copre 39 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
 - `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`, `vfs-namespace`, `mreact-core`, `cap-core`
 - `ksem-core`, `kmon-core`, `ipc-sync`
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`, `tls-tp`, `crt-startup`
-- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`, `clone-thread`
+- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`
+- `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`
 
 La build dedicata e':
 
@@ -260,7 +273,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=36 pass=36 fail=0
+SUMMARY total=39 pass=39 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

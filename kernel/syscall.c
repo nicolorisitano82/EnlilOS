@@ -12,6 +12,7 @@
 
 #include "syscall.h"
 #include "cap.h"
+#include "futex.h"
 #include "kdebug.h"
 #include "keyboard.h"
 #include "elf_loader.h"
@@ -1759,6 +1760,37 @@ static uint64_t sys_exit_group(uint64_t args[6])
         return ERR(EINVAL);
     sched_task_exit_with_code((int32_t)args[0]);
     return 0;
+}
+
+static uint64_t sys_futex(uint64_t args[6])
+{
+    uintptr_t uaddr = (uintptr_t)args[0];
+    uint32_t  op = (uint32_t)args[1];
+    uint32_t  val = (uint32_t)args[2];
+    uintptr_t arg3 = (uintptr_t)args[3];
+    uintptr_t uaddr2 = (uintptr_t)args[4];
+    uint32_t  val3 = (uint32_t)args[5];
+    uint32_t  cmd = op & FUTEX_CMD_MASK;
+    int       rc;
+
+    switch (cmd) {
+    case FUTEX_WAIT:
+        rc = futex_wait_current(uaddr, val, arg3);
+        break;
+    case FUTEX_WAKE:
+        rc = futex_wake_current(uaddr, val);
+        break;
+    case FUTEX_REQUEUE:
+        rc = futex_requeue_current(uaddr, val, (uint32_t)arg3, uaddr2, 0, 0U);
+        break;
+    case FUTEX_CMP_REQUEUE:
+        rc = futex_requeue_current(uaddr, val, (uint32_t)arg3, uaddr2, 1, val3);
+        break;
+    default:
+        return ERR(ENOSYS);
+    }
+
+    return (rc < 0) ? ERR(-rc) : (uint64_t)(uint32_t)rc;
 }
 
 static uint64_t sys_gettimeofday(uint64_t args[6])
@@ -3574,7 +3606,7 @@ static uint64_t sys_ksem_anon(uint64_t args[6])
     ksem_t handle = KSEM_INVALID;
     int    rc;
 
-    rc = ksem_anon_current((uint32_t)args[0], 0U, &handle);
+    rc = ksem_anon_current((uint32_t)args[0], (uint32_t)args[1], &handle);
     if (rc < 0)
         return ERR(-rc);
     return (uint64_t)handle;
@@ -4020,6 +4052,7 @@ void syscall_init(void)
 {
     /* 1. Porta su line discipline + VFS bootstrap */
     signal_init();
+    futex_init();
     mreact_init();
     ksem_init();
     kmon_init();
@@ -4211,6 +4244,9 @@ void syscall_init(void)
     syscall_table[SYS_EXIT_GROUP] = (syscall_entry_t){
         sys_exit_group, 0, "exit_group"
     };
+    syscall_table[SYS_FUTEX] = (syscall_entry_t){
+        sys_futex, 0, "futex"
+    };
     syscall_table[SYS_MOUNT] = (syscall_entry_t){
         sys_mount, 0, "mount"
     };
@@ -4358,7 +4394,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 96 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
+    uart_puts("[SYSCALL] 97 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 proc slot\n");
 }
 

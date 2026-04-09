@@ -1134,7 +1134,7 @@ static void bootcli_render(void)
                       "append mkdir truncate rm mv fsync sync nsh mreactdemo jobdemo nsdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "posixdemo muslabi muslglob clonedemo threadlife crtdemo",
+                      "posixdemo muslabi muslglob clonedemo threadlife futexdemo pthreaddemo semdemo crtdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1257,6 +1257,9 @@ static void bootcli_execute_command(void)
         bootcli_push_line("muslglob  lancia un ELF che verifica fnmatch()/glob() bootstrap");
         bootcli_push_line("clonedemo lancia un ELF che verifica clone(), gettid(), VM/FS/FILES/TLS condivisi");
         bootcli_push_line("threadlife lancia un ELF che verifica set_tid_address/tgkill/exit_group");
+        bootcli_push_line("futexdemo lancia un ELF che verifica FUTEX_WAIT/WAKE/REQUEUE e join");
+        bootcli_push_line("pthreaddemo lancia un ELF che verifica pthread/mutex/cond/signal");
+        bootcli_push_line("semdemo   lancia un ELF che verifica sem_t sopra ksem");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
@@ -1548,6 +1551,36 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "futexdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/FUTEXDEMO.ELF", "/FUTEXDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "futex demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "pthreaddemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/PTHREADDEMO.ELF", "/PTHREADDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "pthread demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "semdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/SEMDEMO.ELF", "/SEMDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "sem demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "crtdemo")) {
         uint32_t pid = 0U;
         if (elf64_spawn_path("/CRTDEMO.ELF", "/CRTDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
@@ -1750,6 +1783,8 @@ static void bootcli_init(void)
     bootcli_push_line("M8-08d: prova 'muslglob' per fnmatch(), glob() e wildcard su VFS.");
     bootcli_push_line("M11-02a: prova 'clonedemo' per clone(), gettid(), CLONE_VM/FS/FILES e TPIDR_EL0 per-thread.");
     bootcli_push_line("M11-02b: prova 'threadlife' per set_tid_address(), tgkill(), clear_child_tid ed exit_group().");
+    bootcli_push_line("M11-02c: prova 'futexdemo' per FUTEX_WAIT/WAKE/REQUEUE e join via clear_child_tid.");
+    bootcli_push_line("M11-02d: prova 'pthreaddemo' e 'semdemo' per pthread/mutex/cond/signal e sem_t POSIX.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");

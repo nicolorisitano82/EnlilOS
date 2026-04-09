@@ -401,6 +401,33 @@ static int selftest_case_rootfs(void)
              "/THREADLIFE.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/THREADLIFE.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/FUTEXDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /FUTEXDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /FUTEXDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/FUTEXDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/FUTEXDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/PTHREADDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /PTHREADDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /PTHREADDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/PTHREADDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/PTHREADDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/SEMDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /SEMDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /SEMDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/SEMDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/SEMDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -1051,6 +1078,63 @@ static int selftest_case_thread_lifecycle(void)
     ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 17) == 0,
              "THREADLIFE exit code non e' 17");
     return st_expect_text_file(case_name, "/data/THREADLIFE.TXT", expected, 1);
+}
+
+static int selftest_case_futex_core(void)
+{
+    static const char case_name[] = "futex-core";
+    static const char expected[] =
+        "wait-wake-ok\n"
+        "requeue-ok\n"
+        "cmp-requeue-ok\n"
+        "join-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/FUTEXDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup FUTEXDEMO.TXT fallita");
+
+    if (st_run_user_path(case_name, "/FUTEXDEMO.ELF", 4000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/FUTEXDEMO.TXT", expected, 1);
+}
+
+static int selftest_case_musl_pthread(void)
+{
+    static const char case_name[] = "musl-pthread";
+    static const char expected[] =
+        "mutex-cond-ok\n"
+        "join-ok\n"
+        "detach-ok\n"
+        "signal-ok\n"
+        "cwd-share-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/PTHREADDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup PTHREADDEMO.TXT fallita");
+
+    if (st_run_user_path(case_name, "/PTHREADDEMO.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/PTHREADDEMO.TXT", expected, 1);
+}
+
+static int selftest_case_musl_sem(void)
+{
+    static const char case_name[] = "musl-sem";
+    static const char expected[] =
+        "unnamed-ok\n"
+        "named-ok\n"
+        "timeout-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/SEMDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup SEMDEMO.TXT fallita");
+
+    if (st_run_user_path(case_name, "/SEMDEMO.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/SEMDEMO.TXT", expected, 1);
 }
 
 static int selftest_case_vfsd(void)
@@ -1897,6 +1981,9 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-abi-core", selftest_case_musl_abi },
     { "clone-thread", selftest_case_clone_thread },
     { "thread-lifecycle", selftest_case_thread_lifecycle },
+    { "futex-core", selftest_case_futex_core },
+    { "musl-pthread", selftest_case_musl_pthread },
+    { "musl-sem", selftest_case_musl_sem },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },

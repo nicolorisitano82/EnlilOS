@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -115,6 +116,11 @@ pid_t getpid(void)
     return (pid_t)user_svc0(SYS_GETPID);
 }
 
+pid_t gettid(void)
+{
+    return (pid_t)user_svc0(SYS_GETTID);
+}
+
 pid_t getppid(void)
 {
     return (pid_t)user_svc0(SYS_GETPPID);
@@ -143,6 +149,21 @@ gid_t getegid(void)
 int gettimeofday(struct timeval *tv, void *tz)
 {
     return (int)libc_set_errno(user_svc2(SYS_GETTIMEOFDAY, (long)tv, (long)tz));
+}
+
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old)
+{
+    return (int)libc_set_errno(user_svc3(SYS_SIGACTION, sig, (long)act, (long)old));
+}
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *old)
+{
+    return (int)libc_set_errno(user_svc3(SYS_SIGPROCMASK, how, (long)set, (long)old));
+}
+
+int kill(pid_t pid, int sig)
+{
+    return (int)libc_set_errno(user_svc2(SYS_KILL, pid, sig));
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem)
@@ -220,24 +241,24 @@ pid_t waitpid(pid_t pid, int *status, int options)
 
 void _Exit(int status)
 {
-    user_svc_exit(status, SYS_EXIT);
+    user_svc_exit(status, SYS_EXIT_GROUP);
 }
 
 void _exit(int status)
 {
-    user_svc_exit(status, SYS_EXIT);
+    user_svc_exit(status, SYS_EXIT_GROUP);
 }
 
 void exit(int status)
 {
-    user_svc_exit(status, SYS_EXIT);
+    user_svc_exit(status, SYS_EXIT_GROUP);
 }
 
 void abort(void)
 {
     static const char msg[] = "abort\n";
     (void)write(STDERR_FILENO, msg, sizeof(msg) - 1U);
-    user_svc_exit(127, SYS_EXIT);
+    user_svc_exit(127, SYS_EXIT_GROUP);
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)

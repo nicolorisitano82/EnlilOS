@@ -1210,7 +1210,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime nel selftest completo `SUMMARY total=36 pass=36 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=39 pass=39 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1243,8 +1243,8 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
 **Studio di implementazione dettagliato:** vedi [M11-02.md](M11-02.md)
 
 **Stato reale ad oggi:**
-- `M11-02a` e `M11-02b` sono completate `v1`
-- `M11-02c`, `M11-02d`, `M11-02e` restano aperte
+- `M11-02a`, `M11-02b`, `M11-02c` e `M11-02d` sono completate `v1`
+- `M11-02e` resta aperta come hardening/test multi-thread esteso
 - baseline kernel gia' presente:
   - `getpid()` = `tgid`, nuova `gettid()`
   - `clone()` subset thread-oriented
@@ -1257,6 +1257,13 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
   - `clear_child_tid` con clear affidabile su exit normale e signal-directed terminate
   - processo waitable solo dopo l'uscita dell'ultimo thread
   - selftest `thread-lifecycle` e demo `/THREADLIFE.ELF`
+- futex core gia' presente:
+  - `FUTEX_WAIT`
+  - `FUTEX_WAKE`
+  - `FUTEX_REQUEUE`
+  - `FUTEX_CMP_REQUEUE`
+  - wake su `clear_child_tid`
+  - selftest `futex-core` e demo `/FUTEXDEMO.ELF`
 
 **Scope reale consigliato per la `v1`:**
 - `pthread_create`
@@ -1284,7 +1291,6 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
   - `clone`
   - `gettid`
 - ancora aperti:
-  - `futex`
   - `mprotect` minimale per stack guard page thread
 
 **Proposta numerazione syscall coerente con lo spazio libero attuale:**
@@ -1303,7 +1309,7 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
 
 | Nr | Nome | RT-safe | Note |
 |----|------|---------|------|
-| 65 | `futex` | Sì (solo `WAKE`) | `WAIT/WAKE/REQUEUE` base per mutex, condvar e join |
+| 65 | `futex` | Parziale (`WAKE/REQUEUE`) | `WAIT/WAKE/REQUEUE` base per mutex, condvar e join |
 
 Implementazione kernel:
 - Hash table statica di 256 bucket su `(uaddr & 0xFF) * sizeof(futex_bucket_t)`
@@ -1332,8 +1338,8 @@ Implementazione kernel:
 - selftest `clone-thread` verde, demo `/CLONEDEMO.ELF` disponibile dalla boot console
 
 **Limiti dichiarati della v1:**
-- nessun wake futex su `clear_child_tid` finche' non arriva `M11-02c`
-- niente `pthread_join()/detach()` finche' non arriva `M11-02c/d`
+- limite storico ora chiuso da `M11-02d`: `pthread_join()/detach()` non andavano
+  modellate sopra `waitpid()`, ma sopra `clear_child_tid + futex`
 - i metadati di processo zombie restano vivi fino al reap per non rompere
   `waitpid()`, `SIGCHLD` e job control
 
@@ -1350,28 +1356,69 @@ Implementazione kernel:
 - selftest `thread-lifecycle`
 
 **Note v1:**
-- il wake su `clear_child_tid` non c'e' ancora: arriva con `futex` in `M11-02c`
 - `pthread_join()` non va ancora costruita sopra `waitpid()`: la base corretta resta
   `CLONE_CHILD_CLEARTID + set_tid_address() + futex(FUTEX_WAIT)`
 - `exit_group()` termina il resto del thread-group e fa convergere il codice finale
   del processo sul leader waitable
 
 **M11-02c · Futex core**
+- **Stato attuale:** completata `v1`
 - `WAIT`
 - `WAKE`
-- `REQUEUE` / `CMP_REQUEUE`
+- `REQUEUE`
+- `CMP_REQUEUE`
+- hash table statica per bucket, waiter senza allocazioni dinamiche nel hot path
+- key `(proc_slot, uaddr)` coerente col profilo thread shared-mm attuale
+- wake su `clear_child_tid` integrato nel path di uscita thread
+- demo `/FUTEXDEMO.ELF`
+- selftest `futex-core`
+
+**Note v1:**
+- `FUTEX_PRIVATE_FLAG` e' accettato come hint ma non cambia la semantica
+- timeout `WAIT`, `WAIT_BITSET`, robust list e `FUTEX_LOCK_PI` restano fuori scope
+- il supporto cross-process shared futex non e' ancora nel perimetro: la `v1`
+  e' keyed per processo (`proc_slot`) e copre bene thread dello stesso address space
 
 **M11-02d · musl `pthread` + `sem_t`**
-- `pthread_create/join/detach`
-- mutex/condvar sopra `futex`
-- `sem_t` sopra `ksem`
+- **Stato attuale:** completata `v1`
+- header bootstrap:
+  - `<pthread.h>`
+  - `<signal.h>`
+  - `<semaphore.h>`
+- `pthread_create/join/detach/self/equal/kill/sigmask`
+- `pthread_mutex_*` baseline sopra `futex`
+- `pthread_cond_*` baseline sopra `futex`
+- `sem_t` named/anon sopra `ksem`
+- hook bootstrap in `crt1` per inizializzare il runtime thread-aware
+- demo `/PTHREADDEMO.ELF`
+- demo `/SEMDEMO.ELF`
+- selftest `musl-pthread`
+- selftest `musl-sem`
+
+**Note v1:**
+- `pthread_join()` usa il path corretto `clear_child_tid + futex`, non `waitpid()`
+- gli handle `ksem` sono condivisi per `tgid`, cosi' `sem_t` funziona tra thread dello
+  stesso processo senza duplicare ref per `tid`
+- gotcha chiuso nel bring-up: `sem_timedwait()` vuole un `abstime` valido/non negativo;
+  nei selftest iniziali il tempo era vicino a boot `0s`, quindi sottrarre `1s` produceva
+  correttamente `EINVAL`, non `ETIMEDOUT`
+- limite aperto: i thread figli usano ancora uno stub minimo in `TPIDR_EL0`; la copia
+  completa del template TLS statico per `__thread` multi-thread resta fuori dalla `v1`
 
 **M11-02e · Selftest e smoke multi-thread**
-- selftest kernel `clone-thread`
-- selftest kernel `futex-core`
-- demo `PTHREADDEMO.ELF`
-- demo `SEMDEMO.ELF`
-- demo `TLSMTDEMO.ELF`
+- **Stato attuale:** parzialmente implementata
+- gia' presenti:
+  - selftest kernel `clone-thread`
+  - selftest kernel `thread-lifecycle`
+  - selftest kernel `futex-core`
+  - selftest user-space `musl-pthread`
+  - selftest user-space `musl-sem`
+  - demo `PTHREADDEMO.ELF`
+  - demo `SEMDEMO.ELF`
+- resta consigliato:
+  - demo `TLSMTDEMO.ELF`
+  - stress test multi-join / multi-condvar
+  - coverage esplicita su `__thread` cross-thread e TLS statico completo
 
 ---
 
@@ -2900,7 +2947,7 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 1. **M8-08e..f** build system + integrazione arksh — completa il porting della shell di default dopo `glob/fnmatch`
 2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
-3. **M11-02c** futex core — aggiunge `WAIT/WAKE/REQUEUE` e sblocca il `pthread_join()` vero
+3. **M11-02e** hardening thread/TLS multi-thread — chiude il residuo reale dopo `pthread`/`sem_t` v1
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -2968,7 +3015,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `36/36` |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `37/37` |
 | 16 | **M8-08e..f** CMake + integrazione | Completa arksh porting dopo pipe/termios/libc e wildcard bootstrap |
 | 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
 
@@ -2986,7 +3033,7 @@ Python, server applicativi.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a+b` completate v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `clone-thread`, `thread-lifecycle`). Restano `M11-02c..e` |
+| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a+b+c+d` completate v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `futex WAIT/WAKE/REQUEUE`, wrapper musl `pthread`/`sem_t`, `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`). Resta `M11-02e` per hardening/TLS multi-thread completo |
 | 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
 | 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |

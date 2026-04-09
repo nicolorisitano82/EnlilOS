@@ -84,6 +84,7 @@
 #define SYS_GETTID          57
 #define SYS_SET_TID_ADDRESS 58
 #define SYS_EXIT_GROUP      59
+#define SYS_FUTEX           65
 #define SYS_TGKILL          66
 #define SYS_MREACT_SUBSCRIBE      80
 #define SYS_MREACT_WAIT           81
@@ -221,6 +222,15 @@
 #define CLONE_PARENT_SETTID  0x00100000U
 #define CLONE_CHILD_CLEARTID 0x00200000U
 #define CLONE_CHILD_SETTID   0x01000000U
+
+/* ── futex ─────────────────────────────────────────────────────── */
+
+#define FUTEX_WAIT          0
+#define FUTEX_WAKE          1
+#define FUTEX_REQUEUE       3
+#define FUTEX_CMP_REQUEUE   4
+#define FUTEX_PRIVATE_FLAG  128
+#define FUTEX_CMD_MASK      127
 
 /* ── lseek / openat / fcntl / ioctl ─────────────────────────────── */
 

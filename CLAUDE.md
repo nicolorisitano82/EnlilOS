@@ -18,7 +18,7 @@ tutto ogni sessione.
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
   - `make musl-smoke` — compila i demo statici musl-linked
-- Stato validato corrente: `SUMMARY total=36 pass=36 fail=0`
+- Stato validato corrente: `SUMMARY total=39 pass=39 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -143,6 +143,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 39–55   ABI minima musl v1 (getpid/getppid/gettimeofday/nanosleep/uids/
          lseek/readv/writev/fcntl/openat/fstatat/ioctl/uname)
 56–59   baseline threading (clone/gettid/set_tid_address/exit_group)
+65–66   futex + tgkill
 60–64   capability (cap_alloc/cap_send/cap_revoke/cap_derive/cap_query)
 80–84   mreact (subscribe/wait/cancel/subscribe_all/subscribe_any)
 85–94   ksem (create/open/close/unlink/post/wait/timedwait/trywait/getvalue/anon)
@@ -328,12 +329,12 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
   esce. Se azzeri il `proc_slot` troppo presto, rompi `waitpid()`, `SIGCHLD`,
   job control e demo come `nsdemo`/`musl-forkexec`. La parte da rilasciare subito e'
   l'`mm`; i metadati zombie devono restare vivi fino al reap.
-- `CLONE_CHILD_CLEARTID` in questa fase prepara il clear affidabile in memoria
-  utente; il wake via `futex` resta nel perimetro di `M11-02c`.
+- `CLONE_CHILD_CLEARTID` oggi chiude il ciclo completo solo insieme al futex core
+  di `M11-02c`: clear in memoria utente + wake del waiter.
 - Validazione attuale:
   - selftest `clone-thread`
   - demo `/CLONEDEMO.ELF`
-  - suite completa `36/36`
+  - suite completa `39/39`
 
 ---
 
@@ -356,12 +357,74 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - `tgkill(tgid, tid, sig)` e' il path corretto per segnali thread-directed. Va usato
   anche per eccezioni sincrone del task EL0 corrente.
 - `clear_child_tid` oggi fa solo il clear affidabile in memoria utente. Il wake dei
-  waiter verra' aggiunto con `futex` in `M11-02c`; non tentare di modellare
-  `pthread_join()` sopra `waitpid()`.
+  waiter viene chiuso da `M11-02c`; non tentare comunque di modellare
+  `pthread_join()` sopra `waitpid()`, perche' il path corretto resta `futex`.
 - Validazione attuale:
   - selftest `thread-lifecycle`
   - demo `/THREADLIFE.ELF`
-  - suite completa `36/36`
+  - suite completa `39/39`
+
+---
+
+## Futex core (`M11-02c`)
+
+**File**: [kernel/futex.c](kernel/futex.c), [include/futex.h](include/futex.h),
+[kernel/syscall.c](kernel/syscall.c), [kernel/sched.c](kernel/sched.c),
+[user/futex_demo.c](user/futex_demo.c)
+
+- `futex` v1 supporta `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_REQUEUE`,
+  `FUTEX_CMP_REQUEUE`. `FUTEX_PRIVATE_FLAG` e' accettato come hint.
+- La chiave non e' solo `uaddr`: e' `(proc_slot, uaddr)`. Questo e' voluto:
+  la v1 copre bene thread dello stesso processo/address-space e non promette
+  ancora il caso cross-process shared mapping.
+- I waiter vivono in un array statico per-task, senza allocazioni dinamiche nel
+  path caldo. Se un thread esce mentre e' bloccato su futex, `futex_task_cleanup()`
+  lo rimuove dalla bucket list.
+- Il wake su `clear_child_tid` avviene nel path di uscita in `sched_task_finish_exit()`.
+  Questo chiude la base necessaria a costruire `pthread_join()` sopra futex.
+- Timeout, `WAIT_BITSET`, robust futex list e `FUTEX_LOCK_PI` restano fuori scope
+  di questa fase.
+- Validazione attuale:
+  - selftest `futex-core`
+  - demo `/FUTEXDEMO.ELF`
+  - suite completa `39/39`
+
+---
+
+## musl `pthread` + `sem_t` bootstrap (`M11-02d`)
+
+**File**: [toolchain/enlilos-musl/src/pthread.c](toolchain/enlilos-musl/src/pthread.c),
+[toolchain/enlilos-musl/src/semaphore.c](toolchain/enlilos-musl/src/semaphore.c),
+[toolchain/enlilos-musl/include/pthread.h](toolchain/enlilos-musl/include/pthread.h),
+[toolchain/enlilos-musl/include/semaphore.h](toolchain/enlilos-musl/include/semaphore.h),
+[toolchain/enlilos-musl/include/signal.h](toolchain/enlilos-musl/include/signal.h),
+[user/crt1.c](user/crt1.c), [kernel/ksem.c](kernel/ksem.c)
+
+- `crt1` chiama debolmente `__enlilos_thread_runtime_init()` prima dei costruttori:
+  serve per bootstrapare il thread principale senza imporre il runtime pthread ai
+  binari che non lo usano.
+- Il runtime `pthread` v1 usa il primo word dello stub puntato da `TPIDR_EL0` per
+  stashare il puntatore al `pthread_t` corrente. I thread figli vengono lanciati con
+  `CLONE_SETTLS` e uno stub minimo dedicato.
+- `pthread_join()` non usa `waitpid()`: aspetta il `clear_child_tid` tramite `futex`.
+- `pthread_mutex_*` e `pthread_cond_*` sono chiusi sopra `futex`; `sem_t` named/anon
+  e' chiuso sopra `ksem`.
+- Gli handle `ksem` per task user-space devono essere keyed per `tgid`, non per `tid`.
+  Se restano keyed per thread, i semafori anonimi/named creati da un thread non sono
+  visibili ai sibling thread dello stesso processo.
+- `sem_timedwait()` usa `abstime` assoluto. Poiche' oggi `gettimeofday()` e' vicino al
+  boot time e puo' partire da `0s`, un test che costruisce `past = now - 1s` puo'
+  generare correttamente `EINVAL` se va sotto zero; per ottenere `ETIMEDOUT` il deadline
+  scaduto deve restare valido/non negativo.
+- Limitazione onesta della `v1`: i thread figli **non** ricevono ancora una copia
+  completa del template TLS statico per `__thread`. Il runtime `pthread` e' usabile per
+  bootstrap POSIX reale, ma il caso TLS multi-thread completo resta lavoro di `M11-02e`.
+- Validazione attuale:
+  - selftest `musl-pthread`
+  - selftest `musl-sem`
+  - demo `/PTHREADDEMO.ELF`
+  - demo `/SEMDEMO.ELF`
+  - suite completa `39/39`
 
 ---
 
@@ -491,6 +554,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 34. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
 35. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
 36. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
+37. `futex-core` — `FUTEX_WAIT/WAKE/REQUEUE/CMP_REQUEUE` + join base
 
 ### Helper macro
 ```c
@@ -507,17 +571,17 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-09)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01`, `M11-02a/b` e `M8-08d` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01`, `M11-02a/b/c/d` e `M8-08d` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=36 pass=36 fail=0
+SUMMARY total=39 pass=39 fail=0
 ```
 
 **Prossime priorità**:
 1. M8-08e..f build system + integrazione arksh
 2. M10-01 VirtIO network driver
-3. M11-02c futex core
+3. M11-02e hardening thread/TLS multi-thread
 4. M11-03 dynamic linker user-space / `.so`
 5. M11-05 Linux compatibility layer
 
