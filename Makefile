@@ -112,6 +112,16 @@ USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_CRT_EMBEDOBJS) $(USER_DY
 MUSL_ROOT             = toolchain/enlilos-musl
 MUSL_BUILD            = toolchain/build/musl
 MUSL_SYSROOT          = toolchain/sysroot
+ARKSH_DIR            ?= $(CURDIR)/arksh
+ARKSH_BUILD_DIR      ?= toolchain/build/arksh
+ARKSH_COMPAT_DIR      = compat/arksh
+ARKSH_TOOLCHAIN_FILE  = tools/enlilos-aarch64.cmake
+ARKSH_SMOKE_DIR       = toolchain/cmake-smoke
+ARKSH_SMOKE_BUILD     = toolchain/build/arksh-smoke
+ARKSH_SMOKE_CACHE     = $(ARKSH_SMOKE_BUILD)/CMakeCache.txt
+ARKSH_SMOKE_ELF       = $(ARKSH_SMOKE_BUILD)/arkshsmoke.elf
+ARKSH_BOOT_ELF        = toolchain/smoke/arksh_boot.elf
+ARKSH_SELFTEST_ELF    = toolchain/smoke/arksh_selftest.elf
 MUSL_SYSROOT_INC      = $(MUSL_SYSROOT)/usr/include
 MUSL_SYSROOT_LIB      = $(MUSL_SYSROOT)/usr/lib
 MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
@@ -158,10 +168,16 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_fork_exec.c \
                         toolchain/smoke/musl_pipe_termios.c \
                         toolchain/smoke/musl_glob_fnmatch.c \
+                        toolchain/smoke/arksh_boot.c \
                         toolchain/smoke/musl_pthread.c \
                         toolchain/smoke/musl_semaphore.c \
                         toolchain/smoke/musl_tls_mt.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
+ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
+                        -DCMAKE_BUILD_TYPE=Release \
+                        -DARKSH_STATIC=ON \
+                        -DARKSH_PLUGINS=OFF \
+                        -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -190,7 +206,7 @@ PASS1_SELFTEST_KERNEL = enlil-selftest.pass1.elf
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke arksh-configure arksh-build arksh-smoke
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -258,14 +274,50 @@ $(MUSL_SYSROOT_STAMP): $(MUSL_HEADERS) $(MUSL_LIBC_A) \
 	@mkdir -p $(dir $@)
 	@touch $@
 
+$(ARKSH_SMOKE_CACHE): $(ARKSH_SMOKE_DIR)/CMakeLists.txt $(ARKSH_TOOLCHAIN_FILE) \
+                      $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC) Makefile
+	env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS \
+	    cmake -S $(ARKSH_SMOKE_DIR) -B $(ARKSH_SMOKE_BUILD) \
+	          -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
+	          -DCMAKE_BUILD_TYPE=Release \
+	          -DCMAKE_EXE_LINKER_FLAGS= \
+	          -DCMAKE_MODULE_LINKER_FLAGS= \
+	          -DCMAKE_SHARED_LINKER_FLAGS=
+
+$(ARKSH_SMOKE_ELF): $(ARKSH_SMOKE_CACHE) $(ARKSH_SMOKE_DIR)/main.c \
+                    $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC) $(ARKSH_TOOLCHAIN_FILE)
+	cmake --build $(ARKSH_SMOKE_BUILD) --target arkshsmoke
+
 musl-sysroot: $(MUSL_SYSROOT_STAMP)
 	@echo "Sysroot bootstrap pronta in $(MUSL_SYSROOT)"
 
 toolchain/smoke/%.elf: toolchain/smoke/%.c $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
 	$(MUSL_WRAPPER_GCC) -O2 -o $@ $<
 
+$(ARKSH_SELFTEST_ELF): toolchain/smoke/arksh_boot.c $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
+	$(MUSL_WRAPPER_GCC) -O2 -DARKSH_BOOT_SELFTEST -o $@ $<
+
 musl-smoke: $(MUSL_SMOKE_ELFS)
 	@echo "Smoke test buildati: $(MUSL_SMOKE_ELFS)"
+
+arksh-configure: $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC) $(ARKSH_TOOLCHAIN_FILE)
+	@if [ ! -d "$(ARKSH_DIR)" ]; then \
+		echo "arksh-configure: sorgente arksh non trovato in $(ARKSH_DIR)"; \
+		echo "  imposta ARKSH_DIR=/percorso/arksh oppure clona il repo in ./arksh"; \
+		exit 1; \
+	fi
+	env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS \
+	    cmake -S "$(ARKSH_DIR)" -B "$(ARKSH_BUILD_DIR)" \
+	          -DCMAKE_EXE_LINKER_FLAGS= \
+	          -DCMAKE_MODULE_LINKER_FLAGS= \
+	          -DCMAKE_SHARED_LINKER_FLAGS= \
+	          $(ARKSH_CMAKE_FLAGS)
+
+arksh-build: arksh-configure
+	cmake --build "$(ARKSH_BUILD_DIR)"
+
+arksh-smoke: $(ARKSH_SMOKE_ELF)
+	@echo "Smoke CMake/arksh pronta: $(ARKSH_SMOKE_ELF)"
 
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
@@ -292,14 +344,30 @@ user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
 
-$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS)
+$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) \
+                $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) $(ARKSH_SMOKE_ELF) \
+                $(ARKSH_SELFTEST_ELF)
 	python3 tools/mkinitrd.py $@ \
 		README.TXT=initrd/README.TXT \
 		BOOT.TXT=initrd/BOOT.TXT \
+		dir:bin \
 		dir:dev \
 		dir:data \
+		dir:etc \
+		dir:home \
+		dir:home/user \
+		dir:home/user/.config \
+		dir:home/user/.config/arksh \
+		dir:home/user/.local \
+		dir:home/user/.local/state \
+		dir:home/user/.local/state/arksh \
 		dir:sysroot \
-		INIT.ELF=user/nsh.elf \
+		dir:usr \
+		dir:usr/bin \
+		dir:usr/lib \
+		dir:usr/lib/arksh \
+		dir:usr/lib/arksh/plugins \
+		INIT.ELF=$(ARKSH_BOOT_ELF) \
 		DEMO.ELF=user/demo.elf \
 		EXEC1.ELF=user/execve_demo.elf \
 		EXEC2.ELF=user/execve_target.elf \
@@ -329,6 +397,12 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
+		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
+		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
+		bin/arksh=$(ARKSH_BOOT_ELF) \
+		bin/nsh=user/nsh.elf \
+		etc/arkshrc=initrd/arkshrc \
+		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf
@@ -511,5 +585,5 @@ clean:
 	      $(PASS1_KERNEL) $(PASS1_SELFTEST_KERNEL) \
 	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO) \
 	      $(KSYMS_DATA) $(KSYMS_SELFTEST_DATA) $(MUSL_SMOKE_ELFS)
-	rm -rf $(MUSL_BUILD) $(MUSL_SYSROOT)
+	rm -rf $(MUSL_BUILD) $(MUSL_SYSROOT) $(ARKSH_BUILD_DIR) $(ARKSH_SMOKE_BUILD)
 	@echo "Clean completato."

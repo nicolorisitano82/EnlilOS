@@ -18,7 +18,10 @@ tutto ogni sessione.
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
   - `make musl-smoke` — compila i demo statici musl-linked
-- Stato validato corrente: `SUMMARY total=40 pass=40 fail=0`
+  - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
+  - `make arksh-configure ARKSH_DIR=...` — configura un checkout esterno di `arksh`
+  - `make arksh-build ARKSH_DIR=...` — compila un checkout esterno di `arksh`
+- Stato validato corrente: `SUMMARY total=42 pass=42 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -38,6 +41,7 @@ drivers/       — uart, keyboard, mouse, blk, framebuffer, ane/, gpu/
 user/          — programmi EL0 (demo, nsh, vfsd, blkd, ecc.)
 tools/         — gen_ksyms.py e altri script di build
 toolchain/     — sysroot/bootstrap libc/wrapper `aarch64-enlilos-musl-*`
+compat/        — shim/reference layer per porting esterni (`arksh`)
 ```
 
 ---
@@ -55,9 +59,10 @@ PRIO_LOW    = 200
 PRIO_IDLE   = 255  // task idle, sempre READY
 ```
 
-- `SCHED_MAX_TASKS = 64`
-- Nota pratica: il pool task non ricicla ancora i TCB zombie; la suite completa ora
-  supera 32 task cumulativi, quindi il valore 64 è voluto e allineato ai log runtime.
+- `SCHED_MAX_TASKS = 96`
+- Nota pratica: il pool task non ricicla ancora i TCB zombie; con `M8-08f` la suite
+  completa sale a `42/42` e supera anche il vecchio limite cumulativo di 64 task.
+  Il valore 96 è intenzionale e allineato alla crescita del bring-up userspace.
 
 ### TCB (`sched_tcb_t`) — esattamente 64 byte, layout fisso
 ```
@@ -286,6 +291,21 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - I smoke test runtime attuali sono:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`,
   `MUSLGLOB.ELF`.
+- `tools/enlilos-aarch64.cmake` è ora usato anche per progetti CMake esterni:
+  definisce `ENLILOS=1`, usa il wrapper `aarch64-enlilos-musl-*` e il sysroot
+  bootstrap in-tree.
+- Gotcha importante emerso con `M8-08e`: se si lancia CMake da dentro il `Makefile`
+  senza pulire l'ambiente, i flag kernel-side (`-T linker.ld -nostdlib`) trapelano
+  nel progetto esterno e il link fallisce. I target `arksh-configure` e `arksh-smoke`
+  devono quindi eseguire `env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS`.
+- `M8-08e` non vendorizza `arksh`: il sorgente resta esterno e si passa via
+  `ARKSH_DIR=/percorso/arksh`. In-tree restano il compat shim di riferimento
+  `compat/arksh/enlilos.c` e lo smoke CMake `toolchain/cmake-smoke/`.
+- Validazione `M8-08e`:
+  - target host-side `make arksh-smoke`
+  - ELF runtime `/ARKSHSMK.ELF`
+  - comando boot `arkshsmoke`
+  - selftest `arksh-toolchain`
 - Bug reale emerso dal bring-up: `fd_pipe_read()` non deve tentare di riempire tutto
   il buffer richiesto su una pipe. Deve tornare appena ha letto i byte disponibili,
   altrimenti `musl-pipe` resta bloccato dopo aver consumato il payload presente.
@@ -334,7 +354,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Validazione attuale:
   - selftest `clone-thread`
   - demo `/CLONEDEMO.ELF`
-  - suite completa `39/39`
+  - suite completa `42/42`
 
 ---
 
@@ -362,7 +382,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Validazione attuale:
   - selftest `thread-lifecycle`
   - demo `/THREADLIFE.ELF`
-  - suite completa `39/39`
+  - suite completa `42/42`
 
 ---
 
@@ -387,7 +407,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Validazione attuale:
   - selftest `futex-core`
   - demo `/FUTEXDEMO.ELF`
-  - suite completa `39/39`
+  - suite completa `42/42`
 
 ---
 
@@ -424,7 +444,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
   - selftest `musl-sem`
   - demo `/PTHREADDEMO.ELF`
   - demo `/SEMDEMO.ELF`
-  - suite completa `40/40`
+  - suite completa `42/42`
 
 ---
 
@@ -452,7 +472,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Validazione attuale:
   - selftest `tls-mt`
   - demo `/TLSMTDEMO.ELF`
-  - suite completa `40/40`
+  - suite completa `42/42`
 
 ---
 
@@ -515,7 +535,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
   - L1[1]: RAM  0x40000000–0x7FFFFFFF (Normal WB)
 - **Kernel heap**: named typed caches (`task_cache` 64B, `port_cache` 64B, `ipc_cache` 512B)
 - Stack task kernel: 16 KiB (`TASK_STACK_ORDER = 2`), allocata con `phys_alloc_pages()`
-- `TASK_STACK_SIZE = 16384`, `SCHED_MAX_TASKS = 64`
+- `TASK_STACK_SIZE = 16384`, `SCHED_MAX_TASKS = 96`
 
 ---
 
@@ -597,21 +617,21 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-09)
+## Milestone completate (stato 2026-04-10)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a M9-04, `M11-01`, `M11-02a/b/c/d` e `M8-08d` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e` e `M8-08d/e/f` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=39 pass=39 fail=0
+SUMMARY total=42 pass=42 fail=0
 ```
 
 **Prossime priorità**:
-1. M8-08e..f build system + integrazione arksh
+1. M11-03 dynamic linker user-space / `.so`
 2. M10-01 VirtIO network driver
-3. M11-02e hardening thread/TLS multi-thread
-4. M11-03 dynamic linker user-space / `.so`
-5. M11-05 Linux compatibility layer
+3. M8-08g layout tastiera multipli (`us`/`it`)
+4. M11-05 Linux compatibility layer
+5. M12-01 Wayland server minimale
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
@@ -627,8 +647,26 @@ SUMMARY total=39 pass=39 fail=0
 - `getcwd()` / `chdir()` non devono mantenere uno stato parallelo nel kernel: la source of
   truth e' `vfsd`, coerente con i namespace mount di `M9-04`.
 - L'environment bootstrap dei task lanciati con `elf64_spawn_path()` e':
-  `PATH=/:/dev:/data:/sysroot`, `HOME=/`, `PWD=/`, `TERM=enlilos`, `USER=root`.
-  `execve()` invece deve preservare l'`envp` passato dal caller.
+  `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`, `SHELL=/bin/arksh`,
+  `TERM=vt100`, `USER=user`.
+- Dopo `M8-08f`, la login shell di default passa da `/bin/arksh`, ma il binary in
+  initrd e' un launcher/static bridge, non ancora il port completo del repo esterno.
+  Se `/usr/bin/arksh` o `/usr/bin/arksh.real` non esistono, il fallback corretto e'
+  `/bin/nsh`.
+- `boot_prepare_login_layout()` in `kernel/main.c` e' il punto che prepara layout
+  persistente e file seed su `/data/home/user`:
+  `.config/arksh/arkshrc` e `.local/state/arksh/history`.
+- Gotcha operativo importante di `M8-08f`: il bind `/data/home -> /home` esiste e la
+  login shell fa `chdir("/home/user")`, ma l'accesso EL0 diretto al file history via
+  `/home/user/.local/state/arksh/history` resta timing-sensitive. Il selftest valido
+  controlla quindi il backing store kernel-side su `/data/home/...` e usa `/ARKSHBOOT.ELF`
+  solo per verificare env/cwd/rc/bin-layout.
+- Validazione `M8-08f`:
+  - comando boot `arksh`
+  - ELF `/ARKSHBOOT.ELF`
+  - selftest `arksh-login`
+  - suite completa `42/42`
+- `execve()` invece deve preservare l'`envp` passato dal caller.
 - `termios` e' una v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`,
   `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
 - `VMIN/VTIME` non hanno ancora semantica POSIX completa e il termios state non e'

@@ -8,6 +8,8 @@ disk.img
 user/*.so
 kernel/ksyms_data.c
 kernel/ksyms_data.selftest.c
+toolchain/build/
+toolchain/sysroot/
 
 # macOS
 .DS_Store

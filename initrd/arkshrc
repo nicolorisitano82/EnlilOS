@@ -1,0 +1,7 @@
+# EnlilOS arksh global rc (v1)
+# Questo file e' il fallback read-only dell'initrd.
+PATH=/bin:/usr/bin
+HOME=/home/user
+SHELL=/bin/arksh
+TERM=vt100
+

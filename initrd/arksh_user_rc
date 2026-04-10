@@ -1,0 +1,4 @@
+# ~/.config/arksh/arkshrc
+# Fallback utente read-only presente nell'initrd.
+# Se /data/home e' disponibile, EnlilOS usa e rende persistente
+# /home/user/.config/arksh/arkshrc tramite bind mount.

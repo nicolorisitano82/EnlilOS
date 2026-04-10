@@ -572,7 +572,7 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 
 ---
 
-### ⬜ M8-08 · Porting arksh — Shell di Default EnlilOS
+### 🟨 M8-08 · Porting arksh — Shell di Default EnlilOS
 **Priorità:** ALTA
 **Repo:** https://github.com/nicolorisitano82/arksh
 **Licenza:** MIT — compatibile con EnlilOS, nessun vincolo di distribuzione
@@ -580,6 +580,11 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 > arksh sostituisce `nsh` (M7-02) come shell interattiva di default.
 > `nsh` rimane disponibile come shell di recovery (initrd, modalità single-user)
 > perché non ha dipendenze esterne. arksh è la shell normale dell'utente.
+
+**Stato attuale:** `M8-08a/b/c/d/e/f` completate `v1`. Il bootstrap shell-side e'
+chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config e
+fallback `/bin/nsh` sono reali. Restano aperti i pezzi post-bootstrap piu' avanzati
+(`.so`/plugin dopo `M11-03`, shell reale esterna completa e UX/history avanzata).
 
 **Perché arksh invece di bash/dash:**
 - Zero dipendenze esterne a runtime — solo libc (musl M11-01)
@@ -761,67 +766,106 @@ Implementati interamente in **musl user-space** sopra `opendir`/`readdir` già d
 
 ---
 
-#### M8-08e · Build System e Toolchain
+#### ✅ M8-08e · Build System e Toolchain
 
-**Toolchain cross-compilation:**
+**Stato attuale:** completata `v1`
+
+**Deliverable chiusi nella v1:**
+- toolchain file CMake reale in `tools/enlilos-aarch64.cmake`
+- target host-side `make arksh-configure` e `make arksh-build`
+- smoke host-side `make arksh-smoke`
+- compat layer di riferimento in `compat/arksh/`
+- smoke ELF `/ARKSHSMK.ELF`, comando boot `arkshsmoke`, selftest `arksh-toolchain`
+
+**Build integration reale:**
 ```makefile
-# Aggiunta al Makefile EnlilOS
-ARKSH_CC     = aarch64-enlilos-musl-gcc
-ARKSH_CFLAGS = -std=c11 -O2 -static -fno-omit-frame-pointer
-ARKSH_CMAKE  = cmake -S arksh -B build/arksh \
-               -DCMAKE_TOOLCHAIN_FILE=tools/enlilos-aarch64.cmake \
-               -DCMAKE_BUILD_TYPE=Release \
-               -DARKSH_STATIC=ON \
-               -DARKSH_PLUGINS=OFF   # plugin dinamici solo dopo M11-03
+ARKSH_DIR            ?= $(CURDIR)/arksh
+ARKSH_BUILD_DIR      ?= toolchain/build/arksh
+ARKSH_TOOLCHAIN_FILE  = tools/enlilos-aarch64.cmake
+
+make arksh-configure ARKSH_DIR=/percorso/arksh
+make arksh-build     ARKSH_DIR=/percorso/arksh
+make arksh-smoke
 ```
 
-**`tools/enlilos-aarch64.cmake` (nuovo file):**
+**Toolchain file CMake (`v1`):**
 ```cmake
-set(CMAKE_SYSTEM_NAME     EnlilOS)
+set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER      aarch64-enlilos-musl-gcc)
-set(CMAKE_EXE_LINKER_FLAGS "-static")
-# Definisce ENLILOS=1 per i guard in arksh compat layer
-add_compile_definitions(ENLILOS=1)
+set(CMAKE_C_COMPILER "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-gcc")
+set(CMAKE_SYSROOT    "${ENLILOS_ROOT}/toolchain/sysroot")
+set(CMAKE_C_FLAGS_INIT "-DENLILOS=1")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 ```
 
-**Patch minima in arksh (`src/platform/enlilos.c` — nuovo file da contribuire upstream):**
-```c
-#ifdef ENLILOS
-/* Remapping delle API non standard verso EnlilOS */
-#include <ksem.h>   /* per sem_t se usato internamente */
-/* getcwd, chdir, termios: già in musl con le syscall M8-08b/c */
-/* XDG dirs: fallback a /home/arksh/.config/arksh */
-const char *xdg_config_home(void) {
-    const char *e = getenv("XDG_CONFIG_HOME");
-    return e ? e : "/home/user/.config";
-}
-#endif
-```
+**Compatibilità arksh `v1`:**
+- il repo `arksh` non e' vendorizzato in-tree: il sorgente va passato via `ARKSH_DIR`
+- `compat/arksh/enlilos.c` documenta lo shim minimo da contribuire/adattare upstream
+- `compat/arksh/README.md` spiega il workflow supportato oggi
+
+**Smoke CMake/toolchain:**
+- `toolchain/cmake-smoke/` contiene un progetto CMake minimale cross-buildato con la toolchain EnlilOS
+- lo smoke verifica:
+  - define `ENLILOS=1`
+  - link statico via wrapper `aarch64-enlilos-musl-gcc`
+  - header `termios`
+  - `pipe/dup2`
+  - `glob()` su VFS
+- runtime output: `/data/ARKSHSMK.TXT`
+
+**Nota tecnica importante chiusa in questa milestone:**
+- i target CMake esterni **non possono ereditare** i `CFLAGS/LDFLAGS` del kernel.
+  Se il configure gira sotto `make` senza pulire l'ambiente, CMake assorbe
+  `-T linker.ld -nostdlib` e il link del progetto esterno fallisce. La v1
+  risolve il problema con `env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS`
+  nei target `arksh-configure` e `arksh-smoke`.
 
 ---
 
-#### M8-08f · Integrazione nel Sistema
+#### ✅ M8-08f · Integrazione nel Sistema
 
-**Shell di default al login:**
-- `initrd` (M5-05) contiene `arksh.elf` statico come `/bin/arksh`
-- `kernel/main.c`: dopo lo scheduler, il primo processo ELF lanciato è `/bin/arksh`
-  (oggi è un task kernel dimostrativo — viene sostituito)
-- `nsh` resta disponibile come `/bin/nsh` per recovery (modalità single-user, kernel panic)
+**Stato attuale:** completata `v1`
 
-**Plugin system (abilitato dopo M11-03):**
+**Deliverable chiusi nella v1:**
+- `initrd` contiene:
+  - `/INIT.ELF` -> launcher login shell
+  - `/ARKSHBOOT.ELF` -> selftest ELF non interattivo
+  - `/bin/arksh` -> launcher statico di bootstrap
+  - `/bin/nsh` -> recovery shell esplicita
+  - `/etc/arkshrc`
+  - `/home/user/.config/arksh/arkshrc`
+- `kernel/main.c` auto-lancia la login shell di default dopo `bootcli_init()`
+- comando boot `arksh` per rilanciare la login shell dal monitor
+- `nsh` resta richiamabile esplicitamente come fallback/recovery
+- directory plugin predisposta: `/usr/lib/arksh/plugins/`
+
+**Login/home bootstrap reale:**
+- al boot il kernel prepara su `/data` il layout persistente:
+  `/data/home/user/.config/arksh/arkshrc`
+  `/data/home/user/.local/state/arksh/history`
+- il launcher `arksh` fa bind mount `/data/home -> /home` e prova `chdir("/home/user")`
+- environment bootstrap riallineato a:
+  `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`,
+  `SHELL=/bin/arksh`, `TERM=vt100`, `USER=user`
+
+**Fallback e limiti onesti della v1:**
+- se `/usr/bin/arksh` o `/usr/bin/arksh.real` non sono presenti, il launcher degrada
+  automaticamente su `/bin/nsh`
+- la history persistente e' gia' predisposta e validata kernel-side su
+  `/data/home/user/.local/state/arksh/history`
+- l'accesso EL0 interattivo allo stesso path tramite `/home/...` non e' ancora usato
+  come criterio di successo del selftest, perche' oggi quel path resta timing-sensitive;
+  il consumo completo lato shell reale viene rimandato alla fase post-bootstrap
+
+**Validazione chiusa:**
+- comando boot `arksh`
+- selftest `arksh-login`
+- suite runtime piu' recente: `SUMMARY total=42 pass=42 fail=0`
+
+**Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
-- Plugin arksh compilati come `.so` AArch64 con la toolchain musl
-- Directory plugin: `/usr/lib/arksh/plugins/`
-
-**History persistente:**
-- File `/home/user/.local/state/arksh/history` su VFS ext4 (M5-03)
-- `open`/`write`/`close` — già disponibili
-
-**Configurazione:**
-- RC file: `/home/user/.config/arksh/arkshrc` o fallback `/etc/arkshrc` (globale)
-- Variabili d'ambiente iniziali al boot: `PATH=/bin:/usr/bin`, `HOME=/home/user`,
-  `SHELL=/bin/arksh`, `TERM=vt100`
+- plugin arksh compilati come `.so` AArch64 con la toolchain musl
+- directory plugin gia' predisposta: `/usr/lib/arksh/plugins/`
 
 ---
 
@@ -1210,7 +1254,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=40 pass=40 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=42 pass=42 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -2954,9 +2998,9 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M8-08e..f** build system + integrazione arksh — completa il porting della shell di default dopo `glob/fnmatch`
-2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
-3. **M11-03** dynamic linker user-space / `.so` — ora che `pthread` e TLS multi-thread bootstrap sono chiusi, il prossimo collo di bottiglia reale e' la compat binaria dinamica
+1. **M11-03** dynamic linker user-space / `.so` — il prossimo collo di bottiglia tecnico reale per plugin e compat dinamica
+2. **M10-01** VirtIO Network Driver — apre l'intera traccia networking e sblocca socket/API BSD
+3. **M8-08g** layout tastiera multipli (`us`/`it`) — migliora subito l'usabilita' reale della shell appena chiusa in `M8-08f`
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -3024,15 +3068,16 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `37/37` |
-| 16 | **M8-08e..f** CMake + integrazione | Completa arksh porting dopo pipe/termios/libc e wildcard bootstrap |
-| 17 | **M8-08** arksh shell di default | Sostituisce nsh. Il sistema ha una shell moderna |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `42/42` |
+| 16 | **M8-08e** Build System e Toolchain | ✅ Completata v1: toolchain CMake, target `arksh-*`, compat shim di riferimento e smoke `/ARKSHSMK.ELF` |
+| 17 | **M8-08f + M8-08** integrazione shell di default | ✅ Completata v1: `/bin/arksh` launcher, auto-login shell, bind `/data/home -> /home`, rc bootstrap, fallback `/bin/nsh`, selftest `arksh-login` |
 
 Nota: **M8-04 Job Control** e' gia' completata e disponibile come base per `CTRL+Z`,
 foreground/background group e `waitpid(WUNTRACED)`.
 
 **Checkpoint FASE 3:** si può compilare un programma C con musl, eseguirlo su EnlilOS,
-interagire con arksh, usare pipe (`ls | grep .c`), history, syntax highlight.
+entrare nella login shell `arksh` `v1` (con fallback `nsh`), usare pipe
+(`ls | grep .c`) e validare il bootstrap shell-side end-to-end.
 
 ---
 
@@ -3186,7 +3231,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ~~M11-01 musl libc — senza libc nessun programma C gira~~ ✅ completata v1
 - ~~M14-02 crash reporter — senza debug ogni bug diventa un'ora di lavoro in più~~ ✅ completata
 
-**Stato FASE 1, FASE 2 e avvio FASE 3 al 2026-04-09:**
+**Stato FASE 1, FASE 2 e avvio FASE 3 al 2026-04-10:**
 - ✅ M8-01 fork + COW
 - ✅ M8-03 signal handling
 - ✅ M8-05 mreact
@@ -3201,4 +3246,83 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M9-03 blkd
 - ✅ M9-04 namespace + mount dinamico v1
 - ✅ M11-01 musl/toolchain bootstrap v1
-- **Prossimo step:** chiudere `M8-08e..f`, poi aprire rete base con `M10-01` e il profilo multi-thread con `M11-02`
+- ✅ M8-08e build/toolchain arksh v1
+- ✅ M8-08f integrazione shell/login v1
+- **Prossimo step:** chiudere `M11-03`, poi aprire la rete base con `M10-01`, poi migliorare UX input con `M8-08g`
+
+---
+
+## Prossimi passi — Progress Log Operativo Aggiornato
+
+> Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
+> Stato verificato dopo la chiusura di `M8-08f`: suite `selftest` a `42/42`.
+
+### 1. Cosa e' gia' stato completato
+
+- ✅ **Fondamenta kernel e debug**: `M14-02`, `M8-01`, `M8-03`, `M8-04`, `M8-05`, `M8-06`, `M8-07`
+- ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
+- ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M11-01a`, `M11-01b`, `M11-01c`
+- ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
+- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local
+
+### 2. Cosa resta da fare ad alta priorita'
+
+| Priorita' | Milestone | Dipende da | Perche' viene adesso |
+|-----------|-----------|------------|----------------------|
+| 1 | **M11-03** Dynamic Linker | `M11-02`, `M8-02` | E' il prossimo collo di bottiglia tecnico: abilita `.so`, `dlopen`, plugin e compat dinamica |
+| 2 | **M8-08 plugin** | `M11-03` | I plugin dinamici della shell hanno senso solo dopo il linker dinamico |
+| 3 | **M10-01** VirtIO Network Driver | nessuna dipendenza forte oltre al core gia' chiuso | Apre l'intera traccia networking e toglie il sistema dal solo bootstrap locale |
+| 4 | **M10-02** TCP/IP Stack | `M10-01` | Senza stack IP non esiste networking utile in user-space |
+| 5 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
+| 6 | **M8-08g** Layout tastiera multipli | core input gia' presente | Migliora subito usabilita' reale di console e shell (`us`/`it`) |
+
+### 3. Sequenza raccomandata per dipendenze
+
+1. **Chiudere il caricamento dinamico**: `M11-03 -> M8-08 plugin`
+2. **Aprire la rete**: `M10-01 -> M10-02 -> M10-03`
+3. **Migliorare l'usabilita' shell/input**: `M8-08g -> M8-08h`
+4. **Usare la rete per compatibilita' e desktop**:
+   `M11-05` dipende da `M11-03 + M10-03 + M14-01`
+   `M12-01` dipende da `M11-01 + M9-02 + M10-03`
+5. **Scalare su multicore e RT avanzato**:
+   `M13-02 -> M13-03`
+   `M13-01` e `M13-04` possono procedere in parallelo dopo il core SMP
+   `M13-05` chiude l'integrazione EDF+NAS
+
+### 4. Tracce che si aprono subito dopo i prossimi blocchi
+
+- **Compatibilita' Linux reale**: `M11-05`
+  Dipende da `M11-03 + M10-03 + M14-01`
+  Effetto: porta `bash`, `python3`, `git`, `gcc` in modo molto piu' credibile
+
+- **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
+  Dipende in pratica da rete/socket, `vfsd` e GPU gia' disponibile
+  Effetto: porta Wayland, WM e compositor GPU
+
+- **SMP e scheduler avanzati**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
+  Effetto: throughput multicore, metriche WCET e scheduling RT piu' forte
+
+- **Periferiche complete**: `M15-*` e `M16-*`
+  Possono partire dopo rete/base userspace consolidata, con audio e USB in parallelo
+
+### 5. Punti aperti ma non bloccanti subito
+
+- `M14-01` e' **completata v1**, ma resta da estendere `sysfs` e alcuni export avanzati
+- `M11-01` e `M11-02` sono **chiuse v1**, ma il grosso salto qualitativo successivo ormai non e' piu' nel bootstrap C o thread: e' nel **dynamic linker** (`M11-03`)
+- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere shell reale + linking dinamico + networking**
+
+### 6. Ordine operativo consigliato da qui
+
+1. `M11-03`
+2. `M8-08 plugin`
+3. `M10-01`
+4. `M10-02`
+5. `M10-03`
+6. `M8-08g`
+7. `M11-05`
+8. `M12-01`
+9. `M13-02`
+
+Se serve un principio guida unico: **prima rendere EnlilOS un sistema usabile da shell reale,
+poi un sistema con librerie dinamiche, poi un sistema con rete, e solo dopo un sistema desktop
+e multi-core pienamente general-purpose.**

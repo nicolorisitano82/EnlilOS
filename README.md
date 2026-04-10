@@ -15,7 +15,7 @@ Le milestone completate oggi coprono:
 - **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
-- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, `mreact`, `ksem` e `kmon`.
+- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh` e fallback `/bin/nsh`, `mreact`, `ksem` e `kmon`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M11-02a/b/c/d/e**: profilo multi-thread `v1` chiuso, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond`, TLS statico multi-thread per `__thread`, `errno` thread-local e smoke `musl-pthread` + `musl-sem` + `tls-mt`.
@@ -23,7 +23,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=40 pass=40 fail=0`.
+`SUMMARY total=42 pass=42 fail=0`.
 
 ---
 
@@ -73,6 +73,11 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `data/`
 - `sysroot/`
 - `INIT.ELF`
+- `ARKSHBOOT.ELF`
+- `bin/arksh`
+- `bin/nsh`
+- `etc/arkshrc`
+- `home/user/.config/arksh/arkshrc`
 - `NSH.ELF`
 - `DEMO.ELF`
 - `EXEC1.ELF`
@@ -103,6 +108,7 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `PTHREADDEMO.ELF`
 - `SEMDEMO.ELF`
 - `TLSMTDEMO.ELF`
+- `ARKSHSMK.ELF`
 - `libdyn.so`
 - `LD-ENLIL.SO`
 
@@ -120,7 +126,7 @@ per processo senza bypassare il server VFS user-space.
 
 ```bash
 # macOS
-brew install aarch64-elf-gcc qemu
+brew install aarch64-elf-gcc qemu cmake
 
 # opzionale ma consigliato per run-blk / ext4
 brew install e2fsprogs
@@ -151,6 +157,7 @@ Per il profilo `M11-01` sono disponibili anche:
 ```bash
 make musl-sysroot
 make musl-smoke
+make arksh-smoke
 ```
 
 Questi target generano:
@@ -159,6 +166,20 @@ Questi target generano:
 - `toolchain/sysroot/usr/lib/libc.a` e i runtime object `crt1.o`, `crti.o`, `crtn.o`
 - wrapper `toolchain/bin/aarch64-enlilos-musl-gcc`, `ar`, `ranlib`
 - smoke ELF statici musl-linked in `toolchain/smoke/*.elf`
+- smoke CMake/toolchain in `toolchain/build/arksh-smoke/arkshsmoke.elf`
+
+Per il porting `arksh` (`M8-08e`) sono disponibili anche:
+
+```bash
+make arksh-configure ARKSH_DIR=/percorso/arksh
+make arksh-build ARKSH_DIR=/percorso/arksh
+```
+
+Il repo `arksh` resta esterno al tree di EnlilOS: la `v1` chiude toolchain file,
+wrapper musl, compat shim di riferimento e smoke CMake. Da `M8-08f` il sistema
+avvia una login shell `v1` tramite `/bin/arksh` (launcher statico nel rootfs), con
+fallback automatico a `/bin/nsh`, `rc` bootstrap in `/etc/arkshrc` e
+`/home/user/.config/arksh/arkshrc`, e home persistente preparata su `/data/home`.
 
 Il profilo attuale resta volutamente `static-only` lato musl/libc, ma da `M11-02e`
 la bootstrap libc espone gia' `<pthread.h>`, `<signal.h>` e `<semaphore.h>`, con:
@@ -193,6 +214,9 @@ make CROSS=/opt/homebrew/Cellar/aarch64-elf-gcc/15.2.0/bin/aarch64-elf-
 | `make debug` | QEMU in attesa di GDB sulla porta 1234 |
 | `make musl-sysroot` | prepara sysroot/bootstrap libc `M11-01` |
 | `make musl-smoke` | compila i demo smoke musl statici |
+| `make arksh-smoke` | builda lo smoke CMake/toolchain `M8-08e` |
+| `make arksh-configure ARKSH_DIR=...` | configura un checkout esterno di `arksh` |
+| `make arksh-build ARKSH_DIR=...` | compila un checkout esterno di `arksh` |
 
 Target utili per il disco:
 
@@ -222,12 +246,14 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `posixdemo`
 - `muslabi`
 - `muslglob`
+- `arkshsmoke`
 - `clonedemo`
 - `threadlife`
 - `futexdemo`
 - `pthreaddemo`
 - `semdemo`
 - `tlsmtdemo`
+- `arksh`
 - `runelf /MUSLHELLO.ELF`
 - `runelf /MUSLSTDIO.ELF`
 - `runelf /MUSLMALLOC.ELF`
@@ -237,6 +263,10 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `runelf PATH`
 - `nsh`
 - `selftest`, `selftest [nome]`
+
+Al boot il sistema prova ad avviare `/bin/arksh` come login shell di default. Se la
+shell reale non e' ancora presente in `/usr/bin`, il launcher degrada in modo pulito
+su `/bin/nsh`, che resta anche richiamabile esplicitamente come recovery shell.
 
 `NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
 
@@ -255,7 +285,7 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 40 casi:
+Esiste una suite di self-test kernel-side che oggi copre 42 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
@@ -263,6 +293,7 @@ Esiste una suite di self-test kernel-side che oggi copre 40 casi:
 - `ksem-core`, `kmon-core`, `ipc-sync`
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `mmap-file`, `tls-tp`, `crt-startup`
 - `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`
+- `arksh-toolchain`, `arksh-login`
 - `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`
 
 La build dedicata e':
@@ -275,7 +306,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=40 pass=40 fail=0
+SUMMARY total=42 pass=42 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.
@@ -287,6 +318,7 @@ Nota: se il selftest si blocca, conviene leggere il log seriale completo. La sui
 ```text
 EnlilOS/
 ├── boot/                  # entry point, vectors, initrd embedded
+├── compat/                # shim/reference layer per porting esterni
 ├── drivers/
 │   ├── uart.c            # PL011
 │   ├── keyboard.c        # VirtIO keyboard + fallback UART
@@ -311,6 +343,7 @@ EnlilOS/
 ├── tools/
 │   └── mkinitrd.py       # builder host-side dell'archivio CPIO
 ├── toolchain/            # sysroot/bootstrap libc/wrapper musl v1
+│   ├── cmake-smoke/      # smoke project CMake per M8-08e
 ├── user/                 # ELF userspace statici e dinamici
 ├── BACKLOG.md            # roadmap principale
 └── BACKLOG2.md           # roadmap estesa / extra milestone

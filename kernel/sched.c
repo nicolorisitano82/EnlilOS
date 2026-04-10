@@ -4,7 +4,7 @@
  * Implementazione FPP con:
  *   - ready_bitmap[4] (256 bit): trova la priorità massima in O(1)
  *   - run_queue[256]:  FIFO intrusive singly-linked per priorità
- *   - task_pool[64]:   pool statico di sched_tcb_t (no kmalloc nel scheduler)
+ *   - task_pool[SCHED_MAX_TASKS]: pool statico di sched_tcb_t (no kmalloc nel scheduler)
  *   - sched_context_switch: assembly in sched_switch.S
  *   - Preemption: need_resched settato da sched_tick(), letto da vectors.S
  */

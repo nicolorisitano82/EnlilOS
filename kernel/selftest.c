@@ -339,6 +339,42 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, st.st_size > 0ULL, "/MUSLGLOB.ELF ha size zero");
     (void)vfs_close(&file);
 
+    rc = vfs_open("/bin/arksh", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /bin/arksh fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /bin/arksh fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/bin/arksh non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/bin/arksh ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/bin/nsh", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /bin/nsh fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /bin/nsh fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/bin/nsh non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/bin/nsh ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/etc/arkshrc", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/arkshrc fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /etc/arkshrc vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "PATH=/bin:/usr/bin"),
+             "/etc/arkshrc non contiene PATH");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/home/user/.config/arksh/arkshrc", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open user arkshrc fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read user arkshrc vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "arkshrc"),
+             "user arkshrc non contiene il marker atteso");
+    (void)vfs_close(&file);
+
     rc = vfs_open("/VFSD.ELF", O_RDONLY, &file);
     ST_CHECK(case_name, rc == 0, "open /VFSD.ELF fallita");
     rc = vfs_stat(&file, &st);
@@ -436,6 +472,15 @@ static int selftest_case_rootfs(void)
     ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
              "/TLSMTDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/TLSMTDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/ARKSHSMK.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /ARKSHSMK.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /ARKSHSMK.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/ARKSHSMK.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/ARKSHSMK.ELF ha size zero");
     (void)vfs_close(&file);
     return 0;
 }
@@ -1163,6 +1208,61 @@ static int selftest_case_tls_mt(void)
     if (st_run_user_path(case_name, "/TLSMTDEMO.ELF", 5000ULL) < 0)
         return -1;
     return st_expect_text_file(case_name, "/data/TLSMTDEMO.TXT", expected, 1);
+}
+
+static int selftest_case_arksh_toolchain(void)
+{
+    static const char case_name[] = "arksh-toolchain";
+    static const char expected[] =
+        "cmake-ok\n"
+        "enlilos-define-ok\n"
+        "cwd-ok\n"
+        "pipe-dup2-ok\n"
+        "glob-ok\n"
+        "termios-header-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/ARKSHSMK.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup ARKSHSMK.TXT fallita");
+
+    if (st_run_user_path(case_name, "/ARKSHSMK.ELF", 4000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/ARKSHSMK.TXT", expected, 1);
+}
+
+static int selftest_case_arksh_login(void)
+{
+    static const char case_name[] = "arksh-login";
+    static const char expected[] =
+        "env-ok\n"
+        "cwd-ok\n"
+        "etc-rc-ok\n"
+        "user-rc-ok\n"
+        "bin-layout-ok\n";
+    vfs_file_t file;
+    stat_t     st;
+    int rc;
+
+    rc = vfs_unlink("/data/ARKSHBOOT.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup ARKSHBOOT.TXT fallita");
+
+    rc = vfs_open("/data/home/user/.config/arksh/arkshrc", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open arkshrc persistente fallita");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/data/home/user/.local/state/arksh/history", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open history store persistente fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat history store persistente fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "history store non e' un file regolare");
+    (void)vfs_close(&file);
+
+    if (st_run_user_path(case_name, "/ARKSHBOOT.ELF", 4000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/ARKSHBOOT.TXT", expected, 1);
 }
 
 static int selftest_case_vfsd(void)
@@ -2013,6 +2113,8 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-pthread", selftest_case_musl_pthread },
     { "musl-sem", selftest_case_musl_sem },
     { "tls-mt", selftest_case_tls_mt },
+    { "arksh-toolchain", selftest_case_arksh_toolchain },
+    { "arksh-login", selftest_case_arksh_login },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },

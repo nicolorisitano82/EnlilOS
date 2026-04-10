@@ -1524,11 +1524,12 @@ int elf64_load_from_path(const char *path, const char *argv0, elf_image_t *out)
 {
     const char *argv_local[1];
     static const char *const env_default[] = {
-        "PATH=/:/dev:/data:/sysroot",
-        "HOME=/",
+        "PATH=/bin:/usr/bin",
+        "HOME=/home/user",
         "PWD=/",
-        "TERM=enlilos",
-        "USER=root",
+        "SHELL=/bin/arksh",
+        "TERM=vt100",
+        "USER=user",
     };
 
     if (!path || path[0] == '\0') {

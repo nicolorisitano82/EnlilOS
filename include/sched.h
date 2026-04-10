@@ -47,7 +47,7 @@
 
 /* ── Costanti ───────────────────────────────────────────────────── */
 
-#define SCHED_MAX_TASKS     64          /* pool statico di TCB           */
+#define SCHED_MAX_TASKS     96          /* pool statico di TCB           */
 #define SCHED_TICK_QUANTUM  10          /* ms di time slice per task     */
 #define TASK_STACK_ORDER    2           /* 16 KiB stack kernel per task  */
 #define TASK_STACK_SIZE     (4096U << TASK_STACK_ORDER)

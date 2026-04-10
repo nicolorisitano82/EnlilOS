@@ -8,6 +8,8 @@ set(CMAKE_C_COMPILER "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-gcc")
 set(CMAKE_AR         "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-ar")
 set(CMAKE_RANLIB     "${ENLILOS_ROOT}/toolchain/bin/aarch64-enlilos-musl-ranlib")
 set(CMAKE_SYSROOT    "${ENLILOS_ROOT}/toolchain/sysroot")
+set(CMAKE_C_FLAGS_INIT          "-DENLILOS=1")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

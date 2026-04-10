@@ -4395,7 +4395,9 @@ void syscall_init(void)
     };
 
     uart_puts("[SYSCALL] 97 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
-    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per 64 proc slot\n");
+    uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
+    syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
+    uart_puts(" proc slot\n");
 }
 
 /* ════════════════════════════════════════════════════════════════════
