@@ -159,7 +159,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_pipe_termios.c \
                         toolchain/smoke/musl_glob_fnmatch.c \
                         toolchain/smoke/musl_pthread.c \
-                        toolchain/smoke/musl_semaphore.c
+                        toolchain/smoke/musl_semaphore.c \
+                        toolchain/smoke/musl_tls_mt.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
@@ -327,6 +328,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		MUSLGLOB.ELF=toolchain/smoke/musl_glob_fnmatch.elf \
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
+		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		NSH.ELF=user/nsh.elf

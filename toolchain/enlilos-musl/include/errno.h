@@ -1,7 +1,7 @@
 #ifndef ENLILOS_MUSL_ERRNO_H
 #define ENLILOS_MUSL_ERRNO_H
 
-extern int errno;
+extern __thread int errno;
 
 #define EPERM               1
 #define ENOENT              2

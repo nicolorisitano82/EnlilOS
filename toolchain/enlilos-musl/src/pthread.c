@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "crt_runtime.h"
 #include "enlil_syscalls.h"
 #include "user_svc.h"
 
@@ -18,6 +19,8 @@
 #define ENLIL_PTHREAD_FLAG_JOINED 0x0008U
 
 #define ENLIL_PTHREAD_DEFAULT_STACK (64UL * 1024UL)
+#define ENLIL_TLS_TCB_SIZE          16UL
+#define ENLIL_TLS_PAGE_SIZE         4096UL
 
 #define ENLIL_CLONE_VM              0x00000100U
 #define ENLIL_CLONE_FS              0x00000200U
@@ -32,6 +35,27 @@
 #define ENLIL_FUTEX_WAIT            0
 #define ENLIL_FUTEX_WAKE            1
 #define ENLIL_FUTEX_PRIVATE_FLAG    128
+#define ENLIL_ELF_AT_NULL           0U
+#define ENLIL_ELF_AT_PHDR           3U
+#define ENLIL_ELF_AT_PHENT          4U
+#define ENLIL_ELF_AT_PHNUM          5U
+#define ENLIL_PT_TLS                7U
+
+typedef struct {
+    uint64_t a_type;
+    uint64_t a_val;
+} enlil_auxv_t;
+
+typedef struct {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} enlil_phdr_t;
 
 struct __pthread {
     uint32_t          magic;
@@ -43,13 +67,33 @@ struct __pthread {
     void             *stack_base;
     size_t            stack_size;
     void             *tp_stub;
+    void             *tls_map_base;
+    size_t            tls_map_len;
     struct __pthread *next_detached;
 };
+
+typedef struct {
+    uintptr_t template_va;
+    size_t    filesz;
+    size_t    memsz;
+    size_t    align;
+    size_t    data_off;
+    int       ready;
+    int       have_tls;
+} pthread_tls_layout_t;
 
 static struct __pthread main_thread;
 static struct __pthread *detached_head;
 static volatile unsigned int runtime_lock;
 static volatile unsigned int runtime_inited;
+static pthread_tls_layout_t  tls_layout;
+
+static uintptr_t pthread_align_up(uintptr_t value, uintptr_t align)
+{
+    if (align <= 1U)
+        return value;
+    return (value + align - 1U) & ~(align - 1U);
+}
 
 static uintptr_t pthread_read_tp(void)
 {
@@ -132,9 +176,110 @@ static void pthread_free_thread(struct __pthread *thread)
 
     if (thread->stack_base && thread->stack_size != 0U)
         (void)munmap(thread->stack_base, thread->stack_size);
-    if (thread->tp_stub)
+    if (thread->tls_map_base && thread->tls_map_len != 0U)
+        (void)munmap(thread->tls_map_base, thread->tls_map_len);
+    else if (thread->tp_stub)
         free(thread->tp_stub);
     free(thread);
+}
+
+static void pthread_tls_layout_init_locked(void)
+{
+    const enlil_auxv_t *auxv = (const enlil_auxv_t *)__enlilos_auxv;
+    uintptr_t           phdr = 0U;
+    uintptr_t           phent = 0U;
+    uintptr_t           phnum = 0U;
+
+    if (tls_layout.ready)
+        return;
+
+    memset(&tls_layout, 0, sizeof(tls_layout));
+    tls_layout.ready = 1;
+
+    if (!auxv)
+        return;
+
+    for (const enlil_auxv_t *it = auxv; it->a_type != ENLIL_ELF_AT_NULL; it++) {
+        if (it->a_type == ENLIL_ELF_AT_PHDR)
+            phdr = (uintptr_t)it->a_val;
+        else if (it->a_type == ENLIL_ELF_AT_PHENT)
+            phent = (uintptr_t)it->a_val;
+        else if (it->a_type == ENLIL_ELF_AT_PHNUM)
+            phnum = (uintptr_t)it->a_val;
+    }
+
+    if (!phdr || !phent || !phnum || phent < sizeof(enlil_phdr_t))
+        return;
+
+    for (uintptr_t i = 0U; i < phnum; i++) {
+        const enlil_phdr_t *ph =
+            (const enlil_phdr_t *)(phdr + i * phent);
+        uintptr_t align;
+
+        if (ph->p_type != ENLIL_PT_TLS || ph->p_memsz == 0ULL)
+            continue;
+
+        align = (ph->p_align > 1ULL) ? (uintptr_t)ph->p_align : 1U;
+        if (align < ENLIL_TLS_TCB_SIZE)
+            align = ENLIL_TLS_TCB_SIZE;
+
+        tls_layout.template_va = (uintptr_t)ph->p_vaddr;
+        tls_layout.filesz = (size_t)ph->p_filesz;
+        tls_layout.memsz = (size_t)ph->p_memsz;
+        tls_layout.align = (size_t)align;
+        tls_layout.data_off = (size_t)pthread_align_up(ENLIL_TLS_TCB_SIZE, align);
+        tls_layout.have_tls = 1;
+        break;
+    }
+}
+
+static int pthread_tls_block_alloc(struct __pthread *thread, void **tp_out)
+{
+    size_t    raw_bytes;
+    size_t    map_len;
+    uintptr_t tp;
+    void     *map_base;
+
+    if (!thread || !tp_out)
+        return EINVAL;
+
+    pthread_tls_layout_init_locked();
+
+    if (!tls_layout.have_tls) {
+        thread->tp_stub = calloc(1U, ENLIL_TLS_TCB_SIZE);
+        if (!thread->tp_stub)
+            return ENOMEM;
+        *((struct __pthread **)thread->tp_stub) = thread;
+        *tp_out = thread->tp_stub;
+        return 0;
+    }
+
+    raw_bytes = tls_layout.data_off + tls_layout.memsz;
+    map_len = (size_t)pthread_align_up((uintptr_t)(raw_bytes + tls_layout.align),
+                                       ENLIL_TLS_PAGE_SIZE);
+    map_base = mmap(NULL, map_len, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map_base == MAP_FAILED)
+        return errno ? errno : ENOMEM;
+
+    tp = pthread_align_up((uintptr_t)map_base, tls_layout.align);
+    if ((tp + raw_bytes) > ((uintptr_t)map_base + map_len)) {
+        (void)munmap(map_base, map_len);
+        return ENOMEM;
+    }
+
+    memset(map_base, 0, map_len);
+    if (tls_layout.filesz != 0U)
+        memcpy((void *)(tp + tls_layout.data_off),
+               (const void *)tls_layout.template_va,
+               tls_layout.filesz);
+
+    *((struct __pthread **)tp) = thread;
+    thread->tp_stub = (void *)tp;
+    thread->tls_map_base = map_base;
+    thread->tls_map_len = map_len;
+    *tp_out = (void *)tp;
+    return 0;
 }
 
 static void pthread_reap_detached_locked(void)
@@ -197,6 +342,7 @@ void __enlilos_thread_runtime_init(void)
     main_thread.flags = ENLIL_PTHREAD_FLAG_MAIN;
     main_thread.tid   = (uint32_t)gettid();
     main_thread.tp_stub = (void *)(uintptr_t)pthread_read_tp();
+    pthread_tls_layout_init_locked();
 
     tp = (uintptr_t)main_thread.tp_stub;
     if (tp != 0U) {
@@ -311,6 +457,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     void                 *tp_stub;
     void                 *child_sp;
     long                  tid;
+    int                   tls_rc;
 
     if (!thread || !start_routine)
         return EINVAL;
@@ -334,11 +481,11 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
         return errno ? errno : ENOMEM;
     }
 
-    tp_stub = calloc(1U, 16U);
-    if (!tp_stub) {
+    tls_rc = pthread_tls_block_alloc(obj, &tp_stub);
+    if (tls_rc != 0) {
         (void)munmap(stack_base, stack_size);
         free(obj);
-        return ENOMEM;
+        return tls_rc;
     }
 
     obj->magic = ENLIL_PTHREAD_MAGIC;
@@ -349,7 +496,6 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     obj->stack_base = stack_base;
     obj->stack_size = stack_size;
     obj->tp_stub = tp_stub;
-    *((struct __pthread **)tp_stub) = obj;
 
     child_sp = (void *)((uintptr_t)stack_base + stack_size - 16U);
     tid = user_svc6(SYS_CLONE, (long)clone_flags, (long)child_sp,
@@ -358,9 +504,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
         pthread_child_bootstrap();
     if (tid < 0) {
         int err = (int)-tid;
-        free(tp_stub);
-        (void)munmap(stack_base, stack_size);
-        free(obj);
+        pthread_free_thread(obj);
         return err;
     }
 

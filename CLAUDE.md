@@ -18,7 +18,7 @@ tutto ogni sessione.
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
   - `make musl-smoke` — compila i demo statici musl-linked
-- Stato validato corrente: `SUMMARY total=39 pass=39 fail=0`
+- Stato validato corrente: `SUMMARY total=40 pass=40 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -416,15 +416,43 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
   boot time e puo' partire da `0s`, un test che costruisce `past = now - 1s` puo'
   generare correttamente `EINVAL` se va sotto zero; per ottenere `ETIMEDOUT` il deadline
   scaduto deve restare valido/non negativo.
-- Limitazione onesta della `v1`: i thread figli **non** ricevono ancora una copia
-  completa del template TLS statico per `__thread`. Il runtime `pthread` e' usabile per
-  bootstrap POSIX reale, ma il caso TLS multi-thread completo resta lavoro di `M11-02e`.
+- Il limite storico della `v1` su `__thread` e' stato chiuso da `M11-02e`: i thread
+  figli ora allocano un blocco TLS completo dal template `PT_TLS`, quindi `errno` e
+  le variabili TLS statiche non condividono piu' stato tra thread.
 - Validazione attuale:
   - selftest `musl-pthread`
   - selftest `musl-sem`
   - demo `/PTHREADDEMO.ELF`
   - demo `/SEMDEMO.ELF`
-  - suite completa `39/39`
+  - suite completa `40/40`
+
+---
+
+## TLS multi-thread hardening (`M11-02e`)
+
+**File**: [toolchain/enlilos-musl/src/pthread.c](toolchain/enlilos-musl/src/pthread.c),
+[toolchain/enlilos-musl/src/errno.c](toolchain/enlilos-musl/src/errno.c),
+[toolchain/smoke/musl_tls_mt.c](toolchain/smoke/musl_tls_mt.c),
+[kernel/selftest.c](kernel/selftest.c)
+
+- Il runtime `pthread` non deve clonare solo uno stub da 16 byte: per i thread figli
+  serve un blocco completo compatibile col layout loader-side
+  `[TCB stub 16B][tdata][tbss]`.
+- La sorgente corretta del template non e' il TLS del thread corrente, ma il segmento
+  `PT_TLS` dell'ELF. Il runtime lo recupera via `auxv` (`AT_PHDR/AT_PHNUM`) e copia
+  `p_filesz` bytes dal template del binario, zeroando il tail `tbss`.
+- `errno` nel bootstrap musl puo' e deve essere `__thread` una volta chiuso il TLS
+  multi-thread; prima di questo passaggio, tutti i thread condividevano
+  accidentalmente lo stesso `errno`.
+- Il smoke `TLSMTDEMO.ELF` verifica quattro cose insieme:
+  - init del template TLS per ogni thread
+  - isolamento `__thread` cross-thread
+  - `errno` per-thread
+  - join corretto dopo lavoro concorrente
+- Validazione attuale:
+  - selftest `tls-mt`
+  - demo `/TLSMTDEMO.ELF`
+  - suite completa `40/40`
 
 ---
 

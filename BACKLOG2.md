@@ -1210,7 +1210,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=39 pass=39 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=40 pass=40 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1243,8 +1243,7 @@ architetturale importante rispetto alla formulazione iniziale del backlog:
 **Studio di implementazione dettagliato:** vedi [M11-02.md](M11-02.md)
 
 **Stato reale ad oggi:**
-- `M11-02a`, `M11-02b`, `M11-02c` e `M11-02d` sono completate `v1`
-- `M11-02e` resta aperta come hardening/test multi-thread esteso
+- `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d` e `M11-02e` sono completate `v1`
 - baseline kernel gia' presente:
   - `getpid()` = `tgid`, nuova `gettid()`
   - `clone()` subset thread-oriented
@@ -1402,23 +1401,33 @@ Implementazione kernel:
 - gotcha chiuso nel bring-up: `sem_timedwait()` vuole un `abstime` valido/non negativo;
   nei selftest iniziali il tempo era vicino a boot `0s`, quindi sottrarre `1s` produceva
   correttamente `EINVAL`, non `ETIMEDOUT`
-- limite aperto: i thread figli usano ancora uno stub minimo in `TPIDR_EL0`; la copia
-  completa del template TLS statico per `__thread` multi-thread resta fuori dalla `v1`
+- il limite storico sul TLS multi-thread e' stato chiuso da `M11-02e`, che alloca un
+  blocco TLS completo per ogni thread figlio a partire dal template `PT_TLS`
 
 **M11-02e · Selftest e smoke multi-thread**
-- **Stato attuale:** parzialmente implementata
-- gia' presenti:
+- **Stato attuale:** completata `v1`
+- chiuso:
   - selftest kernel `clone-thread`
   - selftest kernel `thread-lifecycle`
   - selftest kernel `futex-core`
   - selftest user-space `musl-pthread`
   - selftest user-space `musl-sem`
+  - selftest user-space `tls-mt`
   - demo `PTHREADDEMO.ELF`
   - demo `SEMDEMO.ELF`
-- resta consigliato:
   - demo `TLSMTDEMO.ELF`
-  - stress test multi-join / multi-condvar
   - coverage esplicita su `__thread` cross-thread e TLS statico completo
+  - `errno` thread-local via TLS
+
+**Note v1:**
+- i thread figli allocano un blocco TLS completo partendo dal template `PT_TLS`
+  descritto in `auxv` (`AT_PHDR/AT_PHNUM`) invece del vecchio stub minimo
+- il thread pointer resta compatibile con il layout loader-side:
+  `[TCB stub 16B][tdata][tbss]`
+- `errno` e' ora `__thread`, quindi la semantica POSIX minima non e' piu' condivisa
+  accidentalmente tra i thread dello stesso processo
+- restano fuori scope di `M11-02` solo gli aspetti non richiesti dalla `v1`:
+  `FUTEX_LOCK_PI`, robust futex list, `pthread_cancel`, affinity e process-shared objects
 
 ---
 
@@ -2947,7 +2956,7 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 1. **M8-08e..f** build system + integrazione arksh — completa il porting della shell di default dopo `glob/fnmatch`
 2. **M10-01** VirtIO Network Driver — porta il sistema fuori dal bootstrap locale e prepara socket/API BSD
-3. **M11-02e** hardening thread/TLS multi-thread — chiude il residuo reale dopo `pthread`/`sem_t` v1
+3. **M11-03** dynamic linker user-space / `.so` — ora che `pthread` e TLS multi-thread bootstrap sono chiusi, il prossimo collo di bottiglia reale e' la compat binaria dinamica
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -3033,7 +3042,7 @@ Python, server applicativi.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 19 | **M11-02** pthread + futex + sem_t | 🟡 In corso: `M11-02a+b+c+d` completate v1 (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `futex WAIT/WAKE/REQUEUE`, wrapper musl `pthread`/`sem_t`, `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`). Resta `M11-02e` per hardening/TLS multi-thread completo |
+| 19 | **M11-02** pthread + futex + sem_t | ✅ Completata v1: `M11-02a+b+c+d+e` chiuse (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `futex WAIT/WAKE/REQUEUE`, wrapper musl `pthread`/`sem_t`, TLS statico multi-thread da `PT_TLS`, `errno` thread-local, `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`) |
 | 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
 | 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |

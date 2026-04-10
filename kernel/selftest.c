@@ -428,6 +428,15 @@ static int selftest_case_rootfs(void)
              "/SEMDEMO.ELF non e' un file regolare");
     ST_CHECK(case_name, st.st_size > 0ULL, "/SEMDEMO.ELF ha size zero");
     (void)vfs_close(&file);
+
+    rc = vfs_open("/TLSMTDEMO.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /TLSMTDEMO.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /TLSMTDEMO.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/TLSMTDEMO.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/TLSMTDEMO.ELF ha size zero");
+    (void)vfs_close(&file);
     return 0;
 }
 
@@ -1135,6 +1144,25 @@ static int selftest_case_musl_sem(void)
     if (st_run_user_path(case_name, "/SEMDEMO.ELF", 5000ULL) < 0)
         return -1;
     return st_expect_text_file(case_name, "/data/SEMDEMO.TXT", expected, 1);
+}
+
+static int selftest_case_tls_mt(void)
+{
+    static const char case_name[] = "tls-mt";
+    static const char expected[] =
+        "tls-template-ok\n"
+        "thread-isolation-ok\n"
+        "errno-tls-ok\n"
+        "join-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/TLSMTDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup TLSMTDEMO.TXT fallita");
+
+    if (st_run_user_path(case_name, "/TLSMTDEMO.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/TLSMTDEMO.TXT", expected, 1);
 }
 
 static int selftest_case_vfsd(void)
@@ -1984,6 +2012,7 @@ static const selftest_case_t selftest_cases[] = {
     { "futex-core", selftest_case_futex_core },
     { "musl-pthread", selftest_case_musl_pthread },
     { "musl-sem", selftest_case_musl_sem },
+    { "tls-mt", selftest_case_tls_mt },
     { "vfs-namespace", selftest_case_vfs_namespace },
     { "mreact-core", selftest_case_mreact    },
     { "cap-core",    selftest_case_cap       },
