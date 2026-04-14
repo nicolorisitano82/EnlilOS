@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `usr/bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=43 pass=43 fail=0`
+- suite runtime piu' recente: `SUMMARY total=44 pass=44 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -878,6 +878,8 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 ---
 
 #### M8-08g · Layout Tastiera Multipli (`us`, `it`)
+
+- **Stato attuale:** completata `v1`
 
 Necessario per rendere la console e la shell usabili in scenari reali non-US.
 La roadmap deve prevedere almeno layout **US** e **Italiano** (`it`) fin dalla
@@ -903,6 +905,21 @@ prima iterazione utile.
 - Repository layout iniziale:
   `/usr/share/kbd/keymaps/us.map`
   `/usr/share/kbd/keymaps/it.map`
+
+**Chiusura v1:**
+- pipeline reale `keycode -> keysym -> Unicode UTF-8` nel driver tastiera
+- layout integrati `us` e `it` con `Shift`, `Ctrl`, `Alt`, `AltGr` e dead keys basilari
+- API nuova con eventi (`keycode/modifiers/keysym/unicode`) e compat legacy `keyboard_getc()`
+- utility utente bootstrap `loadkeys` e `kbdlayout`
+- persistenza layout via `/data/etc/vconsole.conf` con fallback `/etc/vconsole.conf`
+- keymap bootstrap presenti in `/usr/share/kbd/keymaps/us.map` e `it.map`
+- selftest `kbd-layout`
+
+**Note v1:**
+- layout attivo globale per la console corrente; il passaggio a stato per-sessione/TTY
+  resta un miglioramento futuro, non un blocker della milestone
+- la resa UTF-8 del terminale testuale resta legata al path `term80`, che oggi e'
+  ancora principalmente byte-oriented
 
 **RT constraint:** la traduzione del tasto resta O(1) con lookup tabellare; il cambio layout
 non è RT-safe, ma il path di input ordinario sì.
@@ -1262,7 +1279,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=43 pass=43 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=44 pass=44 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -3021,7 +3038,7 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 1. **M10-01** VirtIO Network Driver — apre l'intera traccia networking e sblocca socket/API BSD
 2. **M8-08 plugin** — ora che `M11-03` e' chiusa, i plugin dinamici di `arksh` sono il prossimo passo shell-side sensato
-3. **M8-08g** layout tastiera multipli (`us`/`it`) — migliora subito l'usabilita' reale della shell appena chiusa in `M8-08f`
+3. **M8-08h** i18n / localizzazione stringhe — completa il salto UX dopo i layout tastiera `M8-08g`
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
 Dopo M11-04 binari Mach-O AArch64 compilati per macOS girano su EnlilOS senza recompilazione.
@@ -3269,20 +3286,20 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** aprire la rete base con `M10-01`, poi plugin arksh dinamici, poi migliorare UX input con `M8-08g`
+- **Prossimo step:** aprire la rete base con `M10-01`, poi plugin arksh dinamici, poi completare l'i18n con `M8-08h`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-03`: suite `selftest` a `43/43`.
+> Stato verificato dopo la chiusura di `M8-08g`: suite `selftest` a `44/44`.
 
 ### 1. Cosa e' gia' stato completato
 
 - ✅ **Fondamenta kernel e debug**: `M14-02`, `M8-01`, `M8-03`, `M8-04`, `M8-05`, `M8-06`, `M8-07`
 - ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
-- ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
+- ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local
 
@@ -3294,14 +3311,14 @@ FASE 10 ──► container + io_uring + power (opzionale)
 | 2 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 3 | **M10-02** TCP/IP Stack | `M10-01` | Senza stack IP non esiste networking utile in user-space |
 | 4 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
-| 5 | **M8-08g** Layout tastiera multipli | core input gia' presente | Migliora subito usabilita' reale di console e shell (`us`/`it`) |
-| 6 | **M8-08h** i18n stringhe | `M8-08g` consigliata ma non obbligatoria | Evita che la UX shell/desktop resti solo `en_US`/hardcoded |
+| 5 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
+| 6 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
 
 ### 3. Sequenza raccomandata per dipendenze
 
 1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 2. **Aprire la rete**: `M10-01 -> M10-02 -> M10-03`
-3. **Migliorare l'usabilita' shell/input**: `M8-08g -> M8-08h`
+3. **Migliorare l'usabilita' shell/input**: `M8-08h`
 4. **Usare la rete per compatibilita' e desktop**:
    `M11-05` dipende da `M11-03 + M10-03 + M14-01`
    `M12-01` dipende da `M11-01 + M9-02 + M10-03`
@@ -3338,11 +3355,10 @@ FASE 10 ──► container + io_uring + power (opzionale)
 2. `M10-01`
 3. `M10-02`
 4. `M10-03`
-5. `M8-08g`
-6. `M8-08h`
-7. `M11-05`
-8. `M12-01`
-9. `M13-02`
+5. `M8-08h`
+6. `M11-05`
+7. `M12-01`
+8. `M13-02`
 
 Se serve un principio guida unico: **prima rendere EnlilOS un sistema usabile da shell reale,
 poi un sistema con librerie dinamiche, poi un sistema con rete, e solo dopo un sistema desktop

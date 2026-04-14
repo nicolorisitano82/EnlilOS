@@ -21,7 +21,7 @@ tutto ogni sessione.
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura un checkout esterno di `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila un checkout esterno di `arksh`
-- Stato validato corrente: `SUMMARY total=43 pass=43 fail=0`
+- Stato validato corrente: `SUMMARY total=44 pass=44 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -620,17 +620,17 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-14)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=43 pass=43 fail=0
+SUMMARY total=44 pass=44 fail=0
 ```
 
 **Prossime priorità**:
 1. M10-01 VirtIO network driver
 2. M8-08 plugin arksh
-3. M8-08g layout tastiera multipli (`us`/`it`)
+3. M8-08h i18n / localizzazione stringhe
 4. M11-05 Linux compatibility layer
 5. M12-01 Wayland server minimale
 
@@ -713,6 +713,30 @@ SUMMARY total=43 pass=43 fail=0
 - Attenzione: CMake **non rilinka** automaticamente se cambia solo `libc.a` (non
   i sorgenti `.c`). Dopo ogni modifica al bootstrap musl, fare
   `rm toolchain/build/arksh/arksh && make arksh-build` per forzare il relink.
+
+### Knowledge operativa M8-08g (layout tastiera `us`/`it`)
+
+- `keyboard_getc()` resta il path legacy consumato dalla console/TTY, ma ora i byte
+  arrivano da un layer eventi piu' ricco: `keycode + modifiers + keysym + unicode`.
+  Per i caratteri non ASCII il driver emette direttamente UTF-8.
+- La `v1` usa un layout attivo globale per la console corrente. Non c'e' ancora uno
+  stato separato per TTY multipla o per-sessione shell; per l'architettura attuale
+  single-console questo e' intenzionale e sufficiente.
+- I layout integrati oggi sono `us` e `it`. La tabella `it` supporta anche i casi
+  minimi che servono davvero per uso locale: `à è é ì ò ù`, `@`, `#`, `£`, `§`,
+  `°`, parentesi quadre/graffe, `AltGr` e tasti morti basilari.
+- Persistenza layout:
+  - bootstrap RO in `/etc/vconsole.conf`
+  - override persistente RW in `/data/etc/vconsole.conf`
+  - ordine di load al boot: `/data/etc/vconsole.conf` prima, fallback `/etc/vconsole.conf`
+- I comandi utente bootstrap sono `/usr/bin/loadkeys` e `/usr/bin/kbdlayout`.
+  Importante: non devono includere gli header kernel del repo nel path di build musl,
+  altrimenti si rompono gli header libc bootstrap. Usano `user_svc.h` + numeri syscall
+  dedicati e restano isolati dal namespace header kernel.
+- Bug reale emerso dal packaging: aggiungere keymap e utility ha portato l'initrd a 70
+  entry. Il parser CPIO aveva `INITRD_MAX_ENTRIES = 64`, quindi la rootfs montava come
+  `initrd-error`. Fix: alzato a 128.
+- Il selftest di riferimento e' `kbd-layout`; la suite completa valida ora `44/44`.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 

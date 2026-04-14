@@ -1,0 +1,4 @@
+# EnlilOS built-in keymap v1
+name=us
+layout=us
+encoding=utf-8

@@ -7,7 +7,7 @@
 
 #include "initrd.h"
 
-#define INITRD_MAX_ENTRIES   64U
+#define INITRD_MAX_ENTRIES   128U
 #define INITRD_ROOT_NODE     1U
 #define INITRD_PARENT_ROOT   0xFFFFU
 #define INITRD_STATUS_MAX    128U

@@ -87,6 +87,8 @@
 #define SYS_MKDIR           71
 #define SYS_UNLINK          72
 #define SYS_RENAME          73
+#define SYS_KBD_SET_LAYOUT  74
+#define SYS_KBD_GET_LAYOUT  75
 #define SYS_DLOPEN          67
 #define SYS_DLSYM           68
 #define SYS_DLCLOSE         69

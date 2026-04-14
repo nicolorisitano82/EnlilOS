@@ -124,13 +124,66 @@ typedef struct {
 #define BTN_MIDDLE   274U
 
 /* Keyboard key codes used by keyboard driver */
+#define KEY_ESC         1U
+#define KEY_1           2U
+#define KEY_2           3U
+#define KEY_3           4U
+#define KEY_4           5U
+#define KEY_5           6U
+#define KEY_6           7U
+#define KEY_7           8U
+#define KEY_8           9U
+#define KEY_9           10U
+#define KEY_0           11U
+#define KEY_MINUS       12U
+#define KEY_EQUAL       13U
+#define KEY_BACKSPACE   14U
+#define KEY_TAB         15U
+#define KEY_Q           16U
+#define KEY_W           17U
+#define KEY_E           18U
+#define KEY_R           19U
+#define KEY_T           20U
+#define KEY_Y           21U
+#define KEY_U           22U
+#define KEY_I           23U
+#define KEY_O           24U
+#define KEY_P           25U
+#define KEY_LEFTBRACE   26U
+#define KEY_RIGHTBRACE  27U
 #define KEY_ENTER       28U
-#define KEY_A           30U
 #define KEY_LEFTCTRL    29U
+#define KEY_A           30U
+#define KEY_S           31U
+#define KEY_D           32U
+#define KEY_F           33U
+#define KEY_G           34U
+#define KEY_H           35U
+#define KEY_J           36U
+#define KEY_K           37U
+#define KEY_L           38U
+#define KEY_SEMICOLON   39U
+#define KEY_APOSTROPHE  40U
+#define KEY_GRAVE       41U
 #define KEY_LEFTSHIFT   42U
+#define KEY_BACKSLASH   43U
+#define KEY_Z           44U
+#define KEY_X           45U
+#define KEY_C           46U
+#define KEY_V           47U
+#define KEY_B           48U
+#define KEY_N           49U
+#define KEY_M           50U
+#define KEY_COMMA       51U
+#define KEY_DOT         52U
+#define KEY_SLASH       53U
 #define KEY_RIGHTSHIFT  54U
+#define KEY_LEFTALT     56U
 #define KEY_SPACE       57U
+#define KEY_CAPSLOCK    58U
+#define KEY_102ND       86U
 #define KEY_RIGHTCTRL   97U
+#define KEY_RIGHTALT    100U
 
 /* Vring descriptor flags */
 #define VRING_DESC_F_NEXT   1U   /* descriptor continua nella catena */

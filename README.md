@@ -15,7 +15,7 @@ Le milestone completate oggi coprono:
 - **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
-- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/usr/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem` e `kmon`.
+- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/usr/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
@@ -24,7 +24,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=43 pass=43 fail=0`.
+`SUMMARY total=44 pass=44 fail=0`.
 
 ---
 
@@ -78,8 +78,13 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `bin/arksh`
 - `usr/bin/arksh.real` (se build esterna `arksh` presente)
 - `bin/nsh`
+- `usr/bin/loadkeys`
+- `usr/bin/kbdlayout`
 - `etc/arkshrc`
+- `etc/vconsole.conf`
 - `home/user/.config/arksh/arkshrc`
+- `usr/share/kbd/keymaps/us.map`
+- `usr/share/kbd/keymaps/it.map`
 - `NSH.ELF`
 - `DEMO.ELF`
 - `EXEC1.ELF`
@@ -258,6 +263,8 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `semdemo`
 - `tlsmtdemo`
 - `arksh`
+- `kbdlayout`
+- `loadkeys it`
 - `runelf /MUSLHELLO.ELF`
 - `runelf /MUSLSTDIO.ELF`
 - `runelf /MUSLMALLOC.ELF`
@@ -272,6 +279,12 @@ Al boot il sistema prova ad avviare `/bin/arksh` come login shell di default. Il
 launcher cerca prima la shell reale in `/usr/bin/arksh` o `/usr/bin/arksh.real`;
 se non la trova, degrada in modo pulito su `/bin/nsh`, che resta anche richiamabile
 esplicitamente come recovery shell.
+
+La tastiera usa oggi una pipeline `keycode -> keysym -> Unicode UTF-8` con due
+layout integrati, `us` e `it`. `kbdlayout` mostra il layout attivo, mentre
+`loadkeys us|it` lo cambia a runtime e prova a persisterlo in
+`/data/etc/vconsole.conf` se il disco `ext4` e' disponibile. In fallback resta
+valida la configurazione bootstrap in `/etc/vconsole.conf`.
 
 `NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
 
@@ -290,7 +303,7 @@ esplicitamente come recovery shell.
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 43 casi:
+Esiste una suite di self-test kernel-side che oggi copre 44 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
@@ -300,6 +313,7 @@ Esiste una suite di self-test kernel-side che oggi copre 43 casi:
 - `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`
 - `musl-dlfcn`
 - `arksh-toolchain`, `arksh-login`
+- `kbd-layout`
 - `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`
 
 La build dedicata e':
@@ -312,7 +326,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=43 pass=43 fail=0
+SUMMARY total=44 pass=44 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

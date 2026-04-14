@@ -9,5 +9,10 @@ Entry points:
 /ARKSHBOOT.ELF -> selftest ELF non interattivo per la login shell
 /bin/arksh     -> shell di login v1 con fallback automatico a /bin/nsh
 /bin/nsh       -> recovery shell userspace
+/usr/bin/loadkeys  -> cambio layout tastiera (`us`/`it`)
+/usr/bin/kbdlayout -> mostra il layout tastiera attivo
 /etc/arkshrc   -> rc globale bootstrap
+/etc/vconsole.conf -> layout tastiera bootstrap (`KEYMAP=...`)
 /home/user/.config/arksh/arkshrc -> rc utente fallback
+/usr/share/kbd/keymaps/us.map -> keymap bootstrap US
+/usr/share/kbd/keymaps/it.map -> keymap bootstrap IT

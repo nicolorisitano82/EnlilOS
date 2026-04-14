@@ -20,6 +20,7 @@
 #include "ksem.h"
 #include "microkernel.h"
 #include "mmu.h"
+#include "keyboard.h"
 #include "sched.h"
 #include "signal.h"
 #include "syscall.h"
@@ -373,6 +374,31 @@ static int selftest_case_rootfs(void)
     buf[n] = '\0';
     ST_CHECK(case_name, st_contains(buf, "arkshrc"),
              "user arkshrc non contiene il marker atteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/etc/vconsole.conf", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/vconsole.conf fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /etc/vconsole.conf vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "KEYMAP=us"),
+             "/etc/vconsole.conf non contiene KEYMAP=us");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/usr/share/kbd/keymaps/us.map", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open us.map fallita");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/usr/share/kbd/keymaps/it.map", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open it.map fallita");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/usr/bin/loadkeys", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /usr/bin/loadkeys fallita");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/usr/bin/kbdlayout", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /usr/bin/kbdlayout fallita");
     (void)vfs_close(&file);
 
     rc = vfs_open("/VFSD.ELF", O_RDONLY, &file);
@@ -2104,6 +2130,11 @@ static int selftest_case_musl_dlfcn(void)
                                "[EL0] dynamic ELF avviato correttamente\n", 1);
 }
 
+static int selftest_case_kbd_layout(void)
+{
+    return (keyboard_selftest_run() == 0) ? 0 : -1;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -2148,6 +2179,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-pipe",   selftest_case_musl_pipe },
     { "musl-glob",   selftest_case_musl_glob },
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
+    { "kbd-layout",  selftest_case_kbd_layout },
 };
 
 int selftest_run_named(const char *name)

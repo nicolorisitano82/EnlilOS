@@ -78,6 +78,8 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 #define BOOTCLI_INPUT_MAX     72U
 #define BOOTCLI_PATH_MAX      128U
 #define BOOTCLI_MOUSE_EVENT_MAX 4U
+
+static int boot_persist_keyboard_layout(const char *name);
 #define BOOTCLI_MOUSE_LINE_MAX  52U
 
 static char      bootcli_lines[BOOTCLI_HISTORY_MAX][BOOTCLI_LINE_MAX + 1];
@@ -257,6 +259,7 @@ static void boot_prepare_login_layout(void)
     if (!ext4_is_mounted())
         return;
 
+    boot_seed_dir_if_missing("/data/etc", 0755U);
     boot_seed_dir_if_missing("/data/home", 0755U);
     boot_seed_dir_if_missing("/data/home/user", 0755U);
     boot_seed_dir_if_missing("/data/home/user/.config", 0755U);
@@ -268,6 +271,154 @@ static void boot_prepare_login_layout(void)
     boot_seed_text_if_missing("/data/home/user/.config/arksh/arkshrc",
                               boot_arkshrc_user_default);
     boot_seed_text_if_missing("/data/home/user/.local/state/arksh/history", "");
+    boot_seed_text_if_missing("/data/etc/vconsole.conf", "KEYMAP=it\n");
+}
+
+static int boot_read_text_file(const char *path, char *buf, size_t cap)
+{
+    vfs_file_t file;
+    ssize_t    n;
+    int        rc;
+
+    if (!path || !buf || cap < 2U)
+        return -1;
+
+    rc = vfs_open(path, O_RDONLY, &file);
+    if (rc < 0)
+        return -1;
+
+    n = vfs_read(&file, buf, cap - 1U);
+    (void)vfs_close(&file);
+    if (n < 0)
+        return -1;
+
+    buf[(size_t)n] = '\0';
+    return 0;
+}
+
+static int boot_parse_keymap_value(const char *text, char *out, size_t cap)
+{
+    const char *p = text;
+
+    if (!text || !out || cap < 2U)
+        return -1;
+
+    while (*p != '\0') {
+        const char *line = p;
+        size_t      len = 0U;
+
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (*line == '#') {
+            while (*p != '\0' && *p != '\n')
+                p++;
+            if (*p == '\n')
+                p++;
+            continue;
+        }
+
+        if (line[0] == 'K' && line[1] == 'E' && line[2] == 'Y' &&
+            line[3] == 'M' && line[4] == 'A' && line[5] == 'P' &&
+            line[6] == '=') {
+            line += 7;
+            while (*line == ' ' || *line == '\t')
+                line++;
+            while (line[len] != '\0' && line[len] != '\n' &&
+                   line[len] != '\r' && line[len] != ' ' &&
+                   line[len] != '\t' && line[len] != '#' &&
+                   len + 1U < cap) {
+                out[len] = line[len];
+                len++;
+            }
+            out[len] = '\0';
+            return (len > 0U) ? 0 : -1;
+        }
+
+        while (*p != '\0' && *p != '\n')
+            p++;
+        if (*p == '\n')
+            p++;
+    }
+
+    return -1;
+}
+
+static int boot_load_keyboard_layout_from_file(const char *path)
+{
+    char text[96];
+    char layout[16];
+
+    if (boot_read_text_file(path, text, sizeof(text)) < 0)
+        return -1;
+    if (boot_parse_keymap_value(text, layout, sizeof(layout)) < 0)
+        return -1;
+    if (keyboard_set_layout_name(layout) < 0)
+        return -1;
+    return 0;
+}
+
+static void boot_apply_keyboard_layout_config(void)
+{
+    char persisted[96];
+    char layout[16];
+
+    if (ext4_is_mounted() &&
+        boot_read_text_file("/data/etc/vconsole.conf", persisted,
+                            sizeof(persisted)) == 0 &&
+        boot_parse_keymap_value(persisted, layout, sizeof(layout)) == 0 &&
+        layout[0] == 'u' && layout[1] == 's' && layout[2] == '\0') {
+        if (boot_persist_keyboard_layout("it") == 0)
+            uart_puts("[KBD] Migrazione default layout: us -> it\n");
+    }
+
+    if (ext4_is_mounted() &&
+        boot_load_keyboard_layout_from_file("/data/etc/vconsole.conf") == 0) {
+        uart_puts("[KBD] Layout persistente caricato da /data/etc/vconsole.conf: ");
+        uart_puts(keyboard_get_layout_name());
+        uart_puts("\n");
+        return;
+    }
+
+    if (boot_load_keyboard_layout_from_file("/etc/vconsole.conf") == 0) {
+        uart_puts("[KBD] Layout bootstrap caricato da /etc/vconsole.conf: ");
+        uart_puts(keyboard_get_layout_name());
+        uart_puts("\n");
+    }
+}
+
+static int boot_persist_keyboard_layout(const char *name)
+{
+    vfs_file_t file;
+    char       line[32];
+    size_t     len = 0U;
+    int        rc;
+
+    if (!ext4_is_mounted() || !name || name[0] == '\0')
+        return -1;
+
+    boot_seed_dir_if_missing("/data/etc", 0755U);
+
+    rc = vfs_open("/data/etc/vconsole.conf", O_CREAT | O_WRONLY | O_TRUNC, &file);
+    if (rc < 0)
+        return -1;
+
+    {
+        static const char prefix[] = "KEYMAP=";
+        while (prefix[len] != '\0' && len + 1U < sizeof(line)) {
+            line[len] = prefix[len];
+            len++;
+        }
+    }
+    while (name[0] != '\0' && len + 2U < sizeof(line)) {
+        line[len++] = *name++;
+    }
+    line[len++] = '\n';
+    line[len] = '\0';
+
+    (void)vfs_write(&file, line, len);
+    (void)vfs_fsync(&file);
+    (void)vfs_close(&file);
+    return 0;
 }
 
 static uint32_t bootcli_strlen(const char *s)
@@ -1285,13 +1436,13 @@ static void bootcli_render(void)
                       "Comandi: help clear pwd cd gpu selftest [nome] fs ls cat write",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 112U,
-                      "append mkdir truncate rm mv fsync sync arksh login nsh mreactdemo jobdemo",
+                      "append mkdir truncate rm mv fsync sync kbdlayout loadkeys arksh login nsh",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "nsdemo posixdemo muslabi muslglob musldl arkshsmoke clonedemo threadlife",
+                      "mreactdemo jobdemo nsdemo posixdemo muslabi muslglob musldl arkshsmoke",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 152U,
-                      "futexdemo pthreaddemo semdemo tlsmtdemo crtdemo",
+                      "clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo crtdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1400,6 +1551,8 @@ static void bootcli_execute_command(void)
         bootcli_push_line("fsync P   flush esplicito del singolo file");
         bootcli_push_line("truncate P N imposta la size di un file ext4 esistente");
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
+        bootcli_push_line("kbdlayout mostra il layout tastiera attivo");
+        bootcli_push_line("loadkeys L attiva il layout tastiera (us/it) e prova a persisterlo");
         bootcli_push_line("arksh     lancia la shell arksh reale da /usr/bin se presente");
         bootcli_push_line("login     rilancia la login shell bridge (/bin/arksh)");
         bootcli_push_line("nsh       lancia la shell ELF statica 80x25 di recovery");
@@ -1581,6 +1734,26 @@ static void bootcli_execute_command(void)
             bootcli_push_error("sync", rc);
         else
             bootcli_push_line("sync OK: cache ext4 e mount VFS flushati.");
+    } else if (bootcli_streq(bootcli_input, "kbdlayout")) {
+        line[0] = '\0';
+        bootcli_buf_append(line, sizeof(line), "layout tastiera attivo: ");
+        bootcli_buf_append(line, sizeof(line), keyboard_get_layout_name());
+        bootcli_push_line(line);
+    } else if (bootcli_startswith(bootcli_input, "loadkeys ")) {
+        const char *name = bootcli_input + 9;
+
+        if (!name[0]) {
+            bootcli_push_line("Uso: loadkeys us|it");
+        } else if (keyboard_set_layout_name(name) < 0) {
+            bootcli_push_line("loadkeys: layout non supportato.");
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "layout attivo: ");
+            bootcli_buf_append(line, sizeof(line), keyboard_get_layout_name());
+            if (boot_persist_keyboard_layout(keyboard_get_layout_name()) < 0)
+                bootcli_buf_append(line, sizeof(line), " (persistenza non salvata)");
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "arksh")) {
         bootcli_launch_real_arksh(1);
     } else if (bootcli_streq(bootcli_input, "login")) {
@@ -1974,6 +2147,14 @@ static void bootcli_init(void)
     bootcli_push_line("Login shell di default: /bin/arksh (bridge con fallback automatico a nsh).");
     bootcli_push_line("Digita 'help' e premi Invio per testare tastiera e comandi di recovery.");
     bootcli_push_line("Prova anche: arksh, login, nsh, pwd, cd /data, ls, cat /BOOT.TXT.");
+    {
+        char line[96];
+        line[0] = '\0';
+        bootcli_buf_append(line, sizeof(line), "Layout tastiera attivo: ");
+        bootcli_buf_append(line, sizeof(line), keyboard_get_layout_name());
+        bootcli_buf_append(line, sizeof(line), " | usa 'loadkeys us|it' o 'kbdlayout'.");
+        bootcli_push_line(line);
+    }
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
     bootcli_push_line("M8-04: prova 'jobdemo' per process group, sessione e waitpid(WUNTRACED).");
@@ -2148,6 +2329,7 @@ void kernel_main(void)
     blk_init();
     vfs_rescan();
     boot_prepare_login_layout();
+    boot_apply_keyboard_layout_config();
     ane_init();
     gpu_init();
     /* Da qui: task switching via timer IRQ ogni 1ms.
@@ -2217,6 +2399,9 @@ void kernel_main(void)
     uart_puts("[EnlilOS] Boot completato con successo!\n");
     uart_puts("[EnlilOS] Console interattiva pronta\n");
     uart_puts("[EnlilOS] Login shell: /bin/arksh (bridge con fallback automatico a /bin/nsh)\n");
+    uart_puts("[EnlilOS] Layout tastiera: ");
+    uart_puts(keyboard_get_layout_name());
+    uart_puts(" (usa 'loadkeys us|it' o 'kbdlayout')\n");
     uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");

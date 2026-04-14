@@ -3491,6 +3491,48 @@ static uint64_t sys_tcsetattr(uint64_t args[6])
     return (rc < 0) ? ERR(-rc) : 0;
 }
 
+static uint64_t sys_kbd_set_layout(uint64_t args[6])
+{
+    uintptr_t name_uva = (uintptr_t)args[0];
+    char      name[32];
+    int       rc;
+
+    if (!name_uva)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr(name_uva, name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+    if (keyboard_set_layout_name(name) < 0)
+        return ERR(EINVAL);
+    return 0;
+}
+
+static uint64_t sys_kbd_get_layout(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    uint64_t  len = args[1];
+    const char *name = keyboard_get_layout_name();
+    size_t     copy_len = 0U;
+    int        rc;
+
+    if (!buf_uva)
+        return ERR(EFAULT);
+    if (len == 0ULL)
+        return ERR(EINVAL);
+
+    while (name[copy_len] != '\0')
+        copy_len++;
+    copy_len++;
+    if (copy_len > (size_t)len)
+        return ERR(ERANGE);
+
+    rc = user_store_bytes(buf_uva, name, copy_len);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)(copy_len - 1U);
+}
+
 static uint64_t sys_isatty(uint64_t args[6])
 {
     return fd_is_tty_object(fd_get((int)args[0])) ? 1ULL : 0ULL;
@@ -4365,6 +4407,12 @@ void syscall_init(void)
     syscall_table[SYS_TCSETATTR] = (syscall_entry_t){
         sys_tcsetattr, 0, "tcsetattr"
     };
+    syscall_table[SYS_KBD_SET_LAYOUT] = (syscall_entry_t){
+        sys_kbd_set_layout, 0, "kbd_set_layout"
+    };
+    syscall_table[SYS_KBD_GET_LAYOUT] = (syscall_entry_t){
+        sys_kbd_get_layout, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "kbd_get_layout"
+    };
     syscall_table[SYS_GETPID] = (syscall_entry_t){
         sys_getpid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getpid"
     };
@@ -4599,7 +4647,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 104 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs registrate\n");
+    uart_puts("[SYSCALL] 106 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
     syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
     uart_puts(" proc slot\n");

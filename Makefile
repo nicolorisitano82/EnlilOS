@@ -186,7 +186,9 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/arksh_boot.c \
                         toolchain/smoke/musl_pthread.c \
                         toolchain/smoke/musl_semaphore.c \
-                        toolchain/smoke/musl_tls_mt.c
+                        toolchain/smoke/musl_tls_mt.c \
+                        toolchain/smoke/loadkeys.c \
+                        toolchain/smoke/kbdlayout.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -386,6 +388,9 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		dir:sysroot \
 		dir:usr \
 		dir:usr/bin \
+		dir:usr/share \
+		dir:usr/share/kbd \
+		dir:usr/share/kbd/keymaps \
 		dir:usr/lib \
 		dir:usr/lib/arksh \
 		dir:usr/lib/arksh/plugins \
@@ -417,6 +422,8 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		MUSLPIPE.ELF=toolchain/smoke/musl_pipe_termios.elf \
 		MUSLGLOB.ELF=toolchain/smoke/musl_glob_fnmatch.elf \
 		MUSLDL.ELF=toolchain/smoke/musl_dlfcn.elf \
+		LOADKEYS.ELF=toolchain/smoke/loadkeys.elf \
+		KBDLAYOUT.ELF=toolchain/smoke/kbdlayout.elf \
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
@@ -425,6 +432,11 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		bin/arksh=$(ARKSH_BOOT_ELF) \
 		bin/nsh=user/nsh.elf \
 		$(ARKSH_REAL_INITRD) \
+		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
+		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
+		usr/share/kbd/keymaps/us.map=initrd/us.map \
+		usr/share/kbd/keymaps/it.map=initrd/it.map \
+		etc/vconsole.conf=initrd/vconsole.conf \
 		etc/arkshrc=initrd/arkshrc \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \
