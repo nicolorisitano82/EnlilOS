@@ -14,6 +14,9 @@ static uint32_t term80_row;
 static uint32_t term80_col;
 static uint8_t  term80_active;
 static uint8_t  term80_dirty;
+static uint8_t  term80_esc_state;
+static uint8_t  term80_csi_len;
+static char     term80_csi_buf[16];
 
 static void term80_fill_spaces(char *row)
 {
@@ -41,6 +44,166 @@ static void term80_newline(void)
         term80_row++;
 }
 
+static void term80_parser_reset(void)
+{
+    term80_esc_state = 0U;
+    term80_csi_len   = 0U;
+}
+
+static uint32_t term80_parse_param(uint32_t index, uint32_t default_value)
+{
+    uint32_t current = 0U;
+    uint32_t seen    = 0U;
+    uint32_t which   = 0U;
+
+    for (uint32_t i = 0U; i < term80_csi_len; i++) {
+        char ch = term80_csi_buf[i];
+
+        if (ch >= '0' && ch <= '9') {
+            current = current * 10U + (uint32_t)(ch - '0');
+            seen = 1U;
+        } else if (ch == ';') {
+            if (which == index)
+                return seen ? current : default_value;
+            which++;
+            current = 0U;
+            seen = 0U;
+        }
+    }
+
+    if (which == index)
+        return seen ? current : default_value;
+    return default_value;
+}
+
+static void term80_clear_to_eol(void)
+{
+    for (uint32_t col = term80_col; col < TERM80_COLS; col++)
+        term80_cells[term80_row][col] = ' ';
+    term80_dirty = 1U;
+}
+
+static void term80_clear_from_sol(void)
+{
+    for (uint32_t col = 0U; col <= term80_col && col < TERM80_COLS; col++)
+        term80_cells[term80_row][col] = ' ';
+    term80_dirty = 1U;
+}
+
+static void term80_clear_screen_from_cursor(void)
+{
+    term80_clear_to_eol();
+    for (uint32_t row = term80_row + 1U; row < TERM80_ROWS; row++)
+        term80_fill_spaces(term80_cells[row]);
+    term80_dirty = 1U;
+}
+
+static void term80_clear_screen_to_cursor(void)
+{
+    for (uint32_t row = 0U; row < term80_row; row++)
+        term80_fill_spaces(term80_cells[row]);
+    term80_clear_from_sol();
+    term80_dirty = 1U;
+}
+
+static void term80_handle_csi(char final_ch)
+{
+    uint32_t n = term80_parse_param(0U, 1U);
+
+    switch (final_ch) {
+    case 'A':
+        if (n > term80_row)
+            term80_row = 0U;
+        else
+            term80_row -= n;
+        term80_dirty = 1U;
+        break;
+    case 'B':
+        term80_row += n;
+        if (term80_row >= TERM80_ROWS)
+            term80_row = TERM80_ROWS - 1U;
+        term80_dirty = 1U;
+        break;
+    case 'C':
+        term80_col += n;
+        if (term80_col >= TERM80_COLS)
+            term80_col = TERM80_COLS - 1U;
+        term80_dirty = 1U;
+        break;
+    case 'D':
+        if (n > term80_col)
+            term80_col = 0U;
+        else
+            term80_col -= n;
+        term80_dirty = 1U;
+        break;
+    case 'G':
+        if (n == 0U)
+            n = 1U;
+        term80_col = (n - 1U < TERM80_COLS) ? (n - 1U) : (TERM80_COLS - 1U);
+        term80_dirty = 1U;
+        break;
+    case 'H':
+    case 'f': {
+        uint32_t row = term80_parse_param(0U, 1U);
+        uint32_t col = term80_parse_param(1U, 1U);
+
+        if (row == 0U) row = 1U;
+        if (col == 0U) col = 1U;
+        term80_row = (row - 1U < TERM80_ROWS) ? (row - 1U) : (TERM80_ROWS - 1U);
+        term80_col = (col - 1U < TERM80_COLS) ? (col - 1U) : (TERM80_COLS - 1U);
+        term80_dirty = 1U;
+        break;
+    }
+    case 'J':
+        switch (term80_parse_param(0U, 0U)) {
+        case 0U:
+            term80_clear_screen_from_cursor();
+            break;
+        case 1U:
+            term80_clear_screen_to_cursor();
+            break;
+        default:
+            term80_clear();
+            break;
+        }
+        break;
+    case 'K':
+        switch (term80_parse_param(0U, 0U)) {
+        case 0U:
+            term80_clear_to_eol();
+            break;
+        case 1U:
+            term80_clear_from_sol();
+            break;
+        default:
+            term80_fill_spaces(term80_cells[term80_row]);
+            term80_dirty = 1U;
+            break;
+        }
+        break;
+    case 'm':
+        /* SGR/color: ignorato per il terminale 80x25 monocromatico. */
+        break;
+    default:
+        break;
+    }
+}
+
+static void term80_put_visible(char c)
+{
+    if ((unsigned char)c < 32U || (unsigned char)c > 126U)
+        c = '?';
+
+    term80_cells[term80_row][term80_col] = c;
+    if (term80_col + 1U >= TERM80_COLS)
+        term80_newline();
+    else
+        term80_col++;
+
+    term80_dirty = 1U;
+}
+
 static void term80_title_copy(const char *title)
 {
     uint32_t i = 0U;
@@ -63,6 +226,7 @@ void term80_init(void)
     term80_active = 0U;
     term80_dirty = 1U;
     term80_title_copy("nsh");
+    term80_parser_reset();
 }
 
 void term80_activate(uint32_t owner_pid, const char *title)
@@ -73,6 +237,7 @@ void term80_activate(uint32_t owner_pid, const char *title)
     term80_active = 1U;
     term80_dirty = 1U;
     term80_title_copy(title ? title : "nsh");
+    term80_parser_reset();
 
     for (uint32_t row = 0U; row < TERM80_ROWS; row++)
         term80_fill_spaces(term80_cells[row]);
@@ -83,6 +248,7 @@ void term80_deactivate(void)
     term80_active = 0U;
     term80_owner = 0U;
     term80_dirty = 1U;
+    term80_parser_reset();
 }
 
 int term80_is_active(void)
@@ -108,12 +274,42 @@ void term80_clear(void)
     term80_row = 0U;
     term80_col = 0U;
     term80_dirty = 1U;
+    term80_parser_reset();
 }
 
 void term80_putc(char c)
 {
     if (!term80_active)
         return;
+
+    if (term80_esc_state == 1U) {
+        if (c == '[') {
+            term80_esc_state = 2U;
+            term80_csi_len = 0U;
+            return;
+        }
+        term80_parser_reset();
+        return;
+    }
+
+    if (term80_esc_state == 2U) {
+        unsigned char uc = (unsigned char)c;
+
+        if ((uc >= '0' && uc <= '9') || c == ';' || c == '?') {
+            if (term80_csi_len + 1U < (uint32_t)sizeof(term80_csi_buf))
+                term80_csi_buf[term80_csi_len++] = c;
+            return;
+        }
+
+        if (uc >= 0x40U && uc <= 0x7EU) {
+            term80_handle_csi(c);
+            term80_parser_reset();
+            return;
+        }
+
+        term80_parser_reset();
+        return;
+    }
 
     switch ((unsigned char)c) {
     case '\f':
@@ -141,22 +337,13 @@ void term80_putc(char c)
         } while ((term80_col & 3U) != 0U);
         return;
     case 0x1B:
-        /* Le escape ANSI vengono ignorate: clear usa anche '\f'. */
+        term80_esc_state = 1U;
         return;
     default:
         break;
     }
 
-    if ((unsigned char)c < 32U || (unsigned char)c > 126U)
-        c = '?';
-
-    term80_cells[term80_row][term80_col] = c;
-    if (term80_col + 1U >= TERM80_COLS)
-        term80_newline();
-    else
-        term80_col++;
-
-    term80_dirty = 1U;
+    term80_put_visible(c);
 }
 
 void term80_write(const char *buf, uint32_t len)
