@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "elf_loader.h"
 #include "futex.h"
 #include "kmon.h"
 #include "ksem.h"
@@ -1455,6 +1456,7 @@ static void sched_task_finish_exit(sched_tcb_t *task, int32_t code)
         last_thread = proc_release(ctx->proc_slot, code, &parent_pid);
     if (last_thread) {
         vmm_cleanup_task(proc_slot);
+        elf64_dlreset_proc(proc_slot);
         syscall_task_cleanup(task);
         if (parent_pid != 0U)
             (void)signal_send_pid(parent_pid, SIGCHLD);

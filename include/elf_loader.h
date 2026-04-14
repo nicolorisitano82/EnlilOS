@@ -39,6 +39,11 @@
 #define ELF_LOADER_MAX_ARGS   16U
 #define ELF_LOADER_MAX_ENVP   16U
 
+#define ELF_RTLD_LAZY         0x0001U
+#define ELF_RTLD_NOW          0x0002U
+#define ELF_RTLD_LOCAL        0x0000U
+#define ELF_RTLD_GLOBAL       0x0100U
+
 typedef struct {
     mm_space_t *space;
     uintptr_t   entry;
@@ -72,6 +77,13 @@ sched_tcb_t  *elf64_spawn_image(const char *task_name, const elf_image_t *image,
 int           elf64_spawn_path(const char *path, const char *argv0,
                                uint8_t priority, uint32_t *pid_out);
 int           elf64_spawn_demo(uint8_t priority, uint32_t *pid_out);
+int           elf64_dlopen_current(const char *path, uint32_t flags,
+                                   uintptr_t *handle_out);
+int           elf64_dlsym_current(uintptr_t handle, const char *name,
+                                  uintptr_t *value_out);
+int           elf64_dlclose_current(uintptr_t handle);
+int           elf64_dlerror_drain_current(char *dst, size_t cap);
+void          elf64_dlreset_proc(uint32_t proc_slot);
 
 const char   *elf64_last_error(void);
 

@@ -301,29 +301,36 @@ void tty_init(void)
 
 uint64_t tty_read(char *buf, uint64_t cnt)
 {
+    uint64_t got = 0U;
+
     if (!buf || cnt == 0U) return ERR(EFAULT);
 
-    tty_adopt_current_session();
-    if (tty_is_background_current()) {
-        tty_signal_current_group(SIGTTIN);
-        return ERR(EINTR);
+    for (;;) {
+        tty_adopt_current_session();
+        if (tty_is_background_current()) {
+            tty_signal_current_group(SIGTTIN);
+            return ERR(EINTR);
+        }
+
+        tty_pump_input();
+
+        if (signal_has_unblocked_pending(current_task))
+            return ERR(EINTR);
+
+        if (tty_eof_pending && tty_ready_empty()) {
+            tty_eof_pending = 0U;
+            return 0U;
+        }
+
+        if (!tty_ready_empty())
+            break;
+
+        sched_yield();
     }
-    tty_pump_input();
 
-    if (signal_has_unblocked_pending(current_task))
-        return ERR(EINTR);
-
-    if (tty_eof_pending && tty_ready_empty()) {
-        tty_eof_pending = 0U;
-        return 0U;
-    }
-
-    if (tty_ready_empty())
-        return ERR(EAGAIN);
-
-    uint64_t got = 0U;
     while (got < cnt && !tty_ready_empty()) {
         uint8_t c;
+
         if (!tty_ready_pop(&c))
             break;
 

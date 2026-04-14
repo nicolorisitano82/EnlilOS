@@ -38,7 +38,7 @@ static uint64_t l1_table[512] __attribute__((aligned(4096)));
 
 #define MMU_MAX_SPACES        SCHED_MAX_TASKS
 #define MMU_MAX_SPACE_TABLES  16U
-#define MMU_MAX_SPACE_EXTENTS 48U
+#define MMU_MAX_SPACE_EXTENTS 1024U
 
 typedef struct {
     uintptr_t va;
@@ -55,9 +55,12 @@ struct mm_space {
     uint8_t     in_use;
     uint8_t     is_kernel;
     uint8_t     table_count;
-    uint8_t     extent_count;
+    uint8_t     _pad0;
     uintptr_t   brk;
     uintptr_t   mmap_base;
+    uint16_t    extent_count;
+    uint16_t    _pad1;
+    uint32_t    _pad2;
     uint64_t    table_pages[MMU_MAX_SPACE_TABLES];
     mm_extent_t extents[MMU_MAX_SPACE_EXTENTS];
 };
@@ -189,17 +192,99 @@ static int space_track_table(mm_space_t *space, uint64_t pa)
 static int space_track_extent(mm_space_t *space, uintptr_t va, uint64_t pa,
                               uint32_t pages, uint8_t order)
 {
-    mm_extent_t *ext;
+    uint32_t     idx;
 
     if (!space || pages == 0U || space->extent_count >= MMU_MAX_SPACE_EXTENTS)
         return -1;
 
-    ext = &space->extents[space->extent_count++];
-    ext->va    = va;
-    ext->pa    = pa;
-    ext->pages = pages;
-    ext->order = order;
+    idx = space->extent_count;
+    while (idx > 0U && space->extents[idx - 1U].va > va) {
+        space->extents[idx] = space->extents[idx - 1U];
+        idx--;
+    }
+
+    space->extents[idx].va    = va;
+    space->extents[idx].pa    = pa;
+    space->extents[idx].pages = pages;
+    space->extents[idx].order = order;
+    space->extent_count++;
     return 0;
+}
+
+static void space_release_extent_index(mm_space_t *space, uint32_t idx)
+{
+    if (!space || idx >= space->extent_count)
+        return;
+
+    while ((idx + 1U) < space->extent_count) {
+        space->extents[idx] = space->extents[idx + 1U];
+        idx++;
+    }
+    if (space->extent_count > 0U)
+        space->extent_count--;
+}
+
+static void space_release_overlapping_extents(mm_space_t *space,
+                                              uintptr_t start,
+                                              size_t size)
+{
+    uintptr_t end;
+    uint32_t  idx = 0U;
+
+    if (!space || size == 0U)
+        return;
+
+    end = start + size;
+    while (idx < space->extent_count) {
+        uintptr_t ext_start = space->extents[idx].va;
+        uintptr_t ext_end   = ext_start +
+                              (uintptr_t)space->extents[idx].pages * PAGE_SIZE;
+
+        if (ext_end <= start || ext_start >= end) {
+            idx++;
+            continue;
+        }
+
+        space_release_extent_index(space, idx);
+    }
+}
+
+static int space_find_free_gap(mm_space_t *space, size_t size,
+                               uintptr_t *start_out)
+{
+    uintptr_t cursor;
+    uintptr_t limit;
+    uint32_t  idx;
+
+    if (!space || !start_out || size == 0U)
+        return -1;
+
+    cursor = MMU_USER_BASE;
+    limit  = MMU_USER_SIGTRAMP_VA;
+
+    for (idx = 0U; idx < space->extent_count; idx++) {
+        uintptr_t ext_start = space->extents[idx].va;
+        uintptr_t ext_end   = ext_start +
+                              (uintptr_t)space->extents[idx].pages * PAGE_SIZE;
+
+        if (ext_end <= cursor)
+            continue;
+
+        if (ext_start > cursor && (ext_start - cursor) >= size) {
+            *start_out = cursor;
+            return 0;
+        }
+
+        if (ext_end > cursor)
+            cursor = ext_end;
+    }
+
+    if (cursor < limit && (limit - cursor) >= size) {
+        *start_out = cursor;
+        return 0;
+    }
+
+    return -1;
 }
 
 static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
@@ -713,10 +798,21 @@ int mmu_map_user_region(mm_space_t *space, uintptr_t start,
 
     while (remaining_pages > 0U) {
         uint32_t order = largest_order_fit(remaining_pages);
-        uint32_t pages = 1U << order;
-        uint64_t pa = phys_alloc_pages(order);
-        size_t   bytes = (size_t)pages * PAGE_SIZE;
+        uint32_t pages;
+        uint64_t pa = 0ULL;
+        size_t   bytes;
 
+        while (1) {
+            pa = phys_alloc_pages(order);
+            if (pa != 0ULL)
+                break;
+            if (order == 0U)
+                return -1;
+            order--;
+        }
+
+        pages = 1U << order;
+        bytes = (size_t)pages * PAGE_SIZE;
         memset((void *)(uintptr_t)pa, 0, bytes);
         if (space_track_extent(space, cur_va, pa, pages, (uint8_t)order) < 0)
             return -1;
@@ -728,6 +824,16 @@ int mmu_map_user_region(mm_space_t *space, uintptr_t start,
     }
 
     return 0;
+}
+
+void mmu_space_set_mmap_base(mm_space_t *space, uintptr_t base)
+{
+    if (!space || !space->in_use)
+        return;
+    base = (base + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    if (base >= MMU_USER_BASE && base < MMU_USER_SIGTRAMP_VA &&
+        base > space->mmap_base)
+        space->mmap_base = base;
 }
 
 int mmu_map_user_anywhere(mm_space_t *space, size_t size,
@@ -743,17 +849,54 @@ int mmu_map_user_anywhere(mm_space_t *space, size_t size,
     if (aligned == 0U)
         return -1;
 
-    start = (space->mmap_base + PAGE_SIZE - 1ULL) & PAGE_MASK;
-    if (start < MMU_USER_BASE || start + aligned < start ||
-        start + aligned > MMU_USER_SIGTRAMP_VA)
+    if (space_find_free_gap(space, aligned, &start) < 0)
         return -1;
 
     if (mmu_map_user_region(space, start, aligned, prot) < 0)
         return -1;
 
-    space->mmap_base = start + aligned;
+    if (start + aligned > space->mmap_base)
+        space->mmap_base = start + aligned;
     if (start_out)
         *start_out = start;
+    return 0;
+}
+
+int mmu_unmap_user_region(mm_space_t *space, uintptr_t start, size_t size)
+{
+    uintptr_t cur_va;
+    uintptr_t end;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+    if ((start & (PAGE_SIZE - 1ULL)) != 0ULL || (size & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return -1;
+    if (start < MMU_USER_BASE || start + size < start || start + size > MMU_USER_LIMIT)
+        return -1;
+
+    end = start + size;
+    cur_va = start;
+    while (cur_va < end) {
+        uint64_t *pte;
+        uint64_t *l3;
+        uint64_t  old_pte;
+
+        if (mmu_lookup_pte(space, cur_va, &pte, &l3) < 0) {
+            cur_va += PAGE_SIZE;
+            continue;
+        }
+
+        old_pte = *pte;
+        if ((old_pte & PTE_VALID) != 0U) {
+            *pte = 0ULL;
+            mmu_sync_table(space, (uintptr_t)l3);
+            phys_free_page(old_pte & PTE_ADDR_MASK);
+        }
+
+        cur_va += PAGE_SIZE;
+    }
+
+    space_release_overlapping_extents(space, start, size);
     return 0;
 }
 

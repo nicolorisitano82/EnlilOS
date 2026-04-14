@@ -1288,10 +1288,10 @@ static void bootcli_render(void)
                       "append mkdir truncate rm mv fsync sync arksh login nsh mreactdemo jobdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "nsdemo posixdemo muslabi muslglob arkshsmoke clonedemo threadlife futexdemo",
+                      "nsdemo posixdemo muslabi muslglob musldl arkshsmoke clonedemo threadlife",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 152U,
-                      "pthreaddemo semdemo tlsmtdemo crtdemo",
+                      "futexdemo pthreaddemo semdemo tlsmtdemo crtdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1414,6 +1414,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("posixdemo lancia un ELF che verifica pipe/dup/cwd/termios");
         bootcli_push_line("muslabi   lancia un ELF che verifica la ABI minima M11-01a/B3");
         bootcli_push_line("muslglob  lancia un ELF che verifica fnmatch()/glob() bootstrap");
+        bootcli_push_line("musldl    lancia un ELF che verifica dlopen()/dlsym()/dlclose()");
         bootcli_push_line("arkshsmoke lancia uno smoke ELF buildato via CMake/toolchain EnlilOS");
         bootcli_push_line("clonedemo lancia un ELF che verifica clone(), gettid(), VM/FS/FILES/TLS condivisi");
         bootcli_push_line("threadlife lancia un ELF che verifica set_tid_address/tgkill/exit_group");
@@ -1696,6 +1697,16 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "musldl")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/MUSLDL.ELF", "/MUSLDL.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "musl libdl demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "arkshsmoke")) {
         uint32_t pid = 0U;
         if (elf64_spawn_path("/ARKSHSMK.ELF", "/ARKSHSMK.ELF", PRIO_KERNEL, &pid) < 0) {
@@ -1826,6 +1837,8 @@ static int bootcli_poll_input(void)
         if (ch == '\n') {
             bootcli_execute_command();
             dirty = 1;
+            if (bootcli_mode == BOOTCLI_MODE_TERM)
+                break;
             continue;
         }
 
@@ -1968,6 +1981,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-01b: prova 'crtdemo' per crt1, costruttori, distruttori e TLS statico.");
     bootcli_push_line("M11-01a/B3: prova 'muslabi' per openat/lseek/readv/writev/fcntl/ioctl/uname/auxv.");
     bootcli_push_line("M8-08d: prova 'muslglob' per fnmatch(), glob() e wildcard su VFS.");
+    bootcli_push_line("M11-03: prova 'musldl' per dlopen(), dlsym(), dlclose() e libdl bootstrap.");
     bootcli_push_line("M8-08e: prova 'arkshsmoke' per la toolchain CMake/cross-build EnlilOS.");
     bootcli_push_line("M8-08f: 'login' usa il bridge /bin/arksh; 'arksh' prova solo la shell reale in /usr/bin.");
     bootcli_push_line("M11-02a: prova 'clonedemo' per clone(), gettid(), CLONE_VM/FS/FILES e TPIDR_EL0 per-thread.");

@@ -18,6 +18,9 @@ typedef struct termios termios_t;
 
 #define ICRNL   (1U << 0)
 #define IXON    (1U << 1)
+#define BRKINT  (1U << 2)
+#define INPCK   (1U << 3)
+#define ISTRIP  (1U << 4)
 
 #define OPOST   (1U << 0)
 #define ONLCR   (1U << 1)

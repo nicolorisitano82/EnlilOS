@@ -5,6 +5,7 @@
 
 #define WNOHANG     1
 #define WUNTRACED   2
+#define WCONTINUED  4
 
 #define WIFEXITED(status)   ((((status) & 0x7F) == 0))
 #define WEXITSTATUS(status) (((status) >> 8) & 0xFF)
@@ -12,6 +13,7 @@
 #define WTERMSIG(status)    ((status) & 0x7F)
 #define WIFSTOPPED(status)  ((((status) & 0xFF) == 0x7F))
 #define WSTOPSIG(status)    (((status) >> 8) & 0xFF)
+#define WIFCONTINUED(status) (((status) & 0xFFFF) == 0xFFFF)
 
 pid_t waitpid(pid_t pid, int *status, int options);
 

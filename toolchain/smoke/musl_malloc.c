@@ -9,6 +9,7 @@ int main(void)
     char *a = (char *)malloc(64);
     char *b = (char *)calloc(32, 4);
     char *c;
+    int   i;
     int   fd;
 
     if (!a || !b)
@@ -24,6 +25,31 @@ int main(void)
     if (c[0] != 'A' || c[63] != 'A')
         return 4;
     memset(c + 64, 'B', 96);
+
+    /* Stress minimale: molte alloc/free via mmap per intercettare
+     * regressioni su munmap()/riuso bookkeeping. */
+    for (i = 0; i < 96; i++) {
+        size_t sz = 32U + (size_t)(i * 17U);
+        char  *p = (char *)malloc(sz);
+
+        if (!p)
+            return 8;
+        memset(p, (i & 1) ? 'X' : 'Y', sz);
+        free(p);
+    }
+
+    for (i = 0; i < 6; i++) {
+        size_t big_sz = 768U * 1024U;
+        char  *big = (char *)calloc(1, big_sz);
+
+        if (!big)
+            return 9;
+        big[0] = 'L';
+        big[big_sz - 1U] = 'G';
+        if (big[0] != 'L' || big[big_sz - 1U] != 'G')
+            return 10;
+        free(big);
+    }
 
     fd = open("/data/MUSLMALLOC.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)

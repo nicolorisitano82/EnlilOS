@@ -102,8 +102,13 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             continue;
         }
 
+        /* Handle length modifiers: 'l' (long), 'z' (size_t), 'j' (intmax_t) */
         while (*fmt == 'l') {
             long_flag++;
+            fmt++;
+        }
+        if (*fmt == 'z' || *fmt == 'j') {
+            long_flag = 2; /* treat as unsigned long / long for 64-bit targets */
             fmt++;
         }
 

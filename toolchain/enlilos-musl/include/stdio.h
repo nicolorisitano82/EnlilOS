@@ -32,6 +32,8 @@ int   fprintf(FILE *stream, const char *fmt, ...);
 int   vfprintf(FILE *stream, const char *fmt, va_list ap);
 int   perror(const char *s);
 int   sscanf(const char *str, const char *fmt, ...);
+int   remove(const char *path);
+int   rename(const char *oldpath, const char *newpath);
 int printf(const char *fmt, ...);
 int vprintf(const char *fmt, va_list ap);
 int snprintf(char *buf, size_t size, const char *fmt, ...);

@@ -84,6 +84,13 @@
 #define SYS_GETTID          57
 #define SYS_SET_TID_ADDRESS 58
 #define SYS_EXIT_GROUP      59
+#define SYS_MKDIR           71
+#define SYS_UNLINK          72
+#define SYS_RENAME          73
+#define SYS_DLOPEN          67
+#define SYS_DLSYM           68
+#define SYS_DLCLOSE         69
+#define SYS_DLERROR         70
 #define SYS_FUTEX           65
 #define SYS_TGKILL          66
 #define SYS_MREACT_SUBSCRIBE      80

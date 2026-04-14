@@ -2125,6 +2125,96 @@ static uint64_t sys_fstatat(uint64_t args[6])
     return rc;
 }
 
+static uint64_t sys_mkdir(uint64_t args[6])
+{
+    uintptr_t   path_uva = (uintptr_t)args[0];
+    const char *path = (const char *)(uintptr_t)args[0];
+    const char *path_arg = path;
+    uint32_t    mode = (uint32_t)args[1];
+    char        path_buf[EXEC_MAX_PATH];
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path_arg = path_buf;
+    }
+
+    if (path_arg[0] == '\0')
+        return ERR(ENOENT);
+    if (path_arg[0] != '/')
+        return ERR(ENOSYS);
+
+    rc = vfs_mkdir(path_arg, mode & 07777U);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_unlink(uint64_t args[6])
+{
+    uintptr_t   path_uva = (uintptr_t)args[0];
+    const char *path = (const char *)(uintptr_t)args[0];
+    const char *path_arg = path;
+    char        path_buf[EXEC_MAX_PATH];
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path_arg = path_buf;
+    }
+
+    if (path_arg[0] == '\0')
+        return ERR(ENOENT);
+    if (path_arg[0] != '/')
+        return ERR(ENOSYS);
+
+    rc = vfs_unlink(path_arg);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_rename(uint64_t args[6])
+{
+    uintptr_t   old_uva = (uintptr_t)args[0];
+    uintptr_t   new_uva = (uintptr_t)args[1];
+    const char *old_path = (const char *)(uintptr_t)args[0];
+    const char *new_path = (const char *)(uintptr_t)args[1];
+    const char *old_arg = old_path;
+    const char *new_arg = new_path;
+    char        old_buf[EXEC_MAX_PATH];
+    char        new_buf[EXEC_MAX_PATH];
+    int         rc;
+
+    if (!old_path || !new_path)
+        return ERR(EFAULT);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(old_uva, old_buf, sizeof(old_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        rc = user_copy_cstr(new_uva, new_buf, sizeof(new_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        old_arg = old_buf;
+        new_arg = new_buf;
+    }
+
+    if (old_arg[0] == '\0' || new_arg[0] == '\0')
+        return ERR(ENOENT);
+    if (old_arg[0] != '/' || new_arg[0] != '/')
+        return ERR(ENOSYS);
+
+    rc = vfs_rename(old_arg, new_arg);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
 static uint64_t sys_ioctl(uint64_t args[6])
 {
     int         fd      = (int)args[0];
@@ -2269,7 +2359,8 @@ static uint64_t sys_mmap(uint64_t args[6])
         return MAP_FAILED_VA;
 
     pages = (length + PAGE_SIZE - 1ULL) / PAGE_SIZE;
-    if (pages == 0ULL || pages > 256ULL)
+    /* 1024 pages (4 MB) — sufficiente per ArkshAst (~460 pp) e allocazioni grandi */
+    if (pages == 0ULL || pages > 1024ULL)
         return MAP_FAILED_VA;
 
     aligned = (size_t)pages * PAGE_SIZE;
@@ -2347,8 +2438,10 @@ static uint64_t sys_mmap(uint64_t args[6])
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_munmap(uint64_t args[6])
 {
-    uint64_t    addr   = args[0];
+    uintptr_t   addr   = (uintptr_t)args[0];
     uint64_t    length = args[1];
+    uintptr_t   aligned_end;
+    size_t      aligned_len;
     mm_space_t *space;
 
     if (addr == 0U || length == 0U) return ERR(EINVAL);
@@ -2356,16 +2449,27 @@ static uint64_t sys_munmap(uint64_t args[6])
         return ERR(EINVAL);
     if (addr < MMU_USER_BASE || addr >= MMU_USER_LIMIT)
         return ERR(EINVAL);
+    if ((addr & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return ERR(EINVAL);
+
+    aligned_end = (uintptr_t)((addr + length + PAGE_SIZE - 1ULL) & PAGE_MASK);
+    if (aligned_end < addr || aligned_end > MMU_USER_LIMIT)
+        return ERR(EINVAL);
+    aligned_len = (size_t)(aligned_end - addr);
+    if (aligned_len == 0U)
+        return ERR(EINVAL);
 
     space = sched_task_space(current_task);
+    if (!space)
+        return ERR(EINVAL);
 
     /* Se la regione era file-backed MAP_SHARED: scrive le pagine sporche */
-    if (space)
-        (void)vmm_unmap_range(sched_task_proc_slot(current_task), space,
-                              (uintptr_t)addr, (size_t)length);
+    (void)vmm_unmap_range(sched_task_proc_slot(current_task), space,
+                          addr, aligned_len);
 
-    /* Il rilascio fisico delle pagine avviene alla distruzione di mm_space */
-    return 0;
+    if (mmu_unmap_user_region(space, addr, aligned_len) < 0)
+        return ERR(EINVAL);
+    return 0ULL;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -2516,10 +2620,13 @@ static uint64_t sys_execve(uint64_t args[6])
 
     signal_task_reset_for_exec(current_task);
     task_brk[task_idx()] = 0ULL;
-    /* Reset thread pointer: il nuovo processo inizia con TP=0.
-     * crt1/musl lo inizializzeranno durante il proprio startup. */
-    sched_task_set_tpidr(current_task, 0ULL);
-    __asm__ volatile("msr tpidr_el0, xzr" ::: "memory");
+    elf64_dlreset_proc((uint32_t)task_idx());
+    /* Rebase del thread pointer sul TLS iniziale preparato dal loader.
+     * Binarî statici musl possono toccare errno/TLS gia' nello startup
+     * o nelle prime syscall libc, quindi azzerare TPIDR_EL0 qui rompe
+     * execve() per programmi perfettamente validi come arksh. */
+    sched_task_set_tpidr(current_task, image.tpidr_el0);
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(image.tpidr_el0) : "memory");
     memset(frame->x, 0, sizeof(frame->x));
     frame->x[0] = image.argc;
     frame->x[1] = image.argv;
@@ -3011,6 +3118,83 @@ static uint64_t sys_tgkill(uint64_t args[6])
 
     rc = signal_send_tgkill(tgid, tid, sig);
     return (rc < 0) ? ERR(-rc) : 0;
+}
+
+static uint64_t sys_dlopen(uint64_t args[6])
+{
+    uintptr_t path_uva = (uintptr_t)args[0];
+    uint32_t  flags = (uint32_t)args[1];
+    uintptr_t handle = 0U;
+    char      path[EXEC_MAX_PATH];
+    int       rc;
+
+    if (!path_uva)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr(path_uva, path, sizeof(path));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = elf64_dlopen_current(path, flags, &handle);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)handle;
+}
+
+static uint64_t sys_dlsym(uint64_t args[6])
+{
+    uintptr_t handle = (uintptr_t)args[0];
+    uintptr_t name_uva = (uintptr_t)args[1];
+    uintptr_t value = 0U;
+    char      name[EXEC_MAX_PATH];
+    int       rc;
+
+    if (!name_uva)
+        return ERR(EFAULT);
+
+    rc = user_copy_cstr(name_uva, name, sizeof(name));
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = elf64_dlsym_current(handle, name, &value);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)value;
+}
+
+static uint64_t sys_dlclose(uint64_t args[6])
+{
+    int rc = elf64_dlclose_current((uintptr_t)args[0]);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_dlerror(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    size_t    cap = (size_t)args[1];
+    char      msg[96];
+    int       rc;
+    size_t    copy_len;
+    uint64_t  ret_len;
+
+    if (buf_uva == 0U || cap == 0U)
+        return ERR(EFAULT);
+
+    rc = elf64_dlerror_drain_current(msg, sizeof(msg));
+    if (rc < 0)
+        return ERR(-rc);
+
+    copy_len = (size_t)rc + 1U;
+    if (copy_len > cap)
+        copy_len = cap;
+    if (copy_len == 0U)
+        copy_len = 1U;
+    ret_len = (uint64_t)((rc > 0) ? (uint32_t)rc : 0U);
+
+    rc = user_store_bytes(buf_uva, msg, copy_len);
+    if (rc < 0)
+        return ERR(-rc);
+    return ret_len;
 }
 
 static uint64_t sys_setpgid(uint64_t args[6])
@@ -4244,6 +4428,27 @@ void syscall_init(void)
     syscall_table[SYS_EXIT_GROUP] = (syscall_entry_t){
         sys_exit_group, 0, "exit_group"
     };
+    syscall_table[SYS_DLOPEN] = (syscall_entry_t){
+        sys_dlopen, 0, "dlopen"
+    };
+    syscall_table[SYS_DLSYM] = (syscall_entry_t){
+        sys_dlsym, 0, "dlsym"
+    };
+    syscall_table[SYS_DLCLOSE] = (syscall_entry_t){
+        sys_dlclose, 0, "dlclose"
+    };
+    syscall_table[SYS_DLERROR] = (syscall_entry_t){
+        sys_dlerror, 0, "dlerror"
+    };
+    syscall_table[SYS_MKDIR] = (syscall_entry_t){
+        sys_mkdir, 0, "mkdir"
+    };
+    syscall_table[SYS_UNLINK] = (syscall_entry_t){
+        sys_unlink, 0, "unlink"
+    };
+    syscall_table[SYS_RENAME] = (syscall_entry_t){
+        sys_rename, 0, "rename"
+    };
     syscall_table[SYS_FUTEX] = (syscall_entry_t){
         sys_futex, 0, "futex"
     };
@@ -4394,7 +4599,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 97 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread registrate\n");
+    uart_puts("[SYSCALL] 104 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
     syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
     uart_puts(" proc slot\n");

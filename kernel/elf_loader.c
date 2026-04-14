@@ -58,6 +58,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define ELF64_MAX_OBJECTS  8U
 #define ELF64_MAX_NEEDED   8U
 #define ELF64_NAME_MAX     64U
+#define ELF64_DLOPEN_BASE  0x0000007FE0000000ULL
 
 typedef struct {
     uint8_t  e_ident[EI_NIDENT];
@@ -149,7 +150,46 @@ typedef struct {
     uint8_t       is_interp;
 } elf_object_t;
 
+typedef struct {
+    uint8_t      in_use;
+    uint8_t      _pad0[3];
+    uint32_t     refcount;
+    uintptr_t    handle;
+    char         root_path[ELF64_NAME_MAX];
+    uint32_t     object_count;
+    elf_object_t objects[ELF64_MAX_OBJECTS];
+} elf_dl_module_t;
+
+typedef struct {
+    uint8_t         in_use;
+    uint8_t         _pad0[3];
+    volatile uint32_t lock;
+    uint32_t        next_handle;
+    char            last_error[96];
+    elf_dl_module_t modules[ELF64_MAX_OBJECTS];
+} elf_dl_proc_state_t;
+
 static char elf_last_error[96];
+static elf_dl_proc_state_t elf_dl_proc_state[SCHED_MAX_TASKS];
+
+static uintptr_t elf_align_up(uintptr_t v);
+
+static uint64_t elf_dl_irq_save(void)
+{
+    uint64_t flags;
+
+    __asm__ volatile(
+        "mrs %0, daif\n"
+        "msr daifset, #2\n"
+        : "=r"(flags) :: "memory"
+    );
+    return flags;
+}
+
+static void elf_dl_irq_restore(uint64_t flags)
+{
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+}
 
 extern const uint8_t _binary_user_demo_elf_start[];
 extern const uint8_t _binary_user_demo_elf_end[];
@@ -196,6 +236,115 @@ static void elf_strlcpy(char *dst, const char *src, size_t cap)
         i++;
     }
     dst[i] = '\0';
+}
+
+static elf_dl_proc_state_t *elf_dl_proc_get(uint32_t proc_slot)
+{
+    elf_dl_proc_state_t *state;
+
+    if (proc_slot >= SCHED_MAX_TASKS)
+        return NULL;
+
+    state = &elf_dl_proc_state[proc_slot];
+    if (!state->in_use) {
+        memset(state, 0, sizeof(*state));
+        state->in_use = 1U;
+        state->next_handle = 1U;
+    }
+    return state;
+}
+
+static void elf_dl_lock(elf_dl_proc_state_t *state)
+{
+    uint64_t flags;
+
+    if (!state)
+        return;
+
+    while (1) {
+        flags = elf_dl_irq_save();
+        if (state->lock == 0U) {
+            state->lock = 1U;
+            elf_dl_irq_restore(flags);
+            break;
+        }
+        elf_dl_irq_restore(flags);
+        sched_yield();
+    }
+}
+
+static void elf_dl_unlock(elf_dl_proc_state_t *state)
+{
+    uint64_t flags;
+
+    if (!state)
+        return;
+
+    flags = elf_dl_irq_save();
+    state->lock = 0U;
+    elf_dl_irq_restore(flags);
+}
+
+static void elf_dl_set_proc_error(elf_dl_proc_state_t *state, const char *msg)
+{
+    if (!state)
+        return;
+    elf_strlcpy(state->last_error, msg ? msg : "", sizeof(state->last_error));
+}
+
+static void elf_dl_copy_global_error(elf_dl_proc_state_t *state)
+{
+    elf_dl_set_proc_error(state, elf64_last_error());
+}
+
+static uintptr_t elf_dl_next_runtime_base(const elf_dl_proc_state_t *state)
+{
+    uintptr_t base = ELF64_DLOPEN_BASE;
+
+    if (!state)
+        return base;
+
+    for (uint32_t i = 0U; i < ELF64_MAX_OBJECTS; i++) {
+        const elf_dl_module_t *mod = &state->modules[i];
+
+        if (!mod->in_use)
+            continue;
+        for (uint32_t n = 0U; n < mod->object_count; n++) {
+            if (mod->objects[n].image_hi > base)
+                base = elf_align_up(mod->objects[n].image_hi + PAGE_SIZE);
+        }
+    }
+
+    return base;
+}
+
+static int elf_dl_find_module_by_path(const elf_dl_proc_state_t *state,
+                                      const char *path)
+{
+    if (!state || !path)
+        return -1;
+
+    for (uint32_t i = 0U; i < ELF64_MAX_OBJECTS; i++) {
+        if (state->modules[i].in_use &&
+            elf_streq(state->modules[i].root_path, path))
+            return (int)i;
+    }
+
+    return -1;
+}
+
+static int elf_dl_find_module_by_handle(const elf_dl_proc_state_t *state,
+                                        uintptr_t handle)
+{
+    if (!state || handle == 0U)
+        return -1;
+
+    for (uint32_t i = 0U; i < ELF64_MAX_OBJECTS; i++) {
+        if (state->modules[i].in_use && state->modules[i].handle == handle)
+            return (int)i;
+    }
+
+    return -1;
 }
 
 static uintptr_t elf_align_down(uintptr_t v)
@@ -779,6 +928,10 @@ static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
         goto fail;
     if (elf_prefault_loaded_image(space, &ehdr, phdrs, bias) < 0)
         goto fail;
+
+    /* Imposta mmap_base sopra l'ultimo segmento caricato, così il bump
+     * allocator del malloc bootstrap non sovrascrive il testo dell'ELF. */
+    mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE);
 
     *out = image;
     elf_set_error("OK");
@@ -1500,6 +1653,261 @@ fail:
 fail_free_objects:
     phys_free_pages(objects_pa, objects_order);
     return -1;
+}
+
+static int elf_dl_current_context(mm_space_t **space_out,
+                                  uint32_t *proc_slot_out,
+                                  elf_dl_proc_state_t **state_out)
+{
+    uint32_t             proc_slot;
+    elf_dl_proc_state_t *state;
+
+    if (!current_task || !sched_task_is_user(current_task)) {
+        elf_set_error("libdl disponibile solo a EL0");
+        return -ENOSYS;
+    }
+
+    proc_slot = sched_task_proc_slot(current_task) % SCHED_MAX_TASKS;
+    state = elf_dl_proc_get(proc_slot);
+    if (!state) {
+        elf_set_error("proc slot libdl invalido");
+        return -EINVAL;
+    }
+
+    if (space_out)
+        *space_out = sched_task_space(current_task);
+    if (proc_slot_out)
+        *proc_slot_out = proc_slot;
+    if (state_out)
+        *state_out = state;
+    return 0;
+}
+
+static int elf_dl_load_module(mm_space_t *space,
+                              elf_dl_proc_state_t *state,
+                              const char *path,
+                              elf_dl_module_t *mod)
+{
+    uintptr_t next_dyn_base;
+
+    if (!space || !state || !path || !mod) {
+        elf_set_error("parametri dlopen invalidi");
+        return -EINVAL;
+    }
+
+    memset(mod, 0, sizeof(*mod));
+    elf_strlcpy(mod->root_path, path, sizeof(mod->root_path));
+    next_dyn_base = elf_dl_next_runtime_base(state);
+
+    if (elf_load_vfs_object(space, path, &next_dyn_base, &mod->objects[0]) < 0)
+        return -EIO;
+    mod->object_count = 1U;
+
+    for (uint32_t idx = 0U; idx < mod->object_count; idx++) {
+        for (uint32_t n = 0U; n < mod->objects[idx].dyn.needed_count; n++) {
+            char needed_path[ELF64_NAME_MAX];
+
+            if (elf_normalize_path(mod->objects[idx].dyn.needed[n],
+                                   needed_path, sizeof(needed_path)) < 0) {
+                elf_set_error("DT_NEEDED troppo lungo");
+                return -EINVAL;
+            }
+            if (elf_find_loaded_object(mod->objects, mod->object_count,
+                                       needed_path) >= 0)
+                continue;
+            if (mod->object_count >= ELF64_MAX_OBJECTS) {
+                elf_set_error("troppi oggetti in dlopen()");
+                return -ENOMEM;
+            }
+            if (elf_load_vfs_object(space, needed_path, &next_dyn_base,
+                                    &mod->objects[mod->object_count]) < 0)
+                return -EIO;
+            mod->object_count++;
+        }
+    }
+
+    for (uint32_t i = 0U; i < mod->object_count; i++) {
+        if (elf_apply_object_dynamic(space, mod->objects, mod->object_count,
+                                     &mod->objects[i]) < 0)
+            return -EIO;
+    }
+
+    for (uint32_t i = 0U; i < mod->object_count; i++) {
+        if (elf_prefault_object(space, &mod->objects[i]) < 0)
+            return -EIO;
+    }
+
+    mod->handle = (uintptr_t)state->next_handle++;
+    if (mod->handle == 0U)
+        mod->handle = (uintptr_t)state->next_handle++;
+    mod->refcount = 1U;
+    mod->in_use = 1U;
+    return 0;
+}
+
+int elf64_dlopen_current(const char *path, uint32_t flags, uintptr_t *handle_out)
+{
+    mm_space_t         *space = NULL;
+    elf_dl_proc_state_t *state = NULL;
+    char                norm_path[ELF64_NAME_MAX];
+    int                 rc;
+    int                 idx;
+
+    if (!path || !handle_out)
+        return -EFAULT;
+    if ((flags & ~(ELF_RTLD_LAZY | ELF_RTLD_NOW | ELF_RTLD_GLOBAL)) != 0U)
+        return -EINVAL;
+
+    rc = elf_dl_current_context(&space, NULL, &state);
+    if (rc < 0)
+        return rc;
+
+    elf_dl_lock(state);
+    elf_dl_set_proc_error(state, "");
+
+    if (elf_normalize_path(path, norm_path, sizeof(norm_path)) < 0) {
+        elf_set_error("path dlopen troppo lunga");
+        elf_dl_copy_global_error(state);
+        elf_dl_unlock(state);
+        return -ENAMETOOLONG;
+    }
+
+    idx = elf_dl_find_module_by_path(state, norm_path);
+    if (idx >= 0) {
+        state->modules[idx].refcount++;
+        *handle_out = state->modules[idx].handle;
+        elf_dl_unlock(state);
+        return 0;
+    }
+
+    idx = -1;
+    for (uint32_t i = 0U; i < ELF64_MAX_OBJECTS; i++) {
+        if (!state->modules[i].in_use) {
+            idx = (int)i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        elf_set_error("slot dlopen esauriti");
+        elf_dl_copy_global_error(state);
+        elf_dl_unlock(state);
+        return -ENFILE;
+    }
+
+    rc = elf_dl_load_module(space, state, norm_path, &state->modules[idx]);
+    if (rc < 0) {
+        elf_dl_copy_global_error(state);
+        memset(&state->modules[idx], 0, sizeof(state->modules[idx]));
+        elf_dl_unlock(state);
+        return rc;
+    }
+
+    *handle_out = state->modules[idx].handle;
+    elf_dl_unlock(state);
+    return 0;
+}
+
+int elf64_dlsym_current(uintptr_t handle, const char *name, uintptr_t *value_out)
+{
+    mm_space_t          *space = NULL;
+    elf_dl_proc_state_t *state = NULL;
+    int                  idx;
+    int                  rc;
+
+    if (!name || !value_out)
+        return -EFAULT;
+
+    rc = elf_dl_current_context(&space, NULL, &state);
+    if (rc < 0)
+        return rc;
+
+    elf_dl_lock(state);
+    elf_dl_set_proc_error(state, "");
+
+    idx = elf_dl_find_module_by_handle(state, handle);
+    if (idx < 0) {
+        elf_set_error("handle dlopen invalido");
+        elf_dl_copy_global_error(state);
+        elf_dl_unlock(state);
+        return -EINVAL;
+    }
+
+    for (uint32_t i = 0U; i < state->modules[idx].object_count; i++) {
+        if (elf_lookup_symbol_in_object(space, &state->modules[idx].objects[i],
+                                        name, value_out) == 0) {
+            elf_dl_unlock(state);
+            return 0;
+        }
+    }
+
+    elf_set_error("simbolo dinamico non trovato");
+    elf_dl_copy_global_error(state);
+    elf_dl_unlock(state);
+    return -ENOENT;
+}
+
+int elf64_dlclose_current(uintptr_t handle)
+{
+    elf_dl_proc_state_t *state = NULL;
+    int                  idx;
+    int                  rc;
+
+    rc = elf_dl_current_context(NULL, NULL, &state);
+    if (rc < 0)
+        return rc;
+
+    elf_dl_lock(state);
+    elf_dl_set_proc_error(state, "");
+
+    idx = elf_dl_find_module_by_handle(state, handle);
+    if (idx < 0) {
+        elf_set_error("handle dlclose invalido");
+        elf_dl_copy_global_error(state);
+        elf_dl_unlock(state);
+        return -EINVAL;
+    }
+
+    if (state->modules[idx].refcount > 1U) {
+        state->modules[idx].refcount--;
+    } else {
+        /*
+         * v1: rilascia solo il registry handle. I mapping restano nello
+         * spazio processo fino a exec/exit, evitando un unmap selettivo
+         * ancora non esposto dal loader.
+         */
+        memset(&state->modules[idx], 0, sizeof(state->modules[idx]));
+    }
+
+    elf_dl_unlock(state);
+    return 0;
+}
+
+int elf64_dlerror_drain_current(char *dst, size_t cap)
+{
+    elf_dl_proc_state_t *state = NULL;
+    int                  rc;
+    size_t               len;
+
+    if (!dst || cap == 0U)
+        return -EFAULT;
+
+    rc = elf_dl_current_context(NULL, NULL, &state);
+    if (rc < 0)
+        return rc;
+
+    elf_dl_lock(state);
+    len = (size_t)elf_strlen(state->last_error);
+    elf_strlcpy(dst, state->last_error, cap);
+    state->last_error[0] = '\0';
+    elf_dl_unlock(state);
+    return (int)len;
+}
+
+void elf64_dlreset_proc(uint32_t proc_slot)
+{
+    if (proc_slot >= SCHED_MAX_TASKS)
+        return;
+    memset(&elf_dl_proc_state[proc_slot], 0, sizeof(elf_dl_proc_state[proc_slot]));
 }
 
 int elf64_load_from_memory(const void *image, size_t image_size,

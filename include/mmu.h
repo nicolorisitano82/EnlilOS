@@ -206,6 +206,7 @@ int         mmu_space_map_signal_trampoline(mm_space_t *space);
 mm_space_t *mmu_space_clone_cow(mm_space_t *parent, uintptr_t stack_copy_start);
 void        mmu_space_destroy(mm_space_t *space);
 void        mmu_activate_space(mm_space_t *space);
+void        mmu_space_set_mmap_base(mm_space_t *space, uintptr_t base);
 
 /*
  * Alloca backing fisico, mappa il range user e lo azzera.
@@ -215,6 +216,8 @@ int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
                                 size_t size, uint32_t prot);
 int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
+int         mmu_unmap_user_region(mm_space_t *space, uintptr_t start,
+                                  size_t size);
 
 /*
  * Traduce un VA user di 'space' in un puntatore kernel valido (identity-mapped

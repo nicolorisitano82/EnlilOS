@@ -21,7 +21,7 @@ tutto ogni sessione.
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura un checkout esterno di `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila un checkout esterno di `arksh`
-- Stato validato corrente: `SUMMARY total=42 pass=42 fail=0`
+- Stato validato corrente: `SUMMARY total=43 pass=43 fail=0`
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -60,8 +60,9 @@ PRIO_IDLE   = 255  // task idle, sempre READY
 ```
 
 - `SCHED_MAX_TASKS = 96`
-- Nota pratica: il pool task non ricicla ancora i TCB zombie; con `M8-08f` la suite
-  completa sale a `42/42` e supera anche il vecchio limite cumulativo di 64 task.
+- Nota pratica: il pool task non ricicla ancora i TCB zombie; con il profilo attuale
+  (`M11-03` incluso) la suite completa sale a `43/43` e supera anche il vecchio
+  limite cumulativo di 64 task.
   Il valore 96 è intenzionale e allineato alla crescita del bring-up userspace.
 
 ### TCB (`sched_tcb_t`) — esattamente 64 byte, layout fisso
@@ -617,18 +618,18 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-10)
+## Milestone completate (stato 2026-04-14)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e` e `M8-08d/e/f` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=42 pass=42 fail=0
+SUMMARY total=43 pass=43 fail=0
 ```
 
 **Prossime priorità**:
-1. M11-03 dynamic linker user-space / `.so`
-2. M10-01 VirtIO network driver
+1. M10-01 VirtIO network driver
+2. M8-08 plugin arksh
 3. M8-08g layout tastiera multipli (`us`/`it`)
 4. M11-05 Linux compatibility layer
 5. M12-01 Wayland server minimale
@@ -649,10 +650,13 @@ SUMMARY total=42 pass=42 fail=0
 - L'environment bootstrap dei task lanciati con `elf64_spawn_path()` e':
   `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`, `SHELL=/bin/arksh`,
   `TERM=vt100`, `USER=user`.
-- Dopo `M8-08f`, la login shell di default passa da `/bin/arksh`, ma il binary in
-  initrd e' un launcher/static bridge, non ancora il port completo del repo esterno.
-  Se `/usr/bin/arksh` o `/usr/bin/arksh.real` non esistono, il fallback corretto e'
-  `/bin/nsh`.
+- Dopo `M8-08f`, la login shell di default passa da `/bin/arksh`, che resta il
+  launcher/static bridge. Con `M11-03` + hardening libc hosted il port esterno reale
+  di `arksh` ora builda host-side in `toolchain/build/arksh/arksh` e viene
+  impacchettato automaticamente nell'`initrd` come `/usr/bin/arksh.real`.
+- Il comando boot `arksh` deve provare solo la shell reale (`/usr/bin/arksh`,
+  `/usr/bin/arksh.real`) e dare un errore chiaro se manca; il fallback a `/bin/nsh`
+  resta responsabilita' del launcher/login path, non del comando esplicito.
 - `boot_prepare_login_layout()` in `kernel/main.c` e' il punto che prepara layout
   persistente e file seed su `/data/home/user`:
   `.config/arksh/arkshrc` e `.local/state/arksh/history`.
@@ -665,7 +669,17 @@ SUMMARY total=42 pass=42 fail=0
   - comando boot `arksh`
   - ELF `/ARKSHBOOT.ELF`
   - selftest `arksh-login`
-  - suite completa `42/42`
+  - suite completa `43/43`
+- Gotcha pratico del port hosted `arksh`: il target CMake upstream builda anche
+  benchmark/test (`arksh_perf_runner`) che richiedono API hosted extra (`wait4`,
+  `rusage`, ecc.) non necessarie per usare la shell. Il target supportato in
+  EnlilOS deve quindi buildare esplicitamente `--target arksh`.
+- `M11-03` chiude un `libdl` bootstrap reale:
+  - syscall `dlopen/dlsym/dlclose/dlerror`
+  - wrapper musl `<dlfcn.h>` + `libdl.a`
+  - smoke `/MUSLDL.ELF`
+  - selftest `musl-dlfcn`
+  - limitazione nota: `dlclose()` rilascia il handle ma non smappa ancora le pagine
 - `execve()` invece deve preservare l'`envp` passato dal caller.
 - `termios` e' una v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`,
   `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
@@ -673,6 +687,32 @@ SUMMARY total=42 pass=42 fail=0
   per-open-file o per-pty. Va bene per bootstrap shell/REPL, non ancora per compat piena.
 - `POSIXDEMO.ELF` e il selftest `posix-ux` sono il riferimento runtime per validare insieme:
   env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
+
+### Knowledge operativa arksh runtime (M8-08f/g)
+
+- `sys_mmap` ha un limite di pagine per singola chiamata alzato a **1024 pagine (4MB)**
+  (era 256 = 1MB). Il motivo: `sizeof(ArkshAst) ≈ 1.88MB = 460 pagine`; il vecchio limite
+  faceva fallire ogni `calloc(1, sizeof(*ast))` → "unable to allocate parser state".
+- `vsnprintf` nel bootstrap musl originariamente non gestiva `%z`/`%j`. Il line editor
+  di arksh usa `fprintf(stdout, "\033[%zuD", move_left)` per spostare il cursore;
+  senza il fix il formato `%zu` veniva emesso letteralmente come testo, producendo
+  sequenze ANSI malformate visibili a schermo. Fix: aggiunto il blocco
+  `if (*fmt == 'z' || *fmt == 'j') { long_flag = 2; fmt++; }` in `vsnprintf`.
+- **Bug critico: mmap_base bump allocator vs ELF text**.
+  `mmu_map_user_anywhere` mantiene `mmap_base` che avanza monotonicamente;
+  `munmap` libera le pagine fisiche ma **non fa tornare indietro `mmap_base`**.
+  L'ELF di arksh è caricato a `0x7FC1000000` ma `mmap_base` partiva da
+  `MMU_USER_BASE = 0x7FC0000000` — solo 16MB di gap. Dopo ~4000 allocazioni
+  da 1 pagina (qualche centinaio per comando), `mmap_base` raggiungeva il
+  testo dell'ELF e lo sovrascriveva con pagine azzerate: `vsnprintf` produceva
+  garbage, il parser entrava in stati inconsistenti.
+  **Fix**: `mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)` chiamato
+  in `elf_load_common` dopo il loading → `mmap_base` parte sopra l'ultimo
+  segmento caricato (~`0x7FC10AA000` per arksh), non dal fondo del VA window.
+  API aggiunta: `mmu_space_set_mmap_base()` in `kernel/mmu.c` + `include/mmu.h`.
+- Attenzione: CMake **non rilinka** automaticamente se cambia solo `libc.a` (non
+  i sorgenti `.c`). Dopo ogni modifica al bootstrap musl, fare
+  `rm toolchain/build/arksh/arksh && make arksh-build` per forzare il relink.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 
@@ -721,3 +761,15 @@ Holder a PRIO_NORMAL=128 starved dall'hog (stesso livello, FIFO precedente).
 PI non aiuta: la donazione arriva solo DOPO che waiter entra in wait, ma holder
 non riesce mai ad acquisire il lock perché hog gira in CPU-bound loop alla stessa prio.
 **Risolto**: holder creato a PRIO_HIGH=32.
+
+### mmap_base bump allocator sovrascrive testo ELF → garbled output + crash parser
+`mmu_map_user_anywhere` usa un bump allocator per i VA utente; `munmap` libera le pagine
+fisiche ma non fa retrocedere `mmap_base`. Con `MMU_USER_BASE = 0x7FC0000000` e
+l'ELF caricato a `0x7FC1000000` il gap è solo 16MB = 4096 pagine da 4KB. Dopo ~4000
+allocazioni (cumulativamente su più comandi shell) il bump allocator raggiunge il
+testo dell'ELF e lo sovrascrive con pagine azzerate → `vsnprintf` produce garbage
+(`ls]K` a schermo), il parser arksh entra in stati inconsistenti → "unable to allocate
+parser state" al 3° comando.
+**Risolto**: in `elf_load_common` (`kernel/elf_loader.c`) dopo il loading:
+`mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)`.
+API `mmu_space_set_mmap_base()` aggiunta in `kernel/mmu.c` + `include/mmu.h`.

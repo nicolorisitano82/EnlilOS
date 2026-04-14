@@ -12,6 +12,7 @@ extern __thread int errno;
 #define ECHILD              10
 #define EAGAIN              11
 #define ENOMEM              12
+#define EACCES              13
 #define EFAULT              14
 #define EBUSY               16
 #define EEXIST              17

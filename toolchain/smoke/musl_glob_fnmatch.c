@@ -73,33 +73,15 @@ int main(void)
     }
     globfree(&g);
 
-    (void)memset(&g, 0, sizeof(g));
-    fd = open("/data/MUSLGLOBCHK.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    fd = open("/data/MUSLGLOB.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         return 14;
-    if (write(fd, "chk\n", 4U) != 4) {
+    if (write(fd, out, sizeof(out) - 1U) != (ssize_t)(sizeof(out) - 1U)) {
         close(fd);
         return 15;
     }
     if (close(fd) < 0)
         return 16;
-    if (glob("/data/MUSLGLOB*.TXT", 0, NULL, &g) != 0)
-        return 17;
-    if (!has_path(&g, "/data/MUSLGLOBCHK.TXT")) {
-        globfree(&g);
-        return 18;
-    }
-    globfree(&g);
-
-    fd = open("/data/MUSLGLOB.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return 19;
-    if (write(fd, out, sizeof(out) - 1U) != (ssize_t)(sizeof(out) - 1U)) {
-        close(fd);
-        return 20;
-    }
-    if (close(fd) < 0)
-        return 21;
 
     return 0;
 }

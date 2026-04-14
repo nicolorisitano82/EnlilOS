@@ -582,9 +582,10 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 > perché non ha dipendenze esterne. arksh è la shell normale dell'utente.
 
 **Stato attuale:** `M8-08a/b/c/d/e/f` completate `v1`. Il bootstrap shell-side e'
-chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config e
-fallback `/bin/nsh` sono reali. Restano aperti i pezzi post-bootstrap piu' avanzati
-(`.so`/plugin dopo `M11-03`, shell reale esterna completa e UX/history avanzata).
+chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config,
+fallback `/bin/nsh` e binario reale esterno `/usr/bin/arksh.real` sono reali. Restano
+aperti i pezzi post-bootstrap piu' avanzati (plugin `.so`, UX/history avanzata e
+hardening del port hosted).
 
 **Perché arksh invece di bash/dash:**
 - Zero dipendenze esterne a runtime — solo libc (musl M11-01)
@@ -613,7 +614,7 @@ necessarie sono già pianificate nelle milestone precedenti o in questo backlog:
 | `tcgetattr()` / `tcsetattr()` | Sì (subset v1) | M8-08c |
 | `isatty()` | Sì (v1) | M8-08c |
 | `getenv()` / `setenv()` | Parziale | M8-08b |
-| `dlopen()` / `dlsym()` | Solo dopo M11-03 | M11-03 |
+| `dlopen()` / `dlsym()` | Sì (v1) | M11-03 |
 | `realpath()` | Parziale lato libc | M8-08b |
 | `glob()` | Vedi M8-08d | questa milestone |
 | `fnmatch()` | Vedi M8-08d | questa milestone |
@@ -802,6 +803,10 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - il repo `arksh` non e' vendorizzato in-tree: il sorgente va passato via `ARKSH_DIR`
 - `compat/arksh/enlilos.c` documenta lo shim minimo da contribuire/adattare upstream
 - `compat/arksh/README.md` spiega il workflow supportato oggi
+- `make arksh-build` builda esplicitamente il target `arksh` del progetto esterno,
+  evitando i target benchmark/test che richiedono ancora API hosted fuori perimetro
+- quando `toolchain/build/arksh/arksh` esiste, l'`initrd` lo impacchetta come
+  `/usr/bin/arksh.real` senza richiedere step manuali aggiuntivi
 
 **Smoke CMake/toolchain:**
 - `toolchain/cmake-smoke/` contiene un progetto CMake minimale cross-buildato con la toolchain EnlilOS
@@ -831,6 +836,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
   - `/INIT.ELF` -> launcher login shell
   - `/ARKSHBOOT.ELF` -> selftest ELF non interattivo
   - `/bin/arksh` -> launcher statico di bootstrap
+  - `/usr/bin/arksh.real` -> shell reale esterna quando il build host-side e' disponibile
   - `/bin/nsh` -> recovery shell esplicita
   - `/etc/arkshrc`
   - `/home/user/.config/arksh/arkshrc`
@@ -860,7 +866,9 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 **Validazione chiusa:**
 - comando boot `arksh`
 - selftest `arksh-login`
-- suite runtime piu' recente: `SUMMARY total=42 pass=42 fail=0`
+- build host-side reale: `make arksh-build ARKSH_DIR=...`
+- packaging verificato: `boot/initrd.cpio` contiene `usr/bin/arksh.real`
+- suite runtime piu' recente: `SUMMARY total=43 pass=43 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1254,7 +1262,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=42 pass=42 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=43 pass=43 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1475,14 +1483,27 @@ Implementazione kernel:
 
 ---
 
-### ⬜ M11-03 · Dynamic Linker (ld.so minimale)
-**Priorità:** BASSA (solo dopo static loader stabile e testato)
+### ✅ M11-03 · Dynamic Linker / `libdl` bootstrap
+**Priorità:** completata `v1`
 
-- Parsing `PT_INTERP`: se presente, carica `ld-enlilos.so` prima dell'ELF applicativo
-- Risoluzione `DT_NEEDED`: apre le `.so` via VFS, mappa i segmenti
-- PLT/GOT lazy binding: prima chiamata risolve il simbolo, poi patch diretta nel GOT
-- ASLR minimale: randomizzazione base indirizzo libreria (solo bit 12–28)
-- Limite: non supporta `dlopen()` inizialmente — solo link statico delle dipendenze
+**Deliverable chiusi nella v1:**
+- syscall kernel-side `dlopen/dlsym/dlclose/dlerror` (`67–70`)
+- registry per-process dei moduli runtime in `elf_loader`
+- load runtime di oggetti `ET_DYN` nel processo corrente
+- risoluzione `DT_NEEDED` e relocation bootstrap per il profilo gia' supportato dal loader
+- `libdl.a` bootstrap nel sysroot musl con `<dlfcn.h>`
+- smoke `/MUSLDL.ELF` e selftest `musl-dlfcn`
+
+**Stato pratico raggiunto:**
+- `dlopen("/libdyn.so", RTLD_NOW)` e `dlsym()` funzionano in EL0
+- il dynamic linker `v1` sblocca davvero il port hosted di `arksh`, che ora supera il
+  vecchio blocco su `<dlfcn.h>` e linka il binario reale statico host-side
+
+**Limiti onesti della v1:**
+- `dlclose()` rilascia il handle logico ma non smappa ancora le pagine runtime
+- niente lazy binding/PLT avanzato
+- niente ASLR serio per le shared library
+- risoluzione simboli intenzionalmente minima: profilo bootstrap sufficiente a smoke e port shell
 
 ---
 
@@ -2998,8 +3019,8 @@ M16-01 + M16-02 + M16-03 + M16-04 + M16-06 → M16-08 (usbd daemon)
 
 ## Prossimi tre step consigliati
 
-1. **M11-03** dynamic linker user-space / `.so` — il prossimo collo di bottiglia tecnico reale per plugin e compat dinamica
-2. **M10-01** VirtIO Network Driver — apre l'intera traccia networking e sblocca socket/API BSD
+1. **M10-01** VirtIO Network Driver — apre l'intera traccia networking e sblocca socket/API BSD
+2. **M8-08 plugin** — ora che `M11-03` e' chiusa, i plugin dinamici di `arksh` sono il prossimo passo shell-side sensato
 3. **M8-08g** layout tastiera multipli (`us`/`it`) — migliora subito l'usabilita' reale della shell appena chiusa in `M8-08f`
 
 Dopo M8-01 + M11-01 è possibile compilare e avviare programmi C esistenti non modificati.
@@ -3068,7 +3089,7 @@ Da qui in poi si può iniziare a portare software esistente.
 | 12 | **M8-08a** pipe() + dup/dup2 | ✅ Completata v1. Refcount corretto su dup/fork, `POSIXDEMO.ELF`, selftest `posix-ux` |
 | 13 | **M8-08b** getcwd/chdir/env | ✅ Completata v1. `cwd` namespace-aware via `vfsd`, env bootstrap per spawn |
 | 14 | **M8-08c** termios + isatty | ✅ Completata v1. Canonical/raw sulla console globale, subset termios sufficiente al bootstrap |
-| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `42/42` |
+| 15 | **M11-01** musl libc | ✅ Completata v1: ABI minima, TLS/startup, sysroot/toolchain bootstrap. Suite attuale `43/43` |
 | 16 | **M8-08e** Build System e Toolchain | ✅ Completata v1: toolchain CMake, target `arksh-*`, compat shim di riferimento e smoke `/ARKSHSMK.ELF` |
 | 17 | **M8-08f + M8-08** integrazione shell di default | ✅ Completata v1: `/bin/arksh` launcher, auto-login shell, bind `/data/home -> /home`, rc bootstrap, fallback `/bin/nsh`, selftest `arksh-login` |
 
@@ -3089,7 +3110,7 @@ Python, server applicativi.
 |--------|-----------|---------------|
 | 19 | **M11-02** pthread + futex + sem_t | ✅ Completata v1: `M11-02a+b+c+d+e` chiuse (`tgid/gettid`, `clone()` subset, `proc_slot` condiviso, `set_tid_address/exit_group/tgkill`, `futex WAIT/WAKE/REQUEUE`, wrapper musl `pthread`/`sem_t`, TLS statico multi-thread da `PT_TLS`, `errno` thread-local, `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`) |
 | 20 | **M8-02** mmap file-backed | Gia' implementata v1. Resta utile come base per `pthread`, libc e carichi user-space piu' grandi |
-| 21 | **M11-03** Dynamic Linker | Dipende da M11-02 + M8-02. Sblocca `.so` e quindi tutta la compatibilità binaria |
+| 21 | **M11-03** Dynamic Linker | ✅ Completata v1: `libdl`, `dlopen/dlsym/dlclose/dlerror`, smoke `musl-dlfcn`, base runtime `.so` |
 | 22 | **M8-08 plugin** arksh plugin system | Adesso che il dynamic linker c'è, i plugin `.so` di arksh funzionano |
 
 **Checkpoint FASE 4:** programmi multi-thread compilano e girano, le `.so` si caricano
@@ -3248,20 +3269,20 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** chiudere `M11-03`, poi aprire la rete base con `M10-01`, poi migliorare UX input con `M8-08g`
+- **Prossimo step:** aprire la rete base con `M10-01`, poi plugin arksh dinamici, poi migliorare UX input con `M8-08g`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M8-08f`: suite `selftest` a `42/42`.
+> Stato verificato dopo la chiusura di `M11-03`: suite `selftest` a `43/43`.
 
 ### 1. Cosa e' gia' stato completato
 
 - ✅ **Fondamenta kernel e debug**: `M14-02`, `M8-01`, `M8-03`, `M8-04`, `M8-05`, `M8-06`, `M8-07`
 - ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
-- ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M11-01a`, `M11-01b`, `M11-01c`
+- ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local
 
@@ -3269,16 +3290,16 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M11-03** Dynamic Linker | `M11-02`, `M8-02` | E' il prossimo collo di bottiglia tecnico: abilita `.so`, `dlopen`, plugin e compat dinamica |
-| 2 | **M8-08 plugin** | `M11-03` | I plugin dinamici della shell hanno senso solo dopo il linker dinamico |
-| 3 | **M10-01** VirtIO Network Driver | nessuna dipendenza forte oltre al core gia' chiuso | Apre l'intera traccia networking e toglie il sistema dal solo bootstrap locale |
-| 4 | **M10-02** TCP/IP Stack | `M10-01` | Senza stack IP non esiste networking utile in user-space |
-| 5 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
-| 6 | **M8-08g** Layout tastiera multipli | core input gia' presente | Migliora subito usabilita' reale di console e shell (`us`/`it`) |
+| 1 | **M10-01** VirtIO Network Driver | nessuna dipendenza forte oltre al core gia' chiuso | Apre l'intera traccia networking e toglie il sistema dal solo bootstrap locale |
+| 2 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
+| 3 | **M10-02** TCP/IP Stack | `M10-01` | Senza stack IP non esiste networking utile in user-space |
+| 4 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
+| 5 | **M8-08g** Layout tastiera multipli | core input gia' presente | Migliora subito usabilita' reale di console e shell (`us`/`it`) |
+| 6 | **M8-08h** i18n stringhe | `M8-08g` consigliata ma non obbligatoria | Evita che la UX shell/desktop resti solo `en_US`/hardcoded |
 
 ### 3. Sequenza raccomandata per dipendenze
 
-1. **Chiudere il caricamento dinamico**: `M11-03 -> M8-08 plugin`
+1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 2. **Aprire la rete**: `M10-01 -> M10-02 -> M10-03`
 3. **Migliorare l'usabilita' shell/input**: `M8-08g -> M8-08h`
 4. **Usare la rete per compatibilita' e desktop**:
@@ -3308,17 +3329,17 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ### 5. Punti aperti ma non bloccanti subito
 
 - `M14-01` e' **completata v1**, ma resta da estendere `sysfs` e alcuni export avanzati
-- `M11-01` e `M11-02` sono **chiuse v1**, ma il grosso salto qualitativo successivo ormai non e' piu' nel bootstrap C o thread: e' nel **dynamic linker** (`M11-03`)
+- `M11-01`, `M11-02` e `M11-03` sono **chiuse v1**; il salto qualitativo successivo ormai sta in plugin shell, networking e compat piu' ampia
 - La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere shell reale + linking dinamico + networking**
 
 ### 6. Ordine operativo consigliato da qui
 
-1. `M11-03`
-2. `M8-08 plugin`
-3. `M10-01`
-4. `M10-02`
-5. `M10-03`
-6. `M8-08g`
+1. `M8-08 plugin`
+2. `M10-01`
+3. `M10-02`
+4. `M10-03`
+5. `M8-08g`
+6. `M8-08h`
 7. `M11-05`
 8. `M12-01`
 9. `M13-02`

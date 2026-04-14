@@ -18,6 +18,8 @@
 #include "user_svc.h"
 
 extern char **environ;
+static void (*g_atexit_handlers[16])(void);
+static unsigned g_atexit_count;
 
 static long libc_set_errno(long rc)
 {
@@ -236,6 +238,41 @@ int dup2(int oldfd, int newfd)
     return (int)libc_set_errno(user_svc2(SYS_DUP2, oldfd, newfd));
 }
 
+int setpgid(pid_t pid, pid_t pgid)
+{
+    return (int)libc_set_errno(user_svc2(SYS_SETPGID, pid, pgid));
+}
+
+pid_t getpgid(pid_t pid)
+{
+    return (pid_t)libc_set_errno(user_svc1(SYS_GETPGID, pid));
+}
+
+pid_t getpgrp(void)
+{
+    return getpgid(0);
+}
+
+pid_t setsid(void)
+{
+    return (pid_t)libc_set_errno(user_svc0(SYS_SETSID));
+}
+
+pid_t getsid(pid_t pid)
+{
+    return (pid_t)libc_set_errno(user_svc1(SYS_GETSID, pid));
+}
+
+int tcsetpgrp(int fd, pid_t pgrp)
+{
+    return (int)libc_set_errno(user_svc2(SYS_TCSETPGRP, fd, pgrp));
+}
+
+pid_t tcgetpgrp(int fd)
+{
+    return (pid_t)libc_set_errno(user_svc1(SYS_TCGETPGRP, fd));
+}
+
 pid_t fork(void)
 {
     return (pid_t)libc_set_errno(user_svc0(SYS_FORK));
@@ -250,6 +287,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
 
 pid_t waitpid(pid_t pid, int *status, int options)
 {
+    options &= ~WCONTINUED;
     return (pid_t)libc_set_errno(user_svc4(SYS_WAITPID, pid,
                                            (long)status, options, 0));
 }
@@ -264,8 +302,25 @@ void _exit(int status)
     user_svc_exit(status, SYS_EXIT_GROUP);
 }
 
+int atexit(void (*function)(void))
+{
+    if (!function || g_atexit_count >= (sizeof(g_atexit_handlers) / sizeof(g_atexit_handlers[0]))) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    g_atexit_handlers[g_atexit_count++] = function;
+    return 0;
+}
+
 void exit(int status)
 {
+    while (g_atexit_count > 0U) {
+        void (*fn)(void) = g_atexit_handlers[--g_atexit_count];
+
+        if (fn)
+            fn();
+    }
     user_svc_exit(status, SYS_EXIT_GROUP);
 }
 

@@ -122,6 +122,7 @@ ARKSH_SMOKE_CACHE     = $(ARKSH_SMOKE_BUILD)/CMakeCache.txt
 ARKSH_SMOKE_ELF       = $(ARKSH_SMOKE_BUILD)/arkshsmoke.elf
 ARKSH_BOOT_ELF        = toolchain/smoke/arksh_boot.elf
 ARKSH_SELFTEST_ELF    = toolchain/smoke/arksh_selftest.elf
+ARKSH_REAL_ELF        = $(ARKSH_BUILD_DIR)/arksh
 MUSL_SYSROOT_INC      = $(MUSL_SYSROOT)/usr/include
 MUSL_SYSROOT_LIB      = $(MUSL_SYSROOT)/usr/lib
 MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
@@ -129,12 +130,14 @@ MUSL_WRAPPER_AR       = toolchain/bin/aarch64-enlilos-musl-ar
 MUSL_WRAPPER_RANLIB   = toolchain/bin/aarch64-enlilos-musl-ranlib
 MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/ctype.h \
+                        $(MUSL_ROOT)/include/dlfcn.h \
                         $(MUSL_ROOT)/include/dirent.h \
                         $(MUSL_ROOT)/include/fcntl.h \
                         $(MUSL_ROOT)/include/fnmatch.h \
                         $(MUSL_ROOT)/include/glob.h \
                         $(MUSL_ROOT)/include/math.h \
                         $(MUSL_ROOT)/include/pthread.h \
+                        $(MUSL_ROOT)/include/regex.h \
                         $(MUSL_ROOT)/include/semaphore.h \
                         $(MUSL_ROOT)/include/signal.h \
                         $(MUSL_ROOT)/include/stdio.h \
@@ -144,7 +147,9 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/termios.h \
                         $(MUSL_ROOT)/include/unistd.h \
                         $(MUSL_ROOT)/include/sys/ioctl.h \
+                        $(MUSL_ROOT)/include/sys/resource.h \
                         $(MUSL_ROOT)/include/sys/mman.h \
+                        $(MUSL_ROOT)/include/sys/stat.h \
                         $(MUSL_ROOT)/include/sys/time.h \
                         $(MUSL_ROOT)/include/sys/types.h \
                         $(MUSL_ROOT)/include/sys/uio.h \
@@ -153,18 +158,23 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
 MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
 MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/ctype.c \
+                        $(MUSL_ROOT)/src/dlfcn.c \
                         $(MUSL_ROOT)/src/dirent.c \
                         $(MUSL_ROOT)/src/fnmatch.c \
                         $(MUSL_ROOT)/src/glob.c \
+                        $(MUSL_ROOT)/src/posix.c \
                         $(MUSL_ROOT)/src/pthread.c \
+                        $(MUSL_ROOT)/src/regex.c \
                         $(MUSL_ROOT)/src/semaphore.c \
                         $(MUSL_ROOT)/src/string.c \
                         $(MUSL_ROOT)/src/stdlib.c \
                         $(MUSL_ROOT)/src/syscall.c \
+                        $(MUSL_ROOT)/src/time.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c
 MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
+MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a
 MUSL_SYSROOT_STAMP    = $(MUSL_BUILD)/sysroot.stamp
 MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_stdio.c \
@@ -172,6 +182,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_fork_exec.c \
                         toolchain/smoke/musl_pipe_termios.c \
                         toolchain/smoke/musl_glob_fnmatch.c \
+                        toolchain/smoke/musl_dlfcn.c \
                         toolchain/smoke/arksh_boot.c \
                         toolchain/smoke/musl_pthread.c \
                         toolchain/smoke/musl_semaphore.c \
@@ -182,6 +193,7 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DARKSH_STATIC=ON \
                         -DARKSH_PLUGINS=OFF \
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
+ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),usr/bin/arksh.real=$(ARKSH_REAL_ELF),)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -273,7 +285,13 @@ $(MUSL_LIBC_A): $(MUSL_LIBC_OBJS)
 	$(AR) rcs $@ $^
 	$(RANLIB) $@
 
+$(MUSL_LIBDL_A): $(MUSL_BUILD)/libc/dlfcn.o
+	@mkdir -p $(MUSL_SYSROOT_LIB)
+	$(AR) rcs $@ $^
+	$(RANLIB) $@
+
 $(MUSL_SYSROOT_STAMP): $(MUSL_HEADERS) $(MUSL_LIBC_A) \
+                       $(MUSL_LIBDL_A) \
                        $(MUSL_SYSROOT_LIB)/crt1.o $(MUSL_SYSROOT_LIB)/crti.o $(MUSL_SYSROOT_LIB)/crtn.o
 	@mkdir -p $(dir $@)
 	@touch $@
@@ -318,7 +336,7 @@ arksh-configure: $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC) $(ARKSH_TOOLCHAIN_FIL
 	          $(ARKSH_CMAKE_FLAGS)
 
 arksh-build: arksh-configure
-	cmake --build "$(ARKSH_BUILD_DIR)"
+	cmake --build "$(ARKSH_BUILD_DIR)" --target arksh
 
 arksh-smoke: $(ARKSH_SMOKE_ELF)
 	@echo "Smoke CMake/arksh pronta: $(ARKSH_SMOKE_ELF)"
@@ -350,7 +368,7 @@ user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 
 $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) \
                 $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) $(ARKSH_SMOKE_ELF) \
-                $(ARKSH_SELFTEST_ELF)
+                $(ARKSH_SELFTEST_ELF) $(wildcard $(ARKSH_REAL_ELF))
 	python3 tools/mkinitrd.py $@ \
 		README.TXT=initrd/README.TXT \
 		BOOT.TXT=initrd/BOOT.TXT \
@@ -398,6 +416,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		MUSLFORK.ELF=toolchain/smoke/musl_fork_exec.elf \
 		MUSLPIPE.ELF=toolchain/smoke/musl_pipe_termios.elf \
 		MUSLGLOB.ELF=toolchain/smoke/musl_glob_fnmatch.elf \
+		MUSLDL.ELF=toolchain/smoke/musl_dlfcn.elf \
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
@@ -405,6 +424,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
 		bin/nsh=user/nsh.elf \
+		$(ARKSH_REAL_INITRD) \
 		etc/arkshrc=initrd/arkshrc \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \

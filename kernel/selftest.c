@@ -2090,6 +2090,20 @@ static int selftest_case_musl_glob(void)
                                "glob fnmatch ok\n", 1);
 }
 
+static int selftest_case_musl_dlfcn(void)
+{
+    static const char case_name[] = "musl-dlfcn";
+    int rc;
+
+    rc = vfs_unlink("/data/MUSLDL.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup MUSLDL.TXT fallita");
+    if (st_run_user_path(case_name, "/MUSLDL.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/MUSLDL.TXT",
+                               "[EL0] dynamic ELF avviato correttamente\n", 1);
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -2133,6 +2147,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-forkexec", selftest_case_musl_forkexec },
     { "musl-pipe",   selftest_case_musl_pipe },
     { "musl-glob",   selftest_case_musl_glob },
+    { "musl-dlfcn",  selftest_case_musl_dlfcn },
 };
 
 int selftest_run_named(const char *name)
