@@ -128,10 +128,12 @@ MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
 MUSL_WRAPPER_AR       = toolchain/bin/aarch64-enlilos-musl-ar
 MUSL_WRAPPER_RANLIB   = toolchain/bin/aarch64-enlilos-musl-ranlib
 MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
+                        $(MUSL_ROOT)/include/ctype.h \
                         $(MUSL_ROOT)/include/dirent.h \
                         $(MUSL_ROOT)/include/fcntl.h \
                         $(MUSL_ROOT)/include/fnmatch.h \
                         $(MUSL_ROOT)/include/glob.h \
+                        $(MUSL_ROOT)/include/math.h \
                         $(MUSL_ROOT)/include/pthread.h \
                         $(MUSL_ROOT)/include/semaphore.h \
                         $(MUSL_ROOT)/include/signal.h \
@@ -150,12 +152,14 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/sys/wait.h
 MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
 MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
+                        $(MUSL_ROOT)/src/ctype.c \
                         $(MUSL_ROOT)/src/dirent.c \
                         $(MUSL_ROOT)/src/fnmatch.c \
                         $(MUSL_ROOT)/src/glob.c \
                         $(MUSL_ROOT)/src/pthread.c \
                         $(MUSL_ROOT)/src/semaphore.c \
                         $(MUSL_ROOT)/src/string.c \
+                        $(MUSL_ROOT)/src/stdlib.c \
                         $(MUSL_ROOT)/src/syscall.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c

@@ -225,6 +225,33 @@ static void boot_seed_text_if_missing(const char *path, const char *text)
     (void)vfs_close(&file);
 }
 
+static int boot_path_is_regular_file(const char *path)
+{
+    vfs_file_t file;
+    stat_t     st;
+    int        rc;
+
+    rc = vfs_open(path, O_RDONLY, &file);
+    if (rc < 0)
+        return 0;
+
+    rc = vfs_stat(&file, &st);
+    (void)vfs_close(&file);
+    if (rc < 0)
+        return 0;
+
+    return ((st.st_mode & S_IFMT) == S_IFREG);
+}
+
+static const char *boot_find_real_arksh_path(void)
+{
+    if (boot_path_is_regular_file("/usr/bin/arksh"))
+        return "/usr/bin/arksh";
+    if (boot_path_is_regular_file("/usr/bin/arksh.real"))
+        return "/usr/bin/arksh.real";
+    return NULL;
+}
+
 static void boot_prepare_login_layout(void)
 {
     if (!ext4_is_mounted())
@@ -1080,7 +1107,7 @@ static void bootcli_render_term80(void)
     }
 
     bootcli_draw_text(term_x, term_y + term_h + 12U,
-                      "Comandi shell: arksh nsh ls cat echo exec clear top cd pwd help exit",
+                      "Comandi shell: arksh login nsh ls cat echo exec clear top cd pwd help exit",
                       muted_color, panel_color);
 
     gpu_present_fullscreen();
@@ -1147,6 +1174,19 @@ static void bootcli_launch_default_shell(int announce)
             bootcli_push_line("arksh non disponibile, fallback a nsh.");
         bootcli_launch_nsh(announce);
     }
+}
+
+static void bootcli_launch_real_arksh(int announce)
+{
+    const char *path = boot_find_real_arksh_path();
+
+    if (!path) {
+        if (announce)
+            bootcli_push_line("arksh reale non presente in /usr/bin; usa 'login' per il bridge o 'nsh' per recovery.");
+        return;
+    }
+
+    bootcli_launch_shell(path, "arksh", "arksh", announce);
 }
 
 static int bootcli_poll_shell(void)
@@ -1245,10 +1285,13 @@ static void bootcli_render(void)
                       "Comandi: help clear pwd cd gpu selftest [nome] fs ls cat write",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 112U,
-                      "append mkdir truncate rm mv fsync sync arksh nsh mreactdemo jobdemo nsdemo",
+                      "append mkdir truncate rm mv fsync sync arksh login nsh mreactdemo jobdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "posixdemo muslabi muslglob arkshsmoke clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo crtdemo",
+                      "nsdemo posixdemo muslabi muslglob arkshsmoke clonedemo threadlife futexdemo",
+                      muted_color, panel_color);
+    bootcli_draw_text(48U, 152U,
+                      "pthreaddemo semdemo tlsmtdemo crtdemo",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1357,7 +1400,8 @@ static void bootcli_execute_command(void)
         bootcli_push_line("fsync P   flush esplicito del singolo file");
         bootcli_push_line("truncate P N imposta la size di un file ext4 esistente");
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
-        bootcli_push_line("arksh     lancia la login shell di default (/bin/arksh)");
+        bootcli_push_line("arksh     lancia la shell arksh reale da /usr/bin se presente");
+        bootcli_push_line("login     rilancia la login shell bridge (/bin/arksh)");
         bootcli_push_line("nsh       lancia la shell ELF statica 80x25 di recovery");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
@@ -1537,6 +1581,8 @@ static void bootcli_execute_command(void)
         else
             bootcli_push_line("sync OK: cache ext4 e mount VFS flushati.");
     } else if (bootcli_streq(bootcli_input, "arksh")) {
+        bootcli_launch_real_arksh(1);
+    } else if (bootcli_streq(bootcli_input, "login")) {
         bootcli_launch_default_shell(1);
     } else if (bootcli_streq(bootcli_input, "nsh")) {
         bootcli_launch_nsh(1);
@@ -1912,9 +1958,9 @@ static void bootcli_init(void)
         bootcli_push_line("Modalita grafica attiva: VirtIO-GPU.");
     else
         bootcli_push_line("Modalita framebuffer locale attiva.");
-    bootcli_push_line("Login shell di default: /bin/arksh (con fallback automatico a nsh).");
+    bootcli_push_line("Login shell di default: /bin/arksh (bridge con fallback automatico a nsh).");
     bootcli_push_line("Digita 'help' e premi Invio per testare tastiera e comandi di recovery.");
-    bootcli_push_line("Prova anche: arksh, nsh, pwd, cd /data, ls, cat /BOOT.TXT.");
+    bootcli_push_line("Prova anche: arksh, login, nsh, pwd, cd /data, ls, cat /BOOT.TXT.");
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
     bootcli_push_line("M8-04: prova 'jobdemo' per process group, sessione e waitpid(WUNTRACED).");
@@ -1923,7 +1969,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-01a/B3: prova 'muslabi' per openat/lseek/readv/writev/fcntl/ioctl/uname/auxv.");
     bootcli_push_line("M8-08d: prova 'muslglob' per fnmatch(), glob() e wildcard su VFS.");
     bootcli_push_line("M8-08e: prova 'arkshsmoke' per la toolchain CMake/cross-build EnlilOS.");
-    bootcli_push_line("M8-08f: /bin/arksh e' la shell di login; /bin/nsh resta recovery shell.");
+    bootcli_push_line("M8-08f: 'login' usa il bridge /bin/arksh; 'arksh' prova solo la shell reale in /usr/bin.");
     bootcli_push_line("M11-02a: prova 'clonedemo' per clone(), gettid(), CLONE_VM/FS/FILES e TPIDR_EL0 per-thread.");
     bootcli_push_line("M11-02b: prova 'threadlife' per set_tid_address(), tgkill(), clear_child_tid ed exit_group().");
     bootcli_push_line("M11-02c: prova 'futexdemo' per FUTEX_WAIT/WAKE/REQUEUE e join via clear_child_tid.");
@@ -1932,7 +1978,7 @@ static void bootcli_init(void)
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
-    bootcli_push_line("M7-02: usa 'nsh' per recovery shell o 'arksh' per rilanciare la login shell.");
+    bootcli_push_line("M7-02: usa 'nsh' per recovery shell, 'login' per il bridge, 'arksh' per la shell reale.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)
@@ -2156,8 +2202,8 @@ void kernel_main(void)
     uart_puts("\n[EnlilOS] ===================================\n");
     uart_puts("[EnlilOS] Boot completato con successo!\n");
     uart_puts("[EnlilOS] Console interattiva pronta\n");
-    uart_puts("[EnlilOS] Login shell: /bin/arksh (fallback automatico a /bin/nsh)\n");
-    uart_puts("[EnlilOS] Comandi: 'arksh' rilancia la login shell, 'nsh' apre la recovery shell\n");
+    uart_puts("[EnlilOS] Login shell: /bin/arksh (bridge con fallback automatico a /bin/nsh)\n");
+    uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");
 

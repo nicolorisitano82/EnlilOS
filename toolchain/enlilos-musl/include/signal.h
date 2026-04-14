@@ -5,6 +5,7 @@
 
 typedef unsigned long long sigset_t;
 typedef void (*sighandler_t)(int);
+typedef int sig_atomic_t;
 
 struct sigaction {
     sighandler_t sa_handler;
@@ -15,6 +16,7 @@ struct sigaction {
 
 #define SIG_DFL ((sighandler_t)0)
 #define SIG_IGN ((sighandler_t)1)
+#define SIG_ERR ((sighandler_t)-1)
 
 #define SIGHUP      1
 #define SIGINT      2
@@ -37,6 +39,7 @@ struct sigaction {
 #define SIGTSTP     20
 #define SIGTTIN     21
 #define SIGTTOU     22
+#define SIGWINCH    28
 
 #define SA_RESTART   (1U << 0)
 #define SA_NODEFER   (1U << 1)
@@ -88,5 +91,6 @@ static inline int sigismember(const sigset_t *set, int sig)
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 int kill(pid_t pid, int sig);
+sighandler_t signal(int sig, sighandler_t handler);
 
 #endif

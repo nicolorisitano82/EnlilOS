@@ -166,6 +166,21 @@ int kill(pid_t pid, int sig)
     return (int)libc_set_errno(user_svc2(SYS_KILL, pid, sig));
 }
 
+sighandler_t signal(int sig, sighandler_t handler)
+{
+    struct sigaction act;
+    struct sigaction old;
+
+    act.sa_handler = handler;
+    act.sa_mask = 0ULL;
+    act.sa_flags = 0U;
+    act.__pad = 0U;
+
+    if (sigaction(sig, &act, &old) < 0)
+        return SIG_ERR;
+    return old.sa_handler;
+}
+
 int nanosleep(const struct timespec *req, struct timespec *rem)
 {
     return (int)libc_set_errno(user_svc2(SYS_NANOSLEEP, (long)req, (long)rem));
