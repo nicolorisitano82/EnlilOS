@@ -3375,15 +3375,15 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 ### 6. Ordine operativo consigliato da qui
 
-1. `M10-02`
-2. `M10-03`
-3. `M8-08 plugin`
-4. `M8-08h`
-5. `M11-05`
-6. `M12-01`
-7. `M13-02`
-8. `M13-03`
+1. `M8-08 plugin`
+2. `M8-08h`
+3. `M11-05`
+4. `M12-01`
+5. `M12-02`
+6. `M13-02`
+7. `M13-03`
+8. `M13-05`
 
-Se serve un principio guida unico: **prima rendere EnlilOS un sistema usabile da shell reale,
-poi un sistema con librerie dinamiche, poi un sistema con rete, e solo dopo un sistema desktop
-e multi-core pienamente general-purpose.**
+Se serve un principio guida unico: **prima rendere EnlilOS piu' usabile da shell reale e
+tooling dinamico, poi sfruttare quella base per compatibilita' Linux e desktop, e solo dopo
+spingere forte su multicore e scheduling RT avanzato.**
