@@ -1117,23 +1117,25 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 
 ---
 
-### ⬜ M10-02 · TCP/IP Stack Minimale
-**Priorità:** ALTA (dipende da M10-01)
+### ✅ M10-02 · TCP/IP Stack Minimale
+**Priorità:** ALTA (dipende da M10-01) — **completata v1**
 
-Opzioni:
-- **lwIP** (porta): maturo, piccolo, già usato in OS embedded; licenza BSD
-- **picotcp**: alternativa più moderna, licenza GPLv2
-- **custom minimale**: ARP + IPv4 + UDP + TCP bare, ~3000 righe; massimo controllo WCET
+- Stack freestanding custom in `user/net_stack.c`, gira dentro `netd` (EL0), no libc
+- ARP: cache 8 entry, gratuitous ARP al boot, ARP request/reply
+- IPv4: rx/tx, no fragmentation, checksum corretto
+- ICMP: echo reply (ping risponde a 10.0.2.2)
+- UDP: 4 socket con bind + callback + send
+- TCP: passive open, 4 connessioni, SYN→SYN+ACK→ESTABLISHED→FIN+ACK
+- IP statica QEMU SLIRP: `10.0.2.15/24`, gateway `10.0.2.2`
+- Selftest `net-stack`: verifica GARP inviato (`tx_packets > 0` entro 2 s)
+- Build: `user/net_stack.o` linkato esplicitamente in `netd.elf` (regola Makefile dedicata)
+- `NETD.ELF` ora 23 KB (vs ~2 KB prima); suite a 46/46
 
-**Decisione consigliata:** porta di **lwIP** in `netd` user-space — evita di reinventare
-la gestione dei timer TCP, la ritrasmissione e la gestione delle finestre scorrevoli.
-
-**Componenti:**
-- ARP cache (statica, 16 entry)
-- IPv4: forward, TTL, checksum HW se supportato da virtio-net
-- UDP: send/recv diretto (RT-safe se buffer pre-allocati)
-- TCP: slow path (3-way handshake, ritrasmissione, congestion control) — mai da task hard-RT
-- ICMP: echo reply (`ping`)
+**Limiti v1:**
+- No retransmit TCP (QEMU/SLIRP è lossless)
+- IP statica (no DHCP)
+- No connessione TCP attiva (solo passive open)
+- BSD socket API: rimandata a M10-03
 
 ---
 
@@ -3149,7 +3151,7 @@ a runtime, arksh carica plugin dal filesystem.
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
 | 23 | **M10-01** VirtIO Network Driver | ✅ Completata v1: driver `virtio-net`, `netd` bootstrap, selftest `net-core` |
-| 24 | **M10-02** TCP/IP (lwIP) | Stack di rete. Dipende solo dal driver |
+| 24 | **M10-02** TCP/IP Stack | ✅ Completata v1: stack custom freestanding in `netd`, ARP/IPv4/ICMP/UDP/TCP, selftest `net-stack` |
 | 25 | **M10-03** BSD Socket API | Espone la rete a user-space. Sblocca `curl`, `wget`, SSH |
 
 **Checkpoint FASE 5:** `ping 1.1.1.1` funziona, `curl` scarica una pagina,
@@ -3294,20 +3296,21 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** estendere la rete con `M10-02`, poi `M10-03`, poi completare l'i18n con `M8-08h`
+- **Prossimo step:** `M10-03` BSD socket API, poi `M8-08` plugin arksh, poi `M8-08h` i18n
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M10-01`: suite `selftest` a `45/45`.
+> Stato verificato dopo la chiusura di `M10-02`: suite `selftest` a `46/46`.
 
 ### 1. Cosa e' gia' stato completato
 
 - ✅ **Fondamenta kernel e debug**: `M14-02`, `M8-01`, `M8-03`, `M8-04`, `M8-05`, `M8-06`, `M8-07`
 - ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
+- ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`
@@ -3316,16 +3319,15 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M10-02** TCP/IP Stack | `M10-01` | Ora che il link layer c'e', serve aprire IPv4/ARP/ICMP/TCP per avere rete utile |
-| 2 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
-| 3 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
-| 4 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 5 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
-| 6 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
+| 1 | **M10-03** BSD Socket API | `M10-02` ✅ | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
+| 2 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
+| 3 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
+| 4 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
+| 5 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
 
-1. **Aprire la rete oltre il link layer**: `M10-02 -> M10-03`
+1. **Aprire la rete a user-space**: `M10-03` (M10-02 ✅)
 2. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 3. **Migliorare l'usabilita' shell/input**: `M8-08h`
 4. **Usare la rete per compatibilita' e desktop**:

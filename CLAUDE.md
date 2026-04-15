@@ -1,8 +1,6 @@
 # EnlilOS — Guida per Claude
 
-Microkernel AArch64 in stile GNU Hurd. Questo file cattura la conoscenza
-architetturale necessaria per lavorare sul codebase senza dover rileggere
-tutto ogni sessione.
+Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per lavorare sul codebase senza rileggere tutto ogni sessione.
 
 ---
 
@@ -17,16 +15,13 @@ tutto ogni sessione.
   - `make test` — build selftest + lancio QEMU
   - `make run` — boot kernel normale in QEMU
   - `make musl-sysroot` — prepara sysroot/bootstrap libc `M11-01`
-  - `make musl-smoke` — compila i demo statici musl-linked
+  - `make musl-smoke` — compila demo statici musl-linked
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
-  - `make arksh-configure ARKSH_DIR=...` — configura un checkout esterno di `arksh`
-  - `make arksh-build ARKSH_DIR=...` — compila un checkout esterno di `arksh`
-- Stato validato corrente: `SUMMARY total=46 pass=46 fail=0` (dopo M10-02)
-- `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
-  il kernel entra in halt e QEMU resta aperto finché non viene terminato.
-- Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
-  la successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64`
-  e poi `kill <pid>`.
+  - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
+  - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
+- Stato validato: `SUMMARY total=46 pass=46 fail=0` (dopo M10-02)
+- `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
+- `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
 ---
 
@@ -60,10 +55,7 @@ PRIO_IDLE   = 255  // task idle, sempre READY
 ```
 
 - `SCHED_MAX_TASKS = 96`
-- Nota pratica: il pool task non ricicla ancora i TCB zombie; con il profilo attuale
-  (`M11-03` incluso) la suite completa sale a `43/43` e supera anche il vecchio
-  limite cumulativo di 64 task.
-  Il valore 96 è intenzionale e allineato alla crescita del bring-up userspace.
+- Pool task non ricicla ancora TCB zombie; con profilo attuale (`M11-03` incluso) suite completa sale a `43/43`, supera vecchio limite cumulativo 64 task. Valore 96 intenzionale, allineato crescita bring-up userspace.
 
 ### TCB (`sched_tcb_t`) — esattamente 64 byte, layout fisso
 ```
@@ -76,28 +68,24 @@ offset 15: ticks_left
 ...
 offset 56: next          — link intrusive nella run queue
 ```
-**NON modificare il layout del TCB** — `sched_switch.S` dipende da `sp` a offset 0.
+**NON modificare layout TCB** — `sched_switch.S` dipende da `sp` a offset 0.
 
 ### Run queue
 - `rq_head[256]` / `rq_tail[256]`: FIFO singly-linked per priorità
 - `ready_bitmap[4]`: 256 bit, `bitmap_find_first()` → O(1) via CTZ
-- `rq_push(t)`: aggiunge a coda del bucket `eff_prio_of(t)`. **Pericolo doppio-push**: corrupe la catena.
-- `rq_pop(p)`: estrae dalla testa, setta `t->next = NULL`
+- `rq_push(t)`: aggiunge a coda bucket `eff_prio_of(t)`. **Pericolo doppio-push**: corrupe catena.
+- `rq_pop(p)`: estrae da testa, setta `t->next = NULL`
 - `rq_remove(t, p)`: scansione lineare, silent fail se non trovato
 
 ### Priority Inheritance (PI)
 - `donated_priority[slot]`: per-task, monotonicamente decrescente (0xFF = nessuna donazione)
 - `eff_prio_of(t) = min(t->priority, donated_priority[slot])`
-- `sched_task_donate_priority(t, prio)`: aggiorna donated_priority. Se t è READY → fa `rq_remove(t, old_eff)` + `rq_push(t)`. Se t è BLOCKED o RUNNING → non tocca la run queue.
+- `sched_task_donate_priority(t, prio)`: aggiorna donated_priority. Se t READY → `rq_remove(t, old_eff)` + `rq_push(t)`. Se t BLOCKED o RUNNING → non tocca run queue.
 - `sched_task_clear_donation(t)`: resetta donated_priority a 0xFF.
 
 ### PERICOLO: direct priority mutation
-**Non fare MAI** `task->priority = X` mentre il task è in READY nella run queue.
-Il task è nel bucket `eff_prio_of()` calcolato PRIMA della mutazione. Se si cambia
-`priority` direttamente, `eff_prio_of` cambia ma il task è ancora nel vecchio bucket →
-`rq_remove(t, nuovo_eff)` fallisce silenziosamente → `rq_push` aggiunge nel nuovo bucket
-senza rimuovere dal vecchio → task in **due bucket contemporaneamente** → corruzione
-della run queue → crash.
+**Non fare MAI** `task->priority = X` mentre task è READY nella run queue.
+Task nel bucket `eff_prio_of()` calcolato PRIMA della mutazione. Cambiando `priority` direttamente: `eff_prio_of` cambia ma task ancora nel vecchio bucket → `rq_remove(t, nuovo_eff)` fallisce silenziosamente → `rq_push` aggiunge nel nuovo bucket senza rimuovere dal vecchio → task in **due bucket contemporaneamente** → corruzione run queue → crash.
 Usare sempre `sched_task_donate_priority()`.
 
 ### Context switch (`sched_context_switch`)
@@ -113,22 +101,15 @@ Salva callee-saved di prev sullo stack, ripristina di next:
 `ret` salta a x30. Per task al primo avvio: x30 = `task_entry_trampoline`.
 
 ### Invariante IRQ in `schedule_locked`
-IRQ rimangono **disabilitati** durante `sched_context_switch`. NON usare
-`irq_restore(flags)` prima del context switch: aprirebbe una finestra dove
-un timer IRQ chiamerebbe `schedule()` rientrante, corrompendo `next->sp` →
-crash (PC=0, x30=0). Dopo il context switch si usa `msr daifclr, #2`
-(non `irq_restore`) per riabilitare incondizionatamente gli IRQ — perché il
-task ripreso potrebbe avere flags con I=1 (era bloccato dentro un syscall
-handler dove l'HW imposta DAIF.I=1 all'ingresso eccezione).
+IRQ rimangono **disabilitati** durante `sched_context_switch`. NON usare `irq_restore(flags)` prima del context switch: aprirebbe finestra dove timer IRQ chiamerebbe `schedule()` rientrante, corrompendo `next->sp` → crash (PC=0, x30=0). Dopo context switch si usa `msr daifclr, #2` (non `irq_restore`) per riabilitare incondizionatamente IRQ — task ripreso potrebbe avere flags con I=1 (era bloccato in syscall handler dove HW imposta DAIF.I=1 all'ingresso eccezione).
 
 ### sched_block vs sched_yield
 - `sched_block()`: state=BLOCKED, task non re-inserito in coda. Richiede `sched_unblock()` esplicito.
-- `sched_yield()`: task rimane READY, re-inserito in coda dopo il reschedule.
+- `sched_yield()`: task resta READY, re-inserito in coda dopo reschedule.
 - `sched_unblock(t)`: agisce solo se `t->state == TCB_STATE_BLOCKED`.
 
 ### Preemption hardware
-Dopo ogni IRQ in `vectors.S`: se `need_resched=1` → `schedule()`. Il timer
-chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
+Dopo ogni IRQ in `vectors.S`: se `need_resched=1` → `schedule()`. Timer chiama `sched_tick()` ogni 1ms, decrementa quantum e setta `need_resched`.
 
 ---
 
@@ -136,7 +117,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 
 **File**: [include/syscall.h](include/syscall.h), [kernel/syscall.c](kernel/syscall.c)
 
-- Numero syscall in **x8**, argomenti in **x0–x5**, valore di ritorno in **x0**
+- Numero syscall in **x8**, argomenti in **x0–x5**, valore ritorno in **x0**
 - Valori negativi = `-errno`
 - Tabella `syscall_table[256]` indicizzata direttamente (O(1))
 - `ERR(e)` = `(uint64_t)(-(int64_t)(e))` — macro per costruire codici d'errore
@@ -168,8 +149,7 @@ chiama `sched_tick()` ogni 1ms che decrementa il quantum e setta `need_resched`.
 ```
 
 ### Wrapper EL0 (`include/user_svc.h`)
-Per programmi user-space usare sempre `user_svc0..6()` e `user_svc_exit()`.
-Non scrivere inline assembly SVC nei file `.c` dei demo.
+Per programmi user-space usare sempre `user_svc0..6()` e `user_svc_exit()`. Non scrivere inline assembly SVC nei file `.c` dei demo.
 
 ---
 
@@ -181,11 +161,10 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Wait con `sched_yield()` (busy-wait cooperativo), non `sched_block()`
 - PI: `ksem_update_pi_locked()` → `sched_task_donate_priority(owner_hint, best_waiter_prio)`
 - Flag `KSEM_RT`: attiva PI e `owner_hint` tracking
-- `ksem_task_cleanup(task)`: chiamato da `sched_task_exit_with_code()` all'uscita del task
+- `ksem_task_cleanup(task)`: chiamato da `sched_task_exit_with_code()` a exit task
 
 ### Pattern selftest ksem
-- Il **holder** deve avere priorità **PRIO_HIGH** (non PRIO_NORMAL).
-  Con PRIO_NORMAL verrebbe starved dall'hog task (stesso livello, inserito prima in FIFO).
+- **holder** deve avere priorità **PRIO_HIGH** (non PRIO_NORMAL). Con PRIO_NORMAL verrebbe starved dall'hog task (stesso livello, inserito prima in FIFO).
 
 ---
 
@@ -196,7 +175,7 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 - Semantica Mesa-style (condition variable + mutex integrato)
 - `kmon_wait_current()`: usa `sched_yield()`, non `sched_block()`
 - `kmon_refresh_owner_locked()`: usa `sched_task_donate_priority()` — **mai** `task->priority =`
-- Priority ceiling per monitor RT: donazione automatica al momento di `kmon_enter`
+- Priority ceiling per monitor RT: donazione automatica a `kmon_enter`
 - `kmon_task_cleanup(task)`: chiamato a exit
 
 ---
@@ -206,11 +185,11 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 **File**: [kernel/cap.c](kernel/cap.c), [include/cap.h](include/cap.h)
 
 - `cap_pool[256]`: pool globale capability attive/libere
-- `cap_table[SCHED_MAX_TASKS][64]`: per-task, array di token posseduti
+- `cap_table[SCHED_MAX_TASKS][64]`: per-task, array token posseduti
 - Token 64-bit generato con `CNTPCT_EL0 ^ pid ^ cap_salt` (non indovinabile)
-- `cap_alloc_kernel(pid, type, rights, object)`: API interna per il kernel
+- `cap_alloc_kernel(pid, type, rights, object)`: API interna kernel
 - Syscall: `cap_alloc(60)`, `cap_send(61)`, `cap_revoke(62)`, `cap_derive(63)`, `cap_query(64)`
-- Solo l'`owner_pid` può revocare; `cap_derive` non può aggiungere diritti rispetto al padre
+- Solo `owner_pid` può revocare; `cap_derive` non può aggiungere diritti rispetto al padre
 
 ---
 
@@ -218,51 +197,34 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 
 **File**: [user/vfsd.c](user/vfsd.c)
 
-- Task EL0 con pid=4, porta IPC "vfs"
-- Usa syscall `vfs_boot_*` (150–155) per accedere al VFS kernel-side
-- Selftest `vfsd-core` verifica che il server risponda correttamente a open/read/stat
+- Task EL0 pid=4, porta IPC "vfs"
+- Usa syscall `vfs_boot_*` (150–155) per accedere VFS kernel-side
+- Selftest `vfsd-core` verifica risposta corretta a open/read/stat
 - Bootstrap: spawned da `kernel/main.c` come primo task user-space
-- Da `M11-02a`, `vfsd` deve ragionare per `tgid` e non per singolo sender TID:
-  tutti i thread dello stesso processo condividono `cwd` e mount namespace.
-- Nota critica da M11-01a: `lseek()` sui fd remoti richiede sia `VFSD_REQ_LSEEK`
-  lato IPC sia l'aggiornamento del `file.pos` shadow nel kernel dopo `read/write`.
-  Se aggiorni solo il remote handle e non lo shadow, `SEEK_CUR` parte da una posizione
-  stantia e i demo ELF falliscono in modo intermittente.
+- Da `M11-02a`, `vfsd` ragiona per `tgid` non per singolo sender TID: tutti thread stesso processo condividono `cwd` e mount namespace.
+- Nota critica M11-01a: `lseek()` su fd remoti richiede sia `VFSD_REQ_LSEEK` lato IPC sia aggiornamento `file.pos` shadow nel kernel dopo `read/write`. Aggiornando solo remote handle e non shadow, `SEEK_CUR` parte da posizione stantia e demo ELF falliscono in modo intermittente.
 
 ## ABI minima musl (`M11-01a`)
 
 **File**: [kernel/syscall.c](kernel/syscall.c), [include/syscall.h](include/syscall.h),
 [user/musl_abi_demo.c](user/musl_abi_demo.c)
 
-- Implementato il pacchetto v1: `getpid/getppid/gettimeofday/nanosleep`,
-  `getuid/getgid/geteuid/getegid`, `lseek`, `readv`, `writev`, `fcntl`,
-  `openat`, `fstatat/newfstatat`, `ioctl`, `uname`
-- `O_CLOEXEC` / `FD_CLOEXEC` sono reali: `open/openat` li memorizzano sul fd entry
-  e `execve()` chiude i fd marcati solo sul path di successo
-- `fcntl` v1 supporta `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`,
-  `F_DUPFD`, `F_DUPFD_CLOEXEC`
-- `openat()` v1 supporta `AT_FDCWD` e path assoluti; i dirfd relativi veri sono rinviati
+- Implementato pacchetto v1: `getpid/getppid/gettimeofday/nanosleep`, `getuid/getgid/geteuid/getegid`, `lseek`, `readv`, `writev`, `fcntl`, `openat`, `fstatat/newfstatat`, `ioctl`, `uname`
+- `O_CLOEXEC` / `FD_CLOEXEC` reali: `open/openat` li memorizzano su fd entry e `execve()` chiude fd marcati solo sul path di successo
+- `fcntl` v1 supporta `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`, `F_DUPFD_CLOEXEC`
+- `openat()` v1 supporta `AT_FDCWD` e path assoluti; dirfd relativi veri rinviati
 - `fstatat()` v1 supporta `AT_FDCWD` e `AT_EMPTY_PATH`
-- `ioctl()` v1 supporta `TCGETS`, `TCSETS`, `TIOCGWINSZ`, `TIOCGPGRP`,
-  `TIOCSPGRP`, `FIONBIO`; fallback `-ENOTTY`
+- `ioctl()` v1 supporta `TCGETS`, `TCSETS`, `TIOCGWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONBIO`; fallback `-ENOTTY`
 - Demo runtime: `/MUSLABI.ELF`, comando boot `muslabi`, selftest `musl-abi-core`
-- `MUSLABI.ELF` ora verifica anche l'`auxv` minima per musl:
-  `AT_RANDOM`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`
-- `AT_RANDOM` viene costruita nel loader ELF direttamente sullo stack user-space:
-  16 byte pseudocasuali scritti in memoria utente e referenziati via puntatore nell'`auxv`
-- `M11-01b` e' ora chiusa in v1: `crt1/crti/crtn`, `environ`, `__enlilos_auxv`,
-  `preinit/init/fini arrays` e startup C statico sono validati da `CRTDEMO.ELF`
-- gotcha critico risolto: il restore di `TPIDR_EL0` non puo' stare "dopo" il
-  `sched_context_switch()` assumendo che quel codice giri nel `next` task;
-  quando la funzione riprende, gira nel task appena tornato in esecuzione.
-  La fix corretta e':
-  - salvare sempre il TP del task uscente prima dello switch
-  - ripristinare `TPIDR_EL0` dal `current_task` reale quando il task riprende
+- `MUSLABI.ELF` verifica anche `auxv` minima per musl: `AT_RANDOM`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`
+- `AT_RANDOM` costruita nel loader ELF direttamente sullo stack user-space: 16 byte pseudocasuali scritti in memoria utente, referenziati via puntatore nell'`auxv`
+- `M11-01b` chiusa in v1: `crt1/crti/crtn`, `environ`, `__enlilos_auxv`, `preinit/init/fini arrays` e startup C statico validati da `CRTDEMO.ELF`
+- Gotcha critico risolto: restore di `TPIDR_EL0` non può stare "dopo" `sched_context_switch()` assumendo che quel codice giri nel task `next`; quando funzione riprende, gira nel task appena tornato in esecuzione. Fix corretta:
+  - salvare sempre TP task uscente prima dello switch
+  - ripristinare `TPIDR_EL0` dal `current_task` reale quando task riprende
   - impostare `TPIDR_EL0` anche nel primo ingresso EL0 da `sched_task_bootstrap()`
-- altro gotcha utile: `PT_TLS` con `p_memsz == 0` va ignorato, perche' il linker
-  puo' emetterlo anche per ELF senza TLS reale
-- layout TLS statico v1 funzionante con il toolchain attuale:
-  `[TCB stub 16B][tdata][tbss zeroed/aligned]`, con `TPIDR_EL0` puntato al TCB
+- Altro gotcha: `PT_TLS` con `p_memsz == 0` va ignorato, linker può emetterlo anche per ELF senza TLS reale
+- Layout TLS statico v1 funzionante con toolchain attuale: `[TCB stub 16B][tdata][tbss zeroed/aligned]`, con `TPIDR_EL0` puntato al TCB
 
 ## Toolchain musl bootstrap (`M11-01c`)
 
@@ -272,54 +234,28 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [toolchain/bin/enlilos-toolchain-common.sh](toolchain/bin/enlilos-toolchain-common.sh),
 [tools/enlilos-aarch64.cmake](tools/enlilos-aarch64.cmake)
 
-- `M11-01c` non e' un porting upstream completo di musl: e' un bootstrap statico
-  sufficiente per compilare ed eseguire programmi C semplici su EnlilOS.
-- Il sysroot vive in `toolchain/sysroot/usr/{include,lib}` e viene popolato da:
+- `M11-01c` non è porting upstream completo di musl: bootstrap statico sufficiente per compilare ed eseguire programmi C semplici su EnlilOS.
+- Sysroot vive in `toolchain/sysroot/usr/{include,lib}`, popolato da:
   - header bootstrap in `toolchain/enlilos-musl/include`
   - `libc.a` minimale costruita da `toolchain/enlilos-musl/src`
   - `crt1.o`, `crti.o`, `crtn.o` copiati dalla build user-space esistente
-- Il wrapper `aarch64-enlilos-musl-gcc` deve passare sia `--sysroot` sia
-  `-isystem "$SYSROOT/usr/include"`; con il solo `--sysroot` alcuni include non
-  vengono risolti come previsto nella toolchain attuale.
-- La bootstrap libc non deve includere direttamente `include/syscall.h` del kernel:
-  trascina tipi kernel-side che collidono con `stdint.h/stddef.h`. Usare l'header
-  privato `toolchain/enlilos-musl/src/enlil_syscalls.h`.
-- Nella rule di build della bootstrap libc, l'ordine include corretto e':
-  `-Itoolchain/enlilos-musl/include -Iinclude`. Invertirlo rompe la build per
-  collisioni di typedef e macro.
-- `environ` e' definita dal runtime `crt1`; nella libc bootstrap va solo dichiarata
-  `extern`, altrimenti il link fallisce per simbolo duplicato.
-- I smoke test runtime attuali sono:
-  `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`,
-  `MUSLGLOB.ELF`.
-- `tools/enlilos-aarch64.cmake` è ora usato anche per progetti CMake esterni:
-  definisce `ENLILOS=1`, usa il wrapper `aarch64-enlilos-musl-*` e il sysroot
-  bootstrap in-tree.
-- Gotcha importante emerso con `M8-08e`: se si lancia CMake da dentro il `Makefile`
-  senza pulire l'ambiente, i flag kernel-side (`-T linker.ld -nostdlib`) trapelano
-  nel progetto esterno e il link fallisce. I target `arksh-configure` e `arksh-smoke`
-  devono quindi eseguire `env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS`.
-- `M8-08e` non vendorizza `arksh`: il sorgente resta esterno e si passa via
-  `ARKSH_DIR=/percorso/arksh`. In-tree restano il compat shim di riferimento
-  `compat/arksh/enlilos.c` e lo smoke CMake `toolchain/cmake-smoke/`.
+- Wrapper `aarch64-enlilos-musl-gcc` deve passare sia `--sysroot` sia `-isystem "$SYSROOT/usr/include"`; con solo `--sysroot` alcuni include non risolti come previsto nella toolchain attuale.
+- Bootstrap libc non deve includere direttamente `include/syscall.h` del kernel: trascina tipi kernel-side che collidono con `stdint.h/stddef.h`. Usare header privato `toolchain/enlilos-musl/src/enlil_syscalls.h`.
+- Nella rule build bootstrap libc, ordine include corretto: `-Itoolchain/enlilos-musl/include -Iinclude`. Invertirlo rompe build per collisioni typedef e macro.
+- `environ` definita dal runtime `crt1`; nella libc bootstrap va solo dichiarata `extern`, altrimenti link fallisce per simbolo duplicato.
+- Smoke test runtime: `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`, `MUSLGLOB.ELF`.
+- `tools/enlilos-aarch64.cmake` usato anche per progetti CMake esterni: definisce `ENLILOS=1`, usa wrapper `aarch64-enlilos-musl-*` e sysroot bootstrap in-tree.
+- Gotcha emerso con `M8-08e`: lanciando CMake da dentro `Makefile` senza pulire ambiente, flag kernel-side (`-T linker.ld -nostdlib`) trapelano nel progetto esterno e link fallisce. Target `arksh-configure` e `arksh-smoke` devono eseguire `env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS`.
+- `M8-08e` non vendorizza `arksh`: sorgente resta esterno, passato via `ARKSH_DIR=/percorso/arksh`. In-tree restano compat shim di riferimento `compat/arksh/enlilos.c` e smoke CMake `toolchain/cmake-smoke/`.
 - Validazione `M8-08e`:
   - target host-side `make arksh-smoke`
   - ELF runtime `/ARKSHSMK.ELF`
   - comando boot `arkshsmoke`
   - selftest `arksh-toolchain`
-- Bug reale emerso dal bring-up: `fd_pipe_read()` non deve tentare di riempire tutto
-  il buffer richiesto su una pipe. Deve tornare appena ha letto i byte disponibili,
-  altrimenti `musl-pipe` resta bloccato dopo aver consumato il payload presente.
-- `dirent.h` / `dirent.c` della bootstrap libc sono volutamente minimali e leggono
-  directory entry per entry via `SYS_GETDENTS`; il contratto pratico oggi e' allineato
-  al payload kernel `name[32] + mode`.
-- `glob()` / `fnmatch()` sono gia' disponibili in v1 per il bootstrap shell-side:
-  `fnmatch()` gestisce `* ? []` con `FNM_PATHNAME`, `FNM_NOESCAPE`, `FNM_PERIOD`,
-  mentre `glob()` espande wildcard sopra `opendir/readdir` senza nuove syscall.
-- Gotcha fondamentale di `glob()`: il `malloc()` bootstrap fa un `mmap()` per ogni
-  allocazione. Un modello "una stringa, una allocazione" esplode presto in `GLOB_APPEND`.
-  La soluzione valida e' uno store compatto unico che contiene sia `gl_pathv` sia il
-  pool delle stringhe matchate.
+- Bug reale da bring-up: `fd_pipe_read()` non deve tentare di riempire tutto il buffer richiesto su una pipe. Deve tornare appena ha letto byte disponibili, altrimenti `musl-pipe` resta bloccato dopo aver consumato il payload presente.
+- `dirent.h` / `dirent.c` bootstrap libc volutamente minimali, leggono directory entry per entry via `SYS_GETDENTS`; contratto pratico oggi allineato al payload kernel `name[32] + mode`.
+- `glob()` / `fnmatch()` già disponibili in v1 per bootstrap shell-side: `fnmatch()` gestisce `* ? []` con `FNM_PATHNAME`, `FNM_NOESCAPE`, `FNM_PERIOD`; `glob()` espande wildcard sopra `opendir/readdir` senza nuove syscall.
+- Gotcha fondamentale `glob()`: `malloc()` bootstrap fa `mmap()` per ogni allocazione. Modello "una stringa, una allocazione" esplode presto in `GLOB_APPEND`. Soluzione valida: store compatto unico che contiene sia `gl_pathv` sia pool delle stringhe matchate.
 
 ## Thread-group baseline (`M11-02a`)
 
@@ -327,31 +263,15 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [kernel/syscall.c](kernel/syscall.c), [kernel/signal.c](kernel/signal.c),
 [user/vfsd.c](user/vfsd.c), [user/clone_demo.c](user/clone_demo.c)
 
-- `M11-02a` non introduce ancora `pthread`, ma chiude la base kernel:
-  `getpid()` ora ritorna il `tgid`, mentre `gettid()` espone il TID reale.
-- Lo stato condiviso di processo non e' un oggetto heap dinamico: vive in
-  `proc_ctx[SCHED_MAX_TASKS]` dentro `kernel/sched.c`, referenziato da `proc_slot`.
-  Tutto cio' che deve essere condiviso tra thread va agganciato a `proc_slot`,
-  non a `pid`.
-- Dopo `M11-02a`, `fd_tables`, `task_brk`, `vfs_srv_tables` e ownership VMM/VFS
-  sono keyed per `proc_slot`, non per TID.
-- Le signal dispositions (`sigaction`) sono condivise per processo slot; i campi
-  `pending`, `blocked` e lo stato stop/resto restano per-thread.
-- Dopo `M11-02b`, `signal_send_pid()` e' process-directed per `tgid`, mentre
-  `signal_send_tgkill()` fa delivery thread-directed sul `tid` esatto.
-- `clone()` v1 supporta solo il subset thread-oriented:
-  `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD`
-  piu' `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
-  `CLONE_CHILD_CLEARTID`.
-- `fork()` ed `execve()` ritornano ancora `-EBUSY` nei processi multi-thread.
-  Il limite e' intenzionale finche' non esiste un path pthread/futex completo
-  e meglio validato oltre `M11-02b`.
-- Gotcha critico: non liberare subito i metadati del processo quando l'ultimo thread
-  esce. Se azzeri il `proc_slot` troppo presto, rompi `waitpid()`, `SIGCHLD`,
-  job control e demo come `nsdemo`/`musl-forkexec`. La parte da rilasciare subito e'
-  l'`mm`; i metadati zombie devono restare vivi fino al reap.
-- `CLONE_CHILD_CLEARTID` oggi chiude il ciclo completo solo insieme al futex core
-  di `M11-02c`: clear in memoria utente + wake del waiter.
+- `M11-02a` non introduce ancora `pthread`, ma chiude base kernel: `getpid()` ora ritorna `tgid`, mentre `gettid()` espone TID reale.
+- Stato condiviso processo non è oggetto heap dinamico: vive in `proc_ctx[SCHED_MAX_TASKS]` dentro `kernel/sched.c`, referenziato da `proc_slot`. Tutto ciò che deve essere condiviso tra thread va agganciato a `proc_slot`, non a `pid`.
+- Dopo `M11-02a`, `fd_tables`, `task_brk`, `vfs_srv_tables` e ownership VMM/VFS keyed per `proc_slot`, non per TID.
+- Signal dispositions (`sigaction`) condivise per processo slot; campi `pending`, `blocked` e stato stop/resto restano per-thread.
+- Dopo `M11-02b`, `signal_send_pid()` è process-directed per `tgid`, mentre `signal_send_tgkill()` fa delivery thread-directed sul `tid` esatto.
+- `clone()` v1 supporta solo subset thread-oriented: `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD` più `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`.
+- `fork()` ed `execve()` ritornano ancora `-EBUSY` in processi multi-thread. Limite intenzionale finché non esiste path pthread/futex completo e meglio validato oltre `M11-02b`.
+- Gotcha critico: non liberare subito metadati processo quando ultimo thread esce. Azzerare `proc_slot` troppo presto rompe `waitpid()`, `SIGCHLD`, job control e demo come `nsdemo`/`musl-forkexec`. Parte da rilasciare subito è `mm`; metadati zombie devono restare vivi fino al reap.
+- `CLONE_CHILD_CLEARTID` oggi chiude ciclo completo solo insieme al futex core di `M11-02c`: clear in memoria utente + wake del waiter.
 - Validazione attuale:
   - selftest `clone-thread`
   - demo `/CLONEDEMO.ELF`
@@ -365,21 +285,12 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [kernel/syscall.c](kernel/syscall.c), [kernel/signal.c](kernel/signal.c),
 [user/thread_life_demo.c](user/thread_life_demo.c)
 
-- `set_tid_address()` salva `clear_child_tid` per-thread e ritorna il `tid` corrente.
-- `exit_group()` non e' sinonimo di `exit()`: marca il `proc_slot` come group-exiting,
-  termina gli altri thread del gruppo e fa convergere il codice finale del processo
-  sul leader waitable.
-- Un processo multi-thread diventa reapable da `waitpid()` **solo** quando esce
-  l'ultimo thread. Prima di quel momento, il leader zombie non deve essere considerato
-  "process exit completed".
-- `signal_terminate_current()` deve passare da `sched_task_exit_with_code()`, non
-  zombificare il task da sola. Altrimenti `clear_child_tid`, cleanup `ksem/kmon/mreact`
-  e accounting di processo si rompono.
-- `tgkill(tgid, tid, sig)` e' il path corretto per segnali thread-directed. Va usato
-  anche per eccezioni sincrone del task EL0 corrente.
-- `clear_child_tid` oggi fa solo il clear affidabile in memoria utente. Il wake dei
-  waiter viene chiuso da `M11-02c`; non tentare comunque di modellare
-  `pthread_join()` sopra `waitpid()`, perche' il path corretto resta `futex`.
+- `set_tid_address()` salva `clear_child_tid` per-thread e ritorna TID corrente.
+- `exit_group()` non è sinonimo di `exit()`: marca `proc_slot` come group-exiting, termina altri thread del gruppo, fa convergere codice finale processo sul leader waitable.
+- Processo multi-thread diventa reapable da `waitpid()` **solo** quando esce ultimo thread. Prima di quel momento, leader zombie non deve essere considerato "process exit completed".
+- `signal_terminate_current()` deve passare da `sched_task_exit_with_code()`, non zombificare task da sola. Altrimenti `clear_child_tid`, cleanup `ksem/kmon/mreact` e accounting processo si rompono.
+- `tgkill(tgid, tid, sig)` è path corretto per segnali thread-directed. Va usato anche per eccezioni sincrone del task EL0 corrente.
+- `clear_child_tid` oggi fa solo clear affidabile in memoria utente. Wake dei waiter chiuso da `M11-02c`; non tentare comunque di modellare `pthread_join()` sopra `waitpid()`, path corretto resta `futex`.
 - Validazione attuale:
   - selftest `thread-lifecycle`
   - demo `/THREADLIFE.ELF`
@@ -393,18 +304,11 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [kernel/syscall.c](kernel/syscall.c), [kernel/sched.c](kernel/sched.c),
 [user/futex_demo.c](user/futex_demo.c)
 
-- `futex` v1 supporta `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_REQUEUE`,
-  `FUTEX_CMP_REQUEUE`. `FUTEX_PRIVATE_FLAG` e' accettato come hint.
-- La chiave non e' solo `uaddr`: e' `(proc_slot, uaddr)`. Questo e' voluto:
-  la v1 copre bene thread dello stesso processo/address-space e non promette
-  ancora il caso cross-process shared mapping.
-- I waiter vivono in un array statico per-task, senza allocazioni dinamiche nel
-  path caldo. Se un thread esce mentre e' bloccato su futex, `futex_task_cleanup()`
-  lo rimuove dalla bucket list.
-- Il wake su `clear_child_tid` avviene nel path di uscita in `sched_task_finish_exit()`.
-  Questo chiude la base necessaria a costruire `pthread_join()` sopra futex.
-- Timeout, `WAIT_BITSET`, robust futex list e `FUTEX_LOCK_PI` restano fuori scope
-  di questa fase.
+- `futex` v1 supporta `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_REQUEUE`, `FUTEX_CMP_REQUEUE`. `FUTEX_PRIVATE_FLAG` accettato come hint.
+- Chiave non è solo `uaddr`: è `(proc_slot, uaddr)`. Intenzionale: v1 copre bene thread stesso processo/address-space, non promette ancora caso cross-process shared mapping.
+- Waiter vivono in array statico per-task, senza allocazioni dinamiche nel path caldo. Se thread esce mentre bloccato su futex, `futex_task_cleanup()` lo rimuove dalla bucket list.
+- Wake su `clear_child_tid` avviene nel path di uscita in `sched_task_finish_exit()`. Chiude base necessaria per costruire `pthread_join()` sopra futex.
+- Timeout, `WAIT_BITSET`, robust futex list e `FUTEX_LOCK_PI` restano fuori scope di questa fase.
 - Validazione attuale:
   - selftest `futex-core`
   - demo `/FUTEXDEMO.ELF`
@@ -421,25 +325,13 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [toolchain/enlilos-musl/include/signal.h](toolchain/enlilos-musl/include/signal.h),
 [user/crt1.c](user/crt1.c), [kernel/ksem.c](kernel/ksem.c)
 
-- `crt1` chiama debolmente `__enlilos_thread_runtime_init()` prima dei costruttori:
-  serve per bootstrapare il thread principale senza imporre il runtime pthread ai
-  binari che non lo usano.
-- Il runtime `pthread` v1 usa il primo word dello stub puntato da `TPIDR_EL0` per
-  stashare il puntatore al `pthread_t` corrente. I thread figli vengono lanciati con
-  `CLONE_SETTLS` e uno stub minimo dedicato.
-- `pthread_join()` non usa `waitpid()`: aspetta il `clear_child_tid` tramite `futex`.
-- `pthread_mutex_*` e `pthread_cond_*` sono chiusi sopra `futex`; `sem_t` named/anon
-  e' chiuso sopra `ksem`.
-- Gli handle `ksem` per task user-space devono essere keyed per `tgid`, non per `tid`.
-  Se restano keyed per thread, i semafori anonimi/named creati da un thread non sono
-  visibili ai sibling thread dello stesso processo.
-- `sem_timedwait()` usa `abstime` assoluto. Poiche' oggi `gettimeofday()` e' vicino al
-  boot time e puo' partire da `0s`, un test che costruisce `past = now - 1s` puo'
-  generare correttamente `EINVAL` se va sotto zero; per ottenere `ETIMEDOUT` il deadline
-  scaduto deve restare valido/non negativo.
-- Il limite storico della `v1` su `__thread` e' stato chiuso da `M11-02e`: i thread
-  figli ora allocano un blocco TLS completo dal template `PT_TLS`, quindi `errno` e
-  le variabili TLS statiche non condividono piu' stato tra thread.
+- `crt1` chiama debolmente `__enlilos_thread_runtime_init()` prima dei costruttori: serve per bootstrapare thread principale senza imporre runtime pthread ai binari che non lo usano.
+- Runtime `pthread` v1 usa primo word dello stub puntato da `TPIDR_EL0` per stashare puntatore al `pthread_t` corrente. Thread figli lanciati con `CLONE_SETTLS` e stub minimo dedicato.
+- `pthread_join()` non usa `waitpid()`: aspetta `clear_child_tid` tramite `futex`.
+- `pthread_mutex_*` e `pthread_cond_*` chiusi sopra `futex`; `sem_t` named/anon chiuso sopra `ksem`.
+- Handle `ksem` per task user-space devono essere keyed per `tgid`, non per `tid`. Keyed per thread: semafori anonimi/named creati da un thread non visibili ai sibling thread stesso processo.
+- `sem_timedwait()` usa `abstime` assoluto. Oggi `gettimeofday()` vicino al boot time, può partire da `0s`: test che costruisce `past = now - 1s` può generare correttamente `EINVAL` se va sotto zero; per ottenere `ETIMEDOUT` il deadline scaduto deve restare valido/non negativo.
+- Limite storico v1 su `__thread` chiuso da `M11-02e`: thread figli ora allocano blocco TLS completo dal template `PT_TLS`, quindi `errno` e variabili TLS statiche non condividono più stato tra thread.
 - Validazione attuale:
   - selftest `musl-pthread`
   - selftest `musl-sem`
@@ -456,17 +348,11 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 [toolchain/smoke/musl_tls_mt.c](toolchain/smoke/musl_tls_mt.c),
 [kernel/selftest.c](kernel/selftest.c)
 
-- Il runtime `pthread` non deve clonare solo uno stub da 16 byte: per i thread figli
-  serve un blocco completo compatibile col layout loader-side
-  `[TCB stub 16B][tdata][tbss]`.
-- La sorgente corretta del template non e' il TLS del thread corrente, ma il segmento
-  `PT_TLS` dell'ELF. Il runtime lo recupera via `auxv` (`AT_PHDR/AT_PHNUM`) e copia
-  `p_filesz` bytes dal template del binario, zeroando il tail `tbss`.
-- `errno` nel bootstrap musl puo' e deve essere `__thread` una volta chiuso il TLS
-  multi-thread; prima di questo passaggio, tutti i thread condividevano
-  accidentalmente lo stesso `errno`.
-- Il smoke `TLSMTDEMO.ELF` verifica quattro cose insieme:
-  - init del template TLS per ogni thread
+- Runtime `pthread` non deve clonare solo stub da 16 byte: per thread figli serve blocco completo compatibile col layout loader-side `[TCB stub 16B][tdata][tbss]`.
+- Sorgente corretta del template non è TLS del thread corrente, ma segmento `PT_TLS` dell'ELF. Runtime lo recupera via `auxv` (`AT_PHDR/AT_PHNUM`) e copia `p_filesz` bytes dal template del binario, zeroando tail `tbss`.
+- `errno` nel bootstrap musl può e deve essere `__thread` una volta chiuso TLS multi-thread; prima di questo, tutti i thread condividevano accidentalmente lo stesso `errno`.
+- Smoke `TLSMTDEMO.ELF` verifica quattro cose insieme:
+  - init template TLS per ogni thread
   - isolamento `__thread` cross-thread
   - `errno` per-thread
   - join corretto dopo lavoro concorrente
@@ -481,18 +367,15 @@ Non scrivere inline assembly SVC nei file `.c` dei demo.
 
 **File**: [user/blkd.c](user/blkd.c), [include/blk_ipc.h](include/blk_ipc.h)
 
-- Task EL0 con pid=5, porta IPC "block", priorità PRIO_LOW
-- Usa syscall `blk_boot_*` (156–159) per accedere al driver virtio-blk kernel-side
-- Guard `blk_srv_owner_ok()`: solo il processo owner della porta "block" può chiamarle
-- IPC payload compatto: `blkd_request_t` (16 B) + `blkd_response_t` (16 B)
-  → dati I/O non transitano nell'IPC, blkd usa buffer statico interno (`blkd_io_buf`)
+- Task EL0 pid=5, porta IPC "block", priorità PRIO_LOW
+- Usa syscall `blk_boot_*` (156–159) per accedere driver virtio-blk kernel-side
+- Guard `blk_srv_owner_ok()`: solo processo owner porta "block" può chiamarle
+- IPC payload compatto: `blkd_request_t` (16 B) + `blkd_response_t` (16 B) → dati I/O non transitano nell'IPC, blkd usa buffer statico interno (`blkd_io_buf`)
 - Selftest `blkd-core` verifica: porta registrata, owner user-space, `blk_is_ready()`, capacità
 - Bootstrap: `boot_launch_blkd()` in `kernel/main.c`, chiamato dopo `boot_launch_vfsd()`
 
 ### Pattern blk_boot_* vs vfs_boot_*
-Identico al pattern vfsd: le syscall `blk_boot_*` sono accessibili **solo** al task
-che possiede la porta "block" (verificato con `mk_port_lookup("block")->owner_tid`).
-Questo evita escalation di privilegi: un processo EL0 arbitrario non può leggere il disco raw.
+Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che possiede porta "block" (verificato con `mk_port_lookup("block")->owner_tid`). Evita escalation privilegi: processo EL0 arbitrario non può leggere disco raw.
 
 ---
 
@@ -500,7 +383,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 
 **File**: [kernel/mreact.c](kernel/mreact.c), syscall 80–84
 
-- Permette a un task di sottoscrivere notifiche su range di indirizzi fisici
+- Permette a task di sottoscrivere notifiche su range di indirizzi fisici
 - `mreact_subscribe(addr, len, flags)` → handle
 - `mreact_wait(handle, timeout)` → blocca fino a modifica nell'area
 - Usato internamente dal VFS per notifiche di I/O
@@ -511,7 +394,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 
 **File**: [boot/vectors.S](boot/vectors.S)
 
-- Ogni entry della vector table fa 5 istruzioni (sub/stp/mov/mov/b)
+- Ogni entry vector table fa 5 istruzioni (sub/stp/mov/mov/b)
 - `__exc_common`: salva frame 288 byte, chiama `exception_handler(src, typ, frame)`
 - Dopo `exception_handler`: controlla `need_resched`, eventualmente chiama `schedule()`
 - Frame eccezione layout:
@@ -523,8 +406,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
   272      esr_el1
   280      far_el1
   ```
-- `ERET` al termine ripristina `SPSR_EL1` che contiene DAIF del contesto interrotto
-  (incluso I=0 → IRQ abilitati per task in esecuzione normale)
+- `ERET` al termine ripristina `SPSR_EL1` che contiene DAIF del contesto interrotto (incluso I=0 → IRQ abilitati per task in esecuzione normale)
 
 ---
 
@@ -544,8 +426,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 
 - **Static loader**: `elf64_spawn_path()`, `elf64_load_from_path()`
 - **Dynamic loader**: `ld_enlil.so` in `user/ld_enlil.c` (custom, non musl)
-- I binari ELF user-space sono embedded nell'immagine kernel tramite `*.embed.o`
-  e accessibili via initrd CPIO
+- Binari ELF user-space embedded nell'immagine kernel tramite `*.embed.o`, accessibili via initrd CPIO
 - ELF user entrano a EL0 via `sched_enter_user()` (assembly in sched_switch.S)
 - `sched_task_bootstrap()` decide kernel vs user vs resume-from-frame
 
@@ -555,7 +436,7 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 
 **File**: [kernel/microkernel.c](kernel/microkernel.c)
 
-- Rendez-vous sincrono: client blocca fino alla risposta del server
+- Rendez-vous sincrono: client blocca fino alla risposta server
 - Priority donation: server eredita priorità del client più urgente
 - Budget per-porta: `mk_port_set_budget()` per latency tracking
 - Syscall: `port_lookup(140)`, `ipc_wait(141)`, `ipc_reply(142)`
@@ -613,17 +494,17 @@ ST_CHECK(case_name, cond, detail)  // ritorna -1 se !cond
 ```
 
 ### Pattern test con task ausiliari
-Quando si creano task ausiliari (holder/hog/waiter):
-- Il **holder** va a `PRIO_HIGH` se deve acquisire una risorsa prima di essere starved
+Per task ausiliari (holder/hog/waiter):
+- **holder** va a `PRIO_HIGH` se deve acquisire risorsa prima di essere starved
 - Non mutare mai `task->priority` direttamente — usare `sched_task_donate_priority()`
-- Per aspettare un task: loop su `timer_now_ms()` con `sched_yield()` e deadline
+- Per aspettare task: loop su `timer_now_ms()` con `sched_yield()` e deadline
 
 ---
 
 ## Milestone completate (stato 2026-04-14)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` sono completi in forma v1.
-Il run di riferimento e':
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
+Run di riferimento:
 
 ```text
 SUMMARY total=46 pass=46 fail=0
@@ -638,230 +519,137 @@ SUMMARY total=46 pass=46 fail=0
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
-- Il modello fd non e' piu' "valore per slot": ogni `fd_table[task][fd]` punta a un
-  `fd_object_t` condivisibile. `dup()`, `dup2()` e `fork()` devono condividere lo stesso
-  oggetto con `refcount`, altrimenti `close()` rompe pipe/redirection.
-- `syscall_task_cleanup()` e' obbligatoria su exit: rilascia fd, pipe e shadow state per
-  il task. Se viene saltata, la suite si riempie di writer/read-end fantasma.
-- Le pipe sono implementate in `kernel/syscall.c` con pool statico da 32 pipe e buffer
-  da 4096 byte. EOF lato lettore arriva quando `writers == 0`; `fstat()` espone `S_IFIFO`.
-- `O_NONBLOCK` e' utile soprattutto sul path pipe. Non e' un modello completo di I/O non
-  bloccante generale su tutti i backend VFS.
-- `getcwd()` / `chdir()` non devono mantenere uno stato parallelo nel kernel: la source of
-  truth e' `vfsd`, coerente con i namespace mount di `M9-04`.
-- L'environment bootstrap dei task lanciati con `elf64_spawn_path()` e':
-  `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`, `SHELL=/bin/arksh`,
-  `TERM=vt100`, `USER=user`.
-- Dopo `M8-08f`, la login shell di default passa da `/bin/arksh`, che resta il
-  launcher/static bridge. Con `M11-03` + hardening libc hosted il port esterno reale
-  di `arksh` ora builda host-side in `toolchain/build/arksh/arksh` e viene
-  impacchettato automaticamente nell'`initrd` come `/usr/bin/arksh.real`.
-- Il comando boot `arksh` deve provare solo la shell reale (`/usr/bin/arksh`,
-  `/usr/bin/arksh.real`) e dare un errore chiaro se manca; il fallback a `/bin/nsh`
-  resta responsabilita' del launcher/login path, non del comando esplicito.
-- `boot_prepare_login_layout()` in `kernel/main.c` e' il punto che prepara layout
-  persistente e file seed su `/data/home/user`:
-  `.config/arksh/arkshrc` e `.local/state/arksh/history`.
-- Gotcha operativo importante di `M8-08f`: il bind `/data/home -> /home` esiste e la
-  login shell fa `chdir("/home/user")`, ma l'accesso EL0 diretto al file history via
-  `/home/user/.local/state/arksh/history` resta timing-sensitive. Il selftest valido
-  controlla quindi il backing store kernel-side su `/data/home/...` e usa `/ARKSHBOOT.ELF`
-  solo per verificare env/cwd/rc/bin-layout.
+- Modello fd non più "valore per slot": ogni `fd_table[task][fd]` punta a `fd_object_t` condivisibile. `dup()`, `dup2()` e `fork()` devono condividere stesso oggetto con `refcount`, altrimenti `close()` rompe pipe/redirection.
+- `syscall_task_cleanup()` obbligatoria su exit: rilascia fd, pipe e shadow state per task. Saltata → suite piena di writer/read-end fantasma.
+- Pipe implementate in `kernel/syscall.c` con pool statico da 32 pipe e buffer da 4096 byte. EOF lato lettore arriva quando `writers == 0`; `fstat()` espone `S_IFIFO`.
+- `O_NONBLOCK` utile soprattutto sul path pipe. Non è modello completo di I/O non bloccante generale su tutti i backend VFS.
+- `getcwd()` / `chdir()` non devono mantenere stato parallelo nel kernel: source of truth è `vfsd`, coerente con namespace mount di `M9-04`.
+- Environment bootstrap task lanciati con `elf64_spawn_path()`: `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`, `SHELL=/bin/arksh`, `TERM=vt100`, `USER=user`.
+- Dopo `M8-08f`, login shell di default passa da `/bin/arksh`, che resta launcher/static bridge. Con `M11-03` + hardening libc hosted, port esterno reale di `arksh` ora builda host-side in `toolchain/build/arksh/arksh` e viene impacchettato automaticamente nell'`initrd` come `/usr/bin/arksh.real`.
+- Comando boot `arksh` deve provare solo shell reale (`/usr/bin/arksh`, `/usr/bin/arksh.real`) e dare errore chiaro se manca; fallback a `/bin/nsh` resta responsabilità del launcher/login path, non del comando esplicito.
+- `boot_prepare_login_layout()` in `kernel/main.c` prepara layout persistente e file seed su `/data/home/user`: `.config/arksh/arkshrc` e `.local/state/arksh/history`.
+- Gotcha operativo `M8-08f`: bind `/data/home -> /home` esiste e login shell fa `chdir("/home/user")`, ma accesso EL0 diretto al file history via `/home/user/.local/state/arksh/history` resta timing-sensitive. Selftest valido controlla quindi backing store kernel-side su `/data/home/...` e usa `/ARKSHBOOT.ELF` solo per verificare env/cwd/rc/bin-layout.
 - Validazione `M8-08f`:
   - comando boot `arksh`
   - ELF `/ARKSHBOOT.ELF`
   - selftest `arksh-login`
   - suite completa `43/43`
-- Gotcha pratico del port hosted `arksh`: il target CMake upstream builda anche
-  benchmark/test (`arksh_perf_runner`) che richiedono API hosted extra (`wait4`,
-  `rusage`, ecc.) non necessarie per usare la shell. Il target supportato in
-  EnlilOS deve quindi buildare esplicitamente `--target arksh`.
-- `M11-03` chiude un `libdl` bootstrap reale:
+- Gotcha pratico port hosted `arksh`: target CMake upstream builda anche benchmark/test (`arksh_perf_runner`) che richiedono API hosted extra (`wait4`, `rusage`, ecc.) non necessarie per usare la shell. Target supportato in EnlilOS deve buildare esplicitamente `--target arksh`.
+- `M11-03` chiude `libdl` bootstrap reale:
   - syscall `dlopen/dlsym/dlclose/dlerror`
   - wrapper musl `<dlfcn.h>` + `libdl.a`
   - smoke `/MUSLDL.ELF`
   - selftest `musl-dlfcn`
-  - limitazione nota: `dlclose()` rilascia il handle ma non smappa ancora le pagine
-- `execve()` invece deve preservare l'`envp` passato dal caller.
-- `termios` e' una v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`,
-  `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
-- `VMIN/VTIME` non hanno ancora semantica POSIX completa e il termios state non e'
-  per-open-file o per-pty. Va bene per bootstrap shell/REPL, non ancora per compat piena.
-- `POSIXDEMO.ELF` e il selftest `posix-ux` sono il riferimento runtime per validare insieme:
-  env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
+  - limitazione nota: `dlclose()` rilascia handle ma non smappa ancora le pagine
+- `execve()` deve preservare `envp` passato dal caller.
+- `termios` è v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`, `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
+- `VMIN/VTIME` non hanno ancora semantica POSIX completa e termios state non è per-open-file o per-pty. OK per bootstrap shell/REPL, non ancora per compat piena.
+- `POSIXDEMO.ELF` e selftest `posix-ux` sono riferimento runtime per validare insieme: env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
 
 ### Knowledge operativa arksh runtime (M8-08f/g)
 
-- `sys_mmap` ha un limite di pagine per singola chiamata alzato a **1024 pagine (4MB)**
-  (era 256 = 1MB). Il motivo: `sizeof(ArkshAst) ≈ 1.88MB = 460 pagine`; il vecchio limite
-  faceva fallire ogni `calloc(1, sizeof(*ast))` → "unable to allocate parser state".
-- `vsnprintf` nel bootstrap musl originariamente non gestiva `%z`/`%j`. Il line editor
-  di arksh usa `fprintf(stdout, "\033[%zuD", move_left)` per spostare il cursore;
-  senza il fix il formato `%zu` veniva emesso letteralmente come testo, producendo
-  sequenze ANSI malformate visibili a schermo. Fix: aggiunto il blocco
-  `if (*fmt == 'z' || *fmt == 'j') { long_flag = 2; fmt++; }` in `vsnprintf`.
+- `sys_mmap` ha limite pagine per singola chiamata alzato a **1024 pagine (4MB)** (era 256 = 1MB). Motivo: `sizeof(ArkshAst) ≈ 1.88MB = 460 pagine`; vecchio limite faceva fallire ogni `calloc(1, sizeof(*ast))` → "unable to allocate parser state".
+- `vsnprintf` nel bootstrap musl originariamente non gestiva `%z`/`%j`. Line editor arksh usa `fprintf(stdout, "\033[%zuD", move_left)` per spostare cursore; senza fix, formato `%zu` veniva emesso letteralmente come testo, producendo sequenze ANSI malformate visibili a schermo. Fix: aggiunto blocco `if (*fmt == 'z' || *fmt == 'j') { long_flag = 2; fmt++; }` in `vsnprintf`.
 - **Bug critico: mmap_base bump allocator vs ELF text**.
-  `mmu_map_user_anywhere` mantiene `mmap_base` che avanza monotonicamente;
-  `munmap` libera le pagine fisiche ma **non fa tornare indietro `mmap_base`**.
-  L'ELF di arksh è caricato a `0x7FC1000000` ma `mmap_base` partiva da
-  `MMU_USER_BASE = 0x7FC0000000` — solo 16MB di gap. Dopo ~4000 allocazioni
-  da 1 pagina (qualche centinaio per comando), `mmap_base` raggiungeva il
-  testo dell'ELF e lo sovrascriveva con pagine azzerate: `vsnprintf` produceva
-  garbage, il parser entrava in stati inconsistenti.
-  **Fix**: `mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)` chiamato
-  in `elf_load_common` dopo il loading → `mmap_base` parte sopra l'ultimo
-  segmento caricato (~`0x7FC10AA000` per arksh), non dal fondo del VA window.
+  `mmu_map_user_anywhere` mantiene `mmap_base` che avanza monotonicamente; `munmap` libera pagine fisiche ma **non fa tornare indietro `mmap_base`**. ELF arksh caricato a `0x7FC1000000` ma `mmap_base` partiva da `MMU_USER_BASE = 0x7FC0000000` — solo 16MB di gap. Dopo ~4000 allocazioni da 1 pagina (qualche centinaio per comando), `mmap_base` raggiungeva testo ELF e lo sovrascriveva con pagine azzerate: `vsnprintf` produceva garbage, parser entrava in stati inconsistenti.
+  **Fix**: `mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)` chiamato in `elf_load_common` dopo il loading → `mmap_base` parte sopra l'ultimo segmento caricato (~`0x7FC10AA000` per arksh), non dal fondo del VA window.
   API aggiunta: `mmu_space_set_mmap_base()` in `kernel/mmu.c` + `include/mmu.h`.
-- Attenzione: CMake **non rilinka** automaticamente se cambia solo `libc.a` (non
-  i sorgenti `.c`). Dopo ogni modifica al bootstrap musl, fare
-  `rm toolchain/build/arksh/arksh && make arksh-build` per forzare il relink.
+- Attenzione: CMake **non rilinka** automaticamente se cambia solo `libc.a` (non i sorgenti `.c`). Dopo ogni modifica al bootstrap musl, fare `rm toolchain/build/arksh/arksh && make arksh-build` per forzare il relink.
 
 ### Knowledge operativa M8-08g (layout tastiera `us`/`it`)
 
-- `keyboard_getc()` resta il path legacy consumato dalla console/TTY, ma ora i byte
-  arrivano da un layer eventi piu' ricco: `keycode + modifiers + keysym + unicode`.
-  Per i caratteri non ASCII il driver emette direttamente UTF-8.
-- La `v1` usa un layout attivo globale per la console corrente. Non c'e' ancora uno
-  stato separato per TTY multipla o per-sessione shell; per l'architettura attuale
-  single-console questo e' intenzionale e sufficiente.
-- I layout integrati oggi sono `us` e `it`. La tabella `it` supporta anche i casi
-  minimi che servono davvero per uso locale: `à è é ì ò ù`, `@`, `#`, `£`, `§`,
-  `°`, parentesi quadre/graffe, `AltGr` e tasti morti basilari.
+- `keyboard_getc()` resta path legacy consumato da console/TTY, ma ora byte arrivano da layer eventi più ricco: `keycode + modifiers + keysym + unicode`. Per caratteri non ASCII il driver emette direttamente UTF-8.
+- v1 usa layout attivo globale per console corrente. Non c'è ancora stato separato per TTY multipla o per-sessione shell; per architettura attuale single-console intenzionale e sufficiente.
+- Layout integrati oggi: `us` e `it`. Tabella `it` supporta anche casi minimi per uso locale: `à è é ì ò ù`, `@`, `#`, `£`, `§`, `°`, parentesi quadre/graffe, `AltGr` e tasti morti basilari.
 - Persistenza layout:
   - bootstrap RO in `/etc/vconsole.conf`
   - override persistente RW in `/data/etc/vconsole.conf`
-  - ordine di load al boot: `/data/etc/vconsole.conf` prima, fallback `/etc/vconsole.conf`
-- I comandi utente bootstrap sono `/usr/bin/loadkeys` e `/usr/bin/kbdlayout`.
-  Importante: non devono includere gli header kernel del repo nel path di build musl,
-  altrimenti si rompono gli header libc bootstrap. Usano `user_svc.h` + numeri syscall
-  dedicati e restano isolati dal namespace header kernel.
-- Bug reale emerso dal packaging: aggiungere keymap e utility ha portato l'initrd a 70
-  entry. Il parser CPIO aveva `INITRD_MAX_ENTRIES = 64`, quindi la rootfs montava come
-  `initrd-error`. Fix: alzato a 128.
-- Il selftest di riferimento e' `kbd-layout`; la suite completa valida ora `45/45`.
+  - ordine load al boot: `/data/etc/vconsole.conf` prima, fallback `/etc/vconsole.conf`
+- Comandi utente bootstrap: `/usr/bin/loadkeys` e `/usr/bin/kbdlayout`. Non devono includere header kernel del repo nel path di build musl, altrimenti rompono header libc bootstrap. Usano `user_svc.h` + numeri syscall dedicati, restano isolati dal namespace header kernel.
+- Bug reale da packaging: aggiungere keymap e utility ha portato initrd a 70 entry. Parser CPIO aveva `INITRD_MAX_ENTRIES = 64`, rootfs montava come `initrd-error`. Fix: alzato a 128.
+- Selftest di riferimento: `kbd-layout`; suite completa valida ora `45/45`.
 
 ### Knowledge operativa M10-01 (virtio-net + netd bootstrap)
 
-- Il driver e' in `drivers/net.c` e usa solo il trasporto `virtio-mmio` moderno
-  (`version == 2`) con device ID `1` (`VIRTIO_NET_DEVICE_ID`).
-- Feature realmente negoziate in `v1`: `VIRTIO_F_VERSION_1`, `VIRTIO_NET_F_MAC`,
-  `VIRTIO_NET_F_STATUS`. Non assumere offload avanzati o mergeable buffers.
-- Il modello attuale e' **raw Ethernet only**:
+- Driver in `drivers/net.c`, usa solo trasporto `virtio-mmio` moderno (`version == 2`) con device ID `1` (`VIRTIO_NET_DEVICE_ID`).
+- Feature negoziate in v1: `VIRTIO_F_VERSION_1`, `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`. Non assumere offload avanzati o mergeable buffers.
+- Modello attuale **raw Ethernet only**:
   - queue `RX` con buffer DMA preallocati
   - queue `TX` con submit sincrono bounded
-  - ring software statico per consegnare i frame a `net_recv()`
+  - ring software statico per consegnare frame a `net_recv()`
   - nessun IPv4/ARP/TCP nel kernel
-- L'API kernel-side esposta e':
+- API kernel-side esposta:
   - `net_init()`
   - `net_is_ready()`
   - `net_get_info()`
   - `net_send()`
   - `net_recv()`
   - `net_selftest_run()`
-- `netd` e' un server EL0 bootstrap, non ancora lo stack di rete completo.
-  Usa le syscall `SYS_NET_BOOT_SEND`, `SYS_NET_BOOT_RECV`, `SYS_NET_BOOT_INFO`
-  e si limita a:
+- `netd` è server EL0 bootstrap, non ancora stack di rete completo. Usa syscall `SYS_NET_BOOT_SEND`, `SYS_NET_BOOT_RECV`, `SYS_NET_BOOT_INFO` e si limita a:
   - pubblicare MAC/link
-  - drenare i frame
+  - drenare frame
   - fungere da ponte per `M10-02`
-- Il boot crea e ribinda esplicitamente la porta microkernel `net`. Il pattern
-  e' speculare a `vfsd`/`blkd`: se la porta esiste ma l'owner non viene riassegnato
-  al task EL0 giusto, le syscall bootstrap rifiutano le richieste.
-- I target `make run`, `make run-fb`, `make run-gpu`, `make run-blk` e `make test`
-  includono ormai `-netdev user,id=net0 -device virtio-net-device,netdev=net0`.
-  Se il driver non sale, verificare prima il command line QEMU.
-- Il selftest di riferimento e' `net-core`. Valida:
-  - presenza della porta `net`
-  - spawn corretto di `/NETD.ELF`
+- Boot crea e ribinda esplicitamente porta microkernel `net`. Pattern speculare a `vfsd`/`blkd`: se porta esiste ma owner non riassegnato al task EL0 giusto, syscall bootstrap rifiutano richieste.
+- Target `make run`, `make run-fb`, `make run-gpu`, `make run-blk` e `make test` includono ormai `-netdev user,id=net0 -device virtio-net-device,netdev=net0`. Se driver non sale, verificare prima command line QEMU.
+- Selftest di riferimento: `net-core`. Valida:
+  - presenza porta `net`
+  - spawn corretto `/NETD.ELF`
   - stato `net_is_ready()`
   - `net_selftest_run()` con TX minimo e contatori
-- Gotcha chiuso durante il bring-up: dopo il cambio default tastiera a `it`,
-  `vfs-rootfs` falliva ancora cercando `KEYMAP=us`. Non era una regressione rete,
-  ma un'aspettativa di selftest stantia.
+- Gotcha chiuso durante bring-up: dopo cambio default tastiera a `it`, `vfs-rootfs` falliva ancora cercando `KEYMAP=us`. Non era regressione rete, ma aspettativa selftest stantia.
 
 ### Knowledge operativa M10-02 (TCP/IP stack user-space)
 
 **File**: [user/net_stack.h](user/net_stack.h), [user/net_stack.c](user/net_stack.c),
 [user/netd.c](user/netd.c)
 
-- Lo stack e' freestanding, gira dentro `netd` (EL0), senza libc.
-- `net_stack_init(mac, out_fn)` riceve la MAC dal driver kernel (via `SYS_NET_BOOT_INFO`)
-  e un puntatore a funzione per TX (`SYS_NET_BOOT_SEND`).
-- `net_stack_input(frame, len)` e' chiamato nel loop di ricezione di `netd` per ogni
-  frame recepito da `SYS_NET_BOOT_RECV`.
-- `net_stack_send_garp()` va chiamato una volta dopo `net_stack_init`: invia il
-  Gratuitous ARP che fa incrementare `tx_packets` nel driver kernel — la prova
-  funzionale usata dal selftest `net-stack`.
-- Il selftest `net-stack` aspetta fino a 2 s che `net_get_info().tx_packets > 0` e
-  verifica che `NETD.ELF` sia > 4096 byte (net_stack.o linkato).
-- Protocolli supportati in v1: Ethernet, ARP (cache 8 entry), IPv4, ICMP echo reply,
-  UDP (4 socket con callback), TCP passivo (4 connessioni, SYN→SYN+ACK→ESTABLISHED→FIN).
+- Stack freestanding, gira dentro `netd` (EL0), senza libc.
+- `net_stack_init(mac, out_fn)` riceve MAC dal driver kernel (via `SYS_NET_BOOT_INFO`) e puntatore a funzione per TX (`SYS_NET_BOOT_SEND`).
+- `net_stack_input(frame, len)` chiamato nel loop di ricezione `netd` per ogni frame ricevuto da `SYS_NET_BOOT_RECV`.
+- `net_stack_send_garp()` va chiamato una volta dopo `net_stack_init`: invia Gratuitous ARP che fa incrementare `tx_packets` nel driver kernel — prova funzionale usata dal selftest `net-stack`.
+- Selftest `net-stack` aspetta fino a 2 s che `net_get_info().tx_packets > 0` e verifica che `NETD.ELF` sia > 4096 byte (net_stack.o linkato).
+- Protocolli supportati in v1: Ethernet, ARP (cache 8 entry), IPv4, ICMP echo reply, UDP (4 socket con callback), TCP passivo (4 connessioni, SYN→SYN+ACK→ESTABLISHED→FIN).
 - IP statica QEMU SLIRP: `10.0.2.15/24`, gateway `10.0.2.2`.
-- Byteorder: tutti i campi di protocollo usano helper `rd16/wr16/rd32/wr32`
-  (byte-by-byte BE); le funzioni `ns_htons/ns_htonl` convertono valori host→network.
-- `net_stack.o` non e' standalone: va linkato esplicitamente in `netd.elf` tramite la
-  regola Makefile esplicita (`user/netd.elf: user/netd.o user/net_stack.o`).
-- Pool sizes: `NET_STACK_ARP_ENTRIES=8`, `NET_STACK_UDP_SOCKETS=4`,
-  `NET_STACK_TCP_CONNS=4`, `NET_STACK_TCP_RXBUF=2048`.
-- In v1 non c'e' retransmit TCP: QEMU/SLIRP su loopback e' lossless.
-- M10-03 aggiunger': BSD socket API (bind/connect/send/recv) esposte via IPC port.
+- Byteorder: tutti campi protocollo usano helper `rd16/wr16/rd32/wr32` (byte-by-byte BE); funzioni `ns_htons/ns_htonl` convertono valori host→network.
+- `net_stack.o` non è standalone: va linkato esplicitamente in `netd.elf` tramite rule Makefile esplicita (`user/netd.elf: user/netd.o user/net_stack.o`).
+- Pool sizes: `NET_STACK_ARP_ENTRIES=8`, `NET_STACK_UDP_SOCKETS=4`, `NET_STACK_TCP_CONNS=4`, `NET_STACK_TCP_RXBUF=2048`.
+- v1 senza retransmit TCP: QEMU/SLIRP su loopback è lossless.
+- M10-03 aggiungerà: BSD socket API (bind/connect/send/recv) esposte via IPC port.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 
-- `vfsd` e' il punto di verita' per la vista del filesystem dei task EL0: `cwd`, mount table privata
-  e risoluzione dei path vivono lato server, non nel kernel.
-- I nuovi syscall `chdir/getcwd`, `mount/umount`, `unshare(CLONE_NEWNS)` e `pivot_root()`
-  devono passare tramite `vfsd`; non introdurre bypass kernel-side che risolvano path direttamente.
-- `execve()` / `spawn()` e il path shadow dei file descriptor usati da `mmap/msync` devono sempre
-  risolvere il path attraverso `vfsd`, altrimenti rompono i namespace privati.
-- L'ereditarieta' dei namespace dopo `fork()` e' implementata in `vfsd` usando `ipc_message_t.sender_tid`
-  + `SYS_VFS_BOOT_TASKINFO`: al primo accesso del figlio il server copia `ns_id` e `cwd` dal parent.
-- `pivot_root()` deve ribasare il vecchio root nella nuova vista. Esempio reale del bug risolto:
-  con `pivot_root("/mnt", "/mnt/oldroot")`, il vecchio root va esposto a `/oldroot`, non lasciato
-  a `/mnt/oldroot`.
-- `NSDEMO.ELF` e il selftest `vfs-namespace` verificano il path completo: `unshare`, bind mount,
-  `chdir/getcwd`, mount `procfs`, `fork()` con ereditarieta', `pivot_root()` e visibilita' di `/oldroot/BOOT.TXT`.
-- I log `boot_open fail` di `vfsd` su file di probe assenti durante i demo (`SIGREADY.TXT`, `JOBREADY.TXT`,
-  `/data/proc/...`) non indicano per forza un bug: spesso sono attesi nel percorso di test.
-- User-space freestanding: non introdurre dipendenze implicite da libc. In `vfsd` usare helper locali
-  (`vfsd_memcpy`, `vfsd_bzero`, ecc.), non assumere che `memcpy` venga risolta dal linker.
+- `vfsd` è point of truth per vista filesystem dei task EL0: `cwd`, mount table privata e risoluzione path vivono lato server, non nel kernel.
+- Nuovi syscall `chdir/getcwd`, `mount/umount`, `unshare(CLONE_NEWNS)` e `pivot_root()` devono passare tramite `vfsd`; non introdurre bypass kernel-side che risolvano path direttamente.
+- `execve()` / `spawn()` e path shadow fd usati da `mmap/msync` devono sempre risolvere path attraverso `vfsd`, altrimenti rompono namespace privati.
+- Ereditarietà namespace dopo `fork()` implementata in `vfsd` usando `ipc_message_t.sender_tid` + `SYS_VFS_BOOT_TASKINFO`: al primo accesso del figlio il server copia `ns_id` e `cwd` dal parent.
+- `pivot_root()` deve ribasare vecchio root nella nuova vista. Bug reale risolto: con `pivot_root("/mnt", "/mnt/oldroot")`, vecchio root va esposto a `/oldroot`, non lasciato a `/mnt/oldroot`.
+- `NSDEMO.ELF` e selftest `vfs-namespace` verificano path completo: `unshare`, bind mount, `chdir/getcwd`, mount `procfs`, `fork()` con ereditarietà, `pivot_root()` e visibilità di `/oldroot/BOOT.TXT`.
+- Log `boot_open fail` di `vfsd` su file di probe assenti durante demo (`SIGREADY.TXT`, `JOBREADY.TXT`, `/data/proc/...`) non indicano necessariamente bug: spesso attesi nel percorso di test.
+- User-space freestanding: non introdurre dipendenze implicite da libc. In `vfsd` usare helper locali (`vfsd_memcpy`, `vfsd_bzero`, ecc.), non assumere che `memcpy` venga risolta dal linker.
 
-### Limiti noti della v1 M9-04
+### Limiti noti v1 M9-04
 
-- I backend filesystem reali restano ancora bootstrap kernel-side dietro `SYS_VFS_BOOT_*`.
+- Backend filesystem reali restano bootstrap kernel-side dietro `SYS_VFS_BOOT_*`.
 - `vfsd` non fa ancora garbage collection dello stato client/namespace dei PID terminati.
-- La semantica `pivot_root()` e' sufficiente per bootstrap e test, ma non e' ancora il modello completo
-  da container/runtime avanzato previsto piu' avanti in `M11-07`.
+- Semantica `pivot_root()` sufficiente per bootstrap e test, non ancora modello completo da container/runtime avanzato previsto in `M11-07`.
 
 ---
 
 ## Bug storici noti (risolti, non ripetere)
 
 ### Re-entrant schedule() race → PC=0 crash
-`irq_restore()` prima di `sched_context_switch()` apre una finestra dove un timer IRQ
-chiama `schedule()` rientrante, sovrascrivendo `next->sp` con un frame sullo stack di
-`prev`. Al ripristino: x30=0 → `ret` salta a PC=0 → Instruction Abort.
-**Risolto**: IRQ disabilitati durante il switch, poi `msr daifclr, #2` (non `irq_restore`).
+`irq_restore()` prima di `sched_context_switch()` apre finestra dove timer IRQ chiama `schedule()` rientrante, sovrascrivendo `next->sp` con frame sullo stack di `prev`. Al ripristino: x30=0 → `ret` salta a PC=0 → Instruction Abort.
+**Risolto**: IRQ disabilitati durante switch, poi `msr daifclr, #2` (non `irq_restore`).
 
 ### Direct priority mutation → double-insert in run queue
-Impostare `task->priority = X` mentre il task è READY corrompe la run queue
-(task finisce in due bucket simultaneamente). Vedere sezione scheduler sopra.
+Impostare `task->priority = X` mentre task è READY corrompe run queue (task finisce in due bucket simultaneamente). Vedere sezione scheduler sopra.
 **Risolto**: usare sempre `sched_task_donate_priority()`.
 
 ### ksem holder starvation a PRIO_NORMAL
-Holder a PRIO_NORMAL=128 starved dall'hog (stesso livello, FIFO precedente).
-PI non aiuta: la donazione arriva solo DOPO che waiter entra in wait, ma holder
-non riesce mai ad acquisire il lock perché hog gira in CPU-bound loop alla stessa prio.
+Holder a PRIO_NORMAL=128 starved dall'hog (stesso livello, FIFO precedente). PI non aiuta: donazione arriva solo DOPO che waiter entra in wait, ma holder non riesce mai ad acquisire lock perché hog gira in CPU-bound loop alla stessa prio.
 **Risolto**: holder creato a PRIO_HIGH=32.
 
 ### mmap_base bump allocator sovrascrive testo ELF → garbled output + crash parser
-`mmu_map_user_anywhere` usa un bump allocator per i VA utente; `munmap` libera le pagine
-fisiche ma non fa retrocedere `mmap_base`. Con `MMU_USER_BASE = 0x7FC0000000` e
-l'ELF caricato a `0x7FC1000000` il gap è solo 16MB = 4096 pagine da 4KB. Dopo ~4000
-allocazioni (cumulativamente su più comandi shell) il bump allocator raggiunge il
-testo dell'ELF e lo sovrascrive con pagine azzerate → `vsnprintf` produce garbage
-(`ls]K` a schermo), il parser arksh entra in stati inconsistenti → "unable to allocate
-parser state" al 3° comando.
-**Risolto**: in `elf_load_common` (`kernel/elf_loader.c`) dopo il loading:
-`mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)`.
+`mmu_map_user_anywhere` usa bump allocator per VA utente; `munmap` libera pagine fisiche ma non fa retrocedere `mmap_base`. Con `MMU_USER_BASE = 0x7FC0000000` e ELF caricato a `0x7FC1000000` il gap è solo 16MB = 4096 pagine da 4KB. Dopo ~4000 allocazioni (cumulativamente su più comandi shell) bump allocator raggiunge testo ELF e lo sovrascrive con pagine azzerate → `vsnprintf` produce garbage (`ls]K` a schermo), parser arksh entra in stati inconsistenti → "unable to allocate parser state" al 3° comando.
+**Risolto**: in `elf_load_common` (`kernel/elf_loader.c`) dopo loading: `mmu_space_set_mmap_base(space, image_hi + PAGE_SIZE)`.
 API `mmu_space_set_mmap_base()` aggiunta in `kernel/mmu.c` + `include/mmu.h`.
