@@ -7,6 +7,7 @@ Mount profile bootstrap:
 Entry points:
 /INIT.ELF      -> launcher login shell del bootstrap
 /ARKSHBOOT.ELF -> selftest ELF non interattivo per la login shell
+/NETD.ELF      -> server user-space rete bootstrap (raw Ethernet su virtio-net)
 /bin/arksh     -> shell di login v1 con fallback automatico a /bin/nsh
 /bin/nsh       -> recovery shell userspace
 /usr/bin/loadkeys  -> cambio layout tastiera (`us`/`it`)

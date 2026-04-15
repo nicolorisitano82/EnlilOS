@@ -139,6 +139,9 @@
 #define SYS_BLK_BOOT_SECTORS   159
 #define SYS_VFS_BOOT_TASKINFO  160
 #define SYS_VFS_BOOT_LSEEK     161
+#define SYS_NET_BOOT_SEND      162
+#define SYS_NET_BOOT_RECV      163
+#define SYS_NET_BOOT_INFO      164
 
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
@@ -158,6 +161,7 @@
 #define EPERM               1
 #define ENOENT              2
 #define ESRCH               3
+#define ENODEV              19
 #define ECHILD              10
 #define EAGAIN              11
 #define EINTR               4

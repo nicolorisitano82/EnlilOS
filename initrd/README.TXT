@@ -4,6 +4,7 @@ Contiene i file di bootstrap, i binari ELF utente e l'entrypoint INIT.ELF.
 La rootfs bootstrap include anche:
 - /bin/arksh      -> login shell bridge v1
 - /bin/nsh        -> recovery shell
+- /NETD.ELF       -> server user-space rete bootstrap
 - /usr/bin/loadkeys   -> cambio layout tastiera (`us`/`it`)
 - /usr/bin/kbdlayout  -> query layout tastiera attivo
 - /etc/arkshrc    -> rc globale bootstrap

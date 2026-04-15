@@ -85,12 +85,15 @@ C_SRCS   = kernel/main.c \
            drivers/uart.c \
            drivers/keyboard.c \
            drivers/mouse.c \
+           drivers/net.c \
            drivers/blk.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c
-USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o)
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/netd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c
+NETD_STACK_OBJ        = user/net_stack.o
+USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o) \
+                        $(NETD_STACK_OBJ)
 USER_STATIC_ELFS      = $(USER_STATIC_ASM_SRCS:.S=.elf) $(USER_STATIC_C_SRCS:.c=.elf)
 USER_STATIC_EMBEDOBJS = $(USER_STATIC_ASM_SRCS:.S=.embed.o) $(USER_STATIC_C_SRCS:.c=.embed.o)
 USER_CRT_ASM_SRCS     = user/crti.S user/crtn.S
@@ -346,6 +349,13 @@ arksh-smoke: $(ARKSH_SMOKE_ELF)
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
+# netd links net_stack.o alongside netd.o (M10-02)
+user/netd.elf: user/netd.o $(NETD_STACK_OBJ) user/user.ld
+	$(LD) -T user/user.ld -nostdlib -o $@ user/netd.o $(NETD_STACK_OBJ)
+
+user/net_stack.o: user/net_stack.c user/net_stack.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
 user/crt_demo.elf: user/crti.o user/crt1.o user/crt_demo.o user/crtn.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ user/crti.o user/crt1.o user/crt_demo.o user/crtn.o
 
@@ -405,6 +415,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		CAPDEMO.ELF=user/cap_demo.elf \
 		VFSD.ELF=user/vfsd.elf \
 		BLKD.ELF=user/blkd.elf \
+		NETD.ELF=user/netd.elf \
 		MMAPDEMO.ELF=user/mmap_demo.elf \
 		JOBDEMO.ELF=user/job_demo.elf \
 		NSDEMO.ELF=user/ns_demo.elf \
@@ -472,6 +483,8 @@ run: $(KERNEL)
 		-cpu cortex-a72 \
 		-m 512M \
 		-nographic \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
 		-kernel $(KERNEL)
 
 # Esegui con QEMU + framebuffer RAMFB (SW backend, output grafico)
@@ -483,6 +496,8 @@ run-fb: $(KERNEL)
 		-m 512M \
 		-vga none \
 		-global virtio-mmio.force-legacy=false \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
 		-device ramfb \
 		-device virtio-keyboard-device \
 		-display default,show-cursor=on \
@@ -500,6 +515,8 @@ run-gpu: $(KERNEL)
 		-m 512M \
 		-vga none \
 		-global virtio-mmio.force-legacy=false \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
 		-device virtio-gpu-device \
 		-device virtio-keyboard-device \
 		-device virtio-mouse-device \
@@ -570,6 +587,8 @@ run-blk: $(KERNEL) disk-ready
 		-m 512M \
 		-vga none \
 		-global virtio-mmio.force-legacy=false \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
 		-device virtio-gpu-device \
 		-device virtio-keyboard-device \
 		-device virtio-mouse-device \
@@ -591,6 +610,8 @@ test: $(SELFTEST_KERNEL) disk-ready
 		-m 512M \
 		-vga none \
 		-global virtio-mmio.force-legacy=false \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
 		-device virtio-gpu-device \
 		-drive format=raw,file=disk.img,if=none,id=blk0 \
 		-device virtio-blk-device,drive=blk0 \

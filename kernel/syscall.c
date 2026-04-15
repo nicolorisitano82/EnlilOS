@@ -15,6 +15,7 @@
 #include "futex.h"
 #include "kdebug.h"
 #include "keyboard.h"
+#include "net.h"
 #include "elf_loader.h"
 #include "kheap.h"
 #include "kmon.h"
@@ -120,6 +121,18 @@ static int blk_srv_owner_ok(void)
         return 0;
 
     port = mk_port_lookup("block");
+    return (port && port->owner_tid == sched_task_tgid(current_task)) ? 1 : 0;
+}
+
+/* Owner check per netd: solo il server proprietario della porta "net" può usare le net_boot_* */
+static int net_srv_owner_ok(void)
+{
+    port_t *port;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+
+    port = mk_port_lookup("net");
     return (port && port->owner_tid == sched_task_tgid(current_task)) ? 1 : 0;
 }
 
@@ -4262,6 +4275,91 @@ static uint64_t sys_blk_boot_sectors(uint64_t args[6])
     return blk_sector_count();
 }
 
+/* SYS_NET_BOOT_SEND (162): args[0]=buf_uva, args[1]=len */
+static uint64_t sys_net_boot_send(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    uint32_t  len     = (uint32_t)args[1];
+    uint8_t   bounce[NET_FRAME_MAX];
+    int       rc;
+
+    if (!net_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+    if (len == 0U || len > NET_FRAME_MAX)
+        return ERR(EINVAL);
+
+    rc = user_copy_bytes(buf_uva, bounce, len);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = net_send(bounce, len);
+    if (rc == NET_OK)
+        return len;
+    if (rc == NET_ERR_BUSY)
+        return ERR(EAGAIN);
+    if (rc == NET_ERR_TIMEOUT)
+        return ERR(ETIMEDOUT);
+    if (rc == NET_ERR_NOT_READY)
+        return ERR(ENODEV);
+    return ERR(EIO);
+}
+
+/* SYS_NET_BOOT_RECV (163): args[0]=buf_uva, args[1]=maxlen */
+static uint64_t sys_net_boot_recv(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    uint32_t  maxlen  = (uint32_t)args[1];
+    uint8_t   bounce[NET_FRAME_MAX];
+    int       rc;
+
+    if (!net_srv_owner_ok())
+        return ERR(EPERM);
+    if (!buf_uva)
+        return ERR(EFAULT);
+    if (maxlen == 0U)
+        return ERR(EINVAL);
+    if (maxlen > NET_FRAME_MAX)
+        maxlen = NET_FRAME_MAX;
+
+    rc = net_recv(bounce, maxlen);
+    if (rc < 0) {
+        if (rc == NET_ERR_NOT_READY)
+            return ERR(ENODEV);
+        return ERR(EIO);
+    }
+    if (rc == 0)
+        return 0;
+
+    rc = user_store_bytes(buf_uva, bounce, (size_t)rc);
+    if (rc < 0)
+        return ERR(-rc);
+    return (uint64_t)rc;
+}
+
+/* SYS_NET_BOOT_INFO (164): args[0]=info_uva */
+static uint64_t sys_net_boot_info(uint64_t args[6])
+{
+    uintptr_t  info_uva = (uintptr_t)args[0];
+    net_info_t info;
+    int        rc;
+
+    if (!net_srv_owner_ok())
+        return ERR(EPERM);
+    if (!info_uva)
+        return ERR(EFAULT);
+
+    rc = net_get_info(&info);
+    if (rc != NET_OK)
+        return ERR(ENODEV);
+
+    rc = user_store_bytes(info_uva, &info, sizeof(info));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * ENOSYS fallback
  * ════════════════════════════════════════════════════════════════════ */
@@ -4563,6 +4661,15 @@ void syscall_init(void)
     syscall_table[SYS_BLK_BOOT_SECTORS] = (syscall_entry_t){
         sys_blk_boot_sectors, SYSCALL_FLAG_RT, "blk_boot_sectors"
     };
+    syscall_table[SYS_NET_BOOT_SEND] = (syscall_entry_t){
+        sys_net_boot_send, 0, "net_boot_send"
+    };
+    syscall_table[SYS_NET_BOOT_RECV] = (syscall_entry_t){
+        sys_net_boot_recv, 0, "net_boot_recv"
+    };
+    syscall_table[SYS_NET_BOOT_INFO] = (syscall_entry_t){
+        sys_net_boot_info, SYSCALL_FLAG_RT, "net_boot_info"
+    };
     syscall_table[SYS_MREACT_SUBSCRIBE] = (syscall_entry_t){
         sys_mreact_subscribe, 0, "mreact_subscribe"
     };
@@ -4647,7 +4754,7 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 106 syscall base/UX/ipc/vfsd/blkd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd registrate\n");
+    uart_puts("[SYSCALL] 109 syscall base/UX/ipc/vfsd/blkd/netd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
     syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
     uart_puts(" proc slot\n");

@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `usr/bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=44 pass=44 fail=0`
+- suite runtime piu' recente: `SUMMARY total=45 pass=45 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1096,16 +1096,24 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 
 ## MILESTONE 10 — Network Stack
 
-### ⬜ M10-01 · VirtIO Network Driver
+### ✅ M10-01 · VirtIO Network Driver
 **Priorità:** ALTA
 
-- Probe `virtio-mmio` device ID 1 (virtio-net)
-- Negoziazione feature: `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`
-- Due vrings: `receiveq` (buffer pre-allocati per RX) + `transmitq` (TX)
-- RX IRQ → ring buffer DMA → pacchetto copiato in pool statico → notifica `netd`
-- TX: copia frame nel descriptor TX, kick virtio, polling/IRQ per completamento
-- API kernel interna: `net_send(buf, len)`, `net_recv(buf, maxlen) → len`
-- Server `netd` a priorità media: gestisce il driver e l'IP stack
+- **Stato attuale:** completata `v1`
+- Probe `virtio-mmio` device ID 1 (`virtio-net`) con trasporto MMIO moderno
+- Negoziazione feature: `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`, `VIRTIO_F_VERSION_1`
+- Due vrings statiche: `receiveq` (RX) + `transmitq` (TX), con buffer DMA preallocati
+- RX IRQ → pacchetto copiato in ring software statico → drain dal path `net_recv()`
+- TX sincrono bounded: copia frame in descriptor TX, notify virtio, polling completion con timeout
+- API kernel interna: `net_send(buf, len)`, `net_recv(buf, maxlen)`, `net_get_info()`
+- Server `netd` user-space bootstrap sulla porta `net`, con syscall `SYS_NET_BOOT_*`
+- QEMU `run/test` allineati con `-netdev user` + `virtio-net-device`
+- Selftest dedicato: `net-core`
+
+**Note v1 oneste:**
+- profilo attuale `raw Ethernet only`: niente IPv4/ARP/TCP ancora esposti a user-space
+- `netd` oggi drena i frame e pubblica metadati MAC/link, ma non implementa ancora lo stack IP
+- il salto funzionale successivo e' esplicitamente `M10-02`
 
 ---
 
@@ -1279,7 +1287,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=44 pass=44 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=45 pass=45 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -3140,7 +3148,7 @@ a runtime, arksh carica plugin dal filesystem.
 
 | Ordine | Milestone | Perché adesso |
 |--------|-----------|---------------|
-| 23 | **M10-01** VirtIO Network Driver | Driver hardware. Base di tutto il networking |
+| 23 | **M10-01** VirtIO Network Driver | ✅ Completata v1: driver `virtio-net`, `netd` bootstrap, selftest `net-core` |
 | 24 | **M10-02** TCP/IP (lwIP) | Stack di rete. Dipende solo dal driver |
 | 25 | **M10-03** BSD Socket API | Espone la rete a user-space. Sblocca `curl`, `wget`, SSH |
 
@@ -3286,38 +3294,39 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** aprire la rete base con `M10-01`, poi plugin arksh dinamici, poi completare l'i18n con `M8-08h`
+- **Prossimo step:** estendere la rete con `M10-02`, poi `M10-03`, poi completare l'i18n con `M8-08h`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M8-08g`: suite `selftest` a `44/44`.
+> Stato verificato dopo la chiusura di `M10-01`: suite `selftest` a `45/45`.
 
 ### 1. Cosa e' gia' stato completato
 
 - ✅ **Fondamenta kernel e debug**: `M14-02`, `M8-01`, `M8-03`, `M8-04`, `M8-05`, `M8-06`, `M8-07`
 - ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
+- ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local
+- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M10-01** VirtIO Network Driver | nessuna dipendenza forte oltre al core gia' chiuso | Apre l'intera traccia networking e toglie il sistema dal solo bootstrap locale |
-| 2 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
-| 3 | **M10-02** TCP/IP Stack | `M10-01` | Senza stack IP non esiste networking utile in user-space |
-| 4 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
-| 5 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 6 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
+| 1 | **M10-02** TCP/IP Stack | `M10-01` | Ora che il link layer c'e', serve aprire IPv4/ARP/ICMP/TCP per avere rete utile |
+| 2 | **M10-03** BSD Socket API | `M10-02` | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
+| 3 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
+| 4 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
+| 5 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
+| 6 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
 
-1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
-2. **Aprire la rete**: `M10-01 -> M10-02 -> M10-03`
+1. **Aprire la rete oltre il link layer**: `M10-02 -> M10-03`
+2. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 3. **Migliorare l'usabilita' shell/input**: `M8-08h`
 4. **Usare la rete per compatibilita' e desktop**:
    `M11-05` dipende da `M11-03 + M10-03 + M14-01`
@@ -3351,14 +3360,14 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 ### 6. Ordine operativo consigliato da qui
 
-1. `M8-08 plugin`
-2. `M10-01`
-3. `M10-02`
-4. `M10-03`
-5. `M8-08h`
-6. `M11-05`
-7. `M12-01`
-8. `M13-02`
+1. `M10-02`
+2. `M10-03`
+3. `M8-08 plugin`
+4. `M8-08h`
+5. `M11-05`
+6. `M12-01`
+7. `M13-02`
+8. `M13-03`
 
 Se serve un principio guida unico: **prima rendere EnlilOS un sistema usabile da shell reale,
 poi un sistema con librerie dinamiche, poi un sistema con rete, e solo dopo un sistema desktop

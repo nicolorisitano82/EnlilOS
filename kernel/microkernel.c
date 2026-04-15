@@ -146,6 +146,7 @@ void mk_init(void)
     mk_port_create(0, "framebuffer");
     mk_port_create(0, "memory");
     mk_port_create(0, "block");
+    mk_port_create(0, "net");
     mk_port_create(0, "vfs");
 }
 

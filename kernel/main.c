@@ -21,6 +21,7 @@
 #include "syscall.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "net.h"
 #include "blk.h"
 #include "ane.h"
 #include "gpu.h"
@@ -184,6 +185,50 @@ static void boot_launch_blkd(void)
         }
     }
     uart_puts(" port=block\n");
+}
+
+static void boot_launch_netd(void)
+{
+    uint32_t pid = 0U;
+    port_t  *port;
+    int      rc;
+
+    if (!net_is_ready()) {
+        uart_puts("[NETD] Driver rete assente, server non avviato\n");
+        return;
+    }
+
+    if (elf64_spawn_path("/NETD.ELF", "/NETD.ELF", PRIO_NORMAL, &pid) < 0) {
+        uart_puts("[NETD] Spawn fallita, networking resta kernel-side\n");
+        return;
+    }
+
+    port = mk_port_lookup("net");
+    if (!port) {
+        uart_puts("[NETD] Porta 'net' non trovata\n");
+        return;
+    }
+
+    rc = mk_port_rebind(port->port_id, pid);
+    if (rc < 0) {
+        uart_puts("[NETD] Rebind porta fallita\n");
+        return;
+    }
+    (void)mk_port_set_budget(port->port_id, timer_cntfrq() / 100ULL); /* 10ms */
+
+    uart_puts("[NETD] User-space net server pronto: pid=");
+    {
+        char buf[12];
+        int  len = 0;
+        uint32_t v = pid;
+
+        if (v == 0U) uart_putc('0');
+        else {
+            while (v) { buf[len++] = (char)('0' + (v % 10U)); v /= 10U; }
+            while (len > 0) uart_putc(buf[--len]);
+        }
+    }
+    uart_puts(" port=net\n");
 }
 
 static void boot_seed_dir_if_missing(const char *path, uint32_t mode)
@@ -496,6 +541,17 @@ static void bootcli_buf_append_u32(char *dst, uint32_t cap, uint32_t v)
     }
 }
 
+static void bootcli_buf_append_hex8(char *dst, uint32_t cap, uint8_t v)
+{
+    static const char hex[] = "0123456789abcdef";
+    char tmp[3];
+
+    tmp[0] = hex[(v >> 4) & 0xFU];
+    tmp[1] = hex[v & 0xFU];
+    tmp[2] = '\0';
+    bootcli_buf_append(dst, cap, tmp);
+}
+
 static void bootcli_buf_append_i32(char *dst, uint32_t cap, int32_t v)
 {
     if (v < 0) {
@@ -688,6 +744,40 @@ static void bootcli_fmt_mouse_status(char *dst, uint32_t cap)
     bootcli_append_button_mask(dst, cap, bootcli_mouse_buttons);
     bootcli_buf_append(dst, cap, " wheel=");
     bootcli_buf_append_i32(dst, cap, bootcli_mouse_wheel_total);
+}
+
+static void bootcli_fmt_net_status(char *dst, uint32_t cap)
+{
+    net_info_t info;
+
+    dst[0] = '\0';
+    if (net_get_info(&info) < 0) {
+        bootcli_buf_append(dst, cap, "Rete guest non rilevata.");
+        return;
+    }
+
+    bootcli_buf_append(dst, cap, "mac=");
+    bootcli_buf_append_hex8(dst, cap, info.mac[0]);
+    bootcli_buf_append(dst, cap, ":");
+    bootcli_buf_append_hex8(dst, cap, info.mac[1]);
+    bootcli_buf_append(dst, cap, ":");
+    bootcli_buf_append_hex8(dst, cap, info.mac[2]);
+    bootcli_buf_append(dst, cap, ":");
+    bootcli_buf_append_hex8(dst, cap, info.mac[3]);
+    bootcli_buf_append(dst, cap, ":");
+    bootcli_buf_append_hex8(dst, cap, info.mac[4]);
+    bootcli_buf_append(dst, cap, ":");
+    bootcli_buf_append_hex8(dst, cap, info.mac[5]);
+    bootcli_buf_append(dst, cap, " link=");
+    bootcli_buf_append(dst, cap, info.link_up ? "up" : "down");
+    bootcli_buf_append(dst, cap, " rx=");
+    bootcli_buf_append_u32(dst, cap, info.rx_packets);
+    bootcli_buf_append(dst, cap, " tx=");
+    bootcli_buf_append_u32(dst, cap, info.tx_packets);
+    if (info.rx_drops != 0U) {
+        bootcli_buf_append(dst, cap, " drop=");
+        bootcli_buf_append_u32(dst, cap, info.rx_drops);
+    }
 }
 
 static void bootcli_fill_rect(uint32_t x, uint32_t y,
@@ -1444,6 +1534,9 @@ static void bootcli_render(void)
     bootcli_draw_text(48U, 152U,
                       "clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo crtdemo",
                       muted_color, panel_color);
+    bootcli_draw_text(48U, 172U,
+                      "net mostra MAC/link/counter virtio-net e stato del bootstrap networking",
+                      muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
         bootcli_fmt_scanout_status(scanout_status, sizeof(scanout_status));
@@ -1539,6 +1632,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("pwd       mostra la directory corrente");
         bootcli_push_line("cd PATH   cambia directory corrente");
         bootcli_push_line("gpu       mostra il backend grafico attivo");
+        bootcli_push_line("net       mostra stato driver virtio-net e contatori base");
         bootcli_push_line("selftest [nome] esegue la suite o un singolo self-test");
         bootcli_push_line("fs        mostra lo stato del mount ext4");
         bootcli_push_line("ls [PATH] lista una directory VFS (default: cwd)");
@@ -1602,6 +1696,9 @@ static void bootcli_execute_command(void)
             bootcli_buf_append(line, sizeof(line),
                                "software fallback con renderer 2D batch.");
         }
+        bootcli_push_line(line);
+    } else if (bootcli_streq(bootcli_input, "net")) {
+        bootcli_fmt_net_status(line, sizeof(line));
         bootcli_push_line(line);
     } else if (bootcli_streq(bootcli_input, "selftest")) {
         int rc = selftest_run_all();
@@ -2146,7 +2243,7 @@ static void bootcli_init(void)
         bootcli_push_line("Modalita framebuffer locale attiva.");
     bootcli_push_line("Login shell di default: /bin/arksh (bridge con fallback automatico a nsh).");
     bootcli_push_line("Digita 'help' e premi Invio per testare tastiera e comandi di recovery.");
-    bootcli_push_line("Prova anche: arksh, login, nsh, pwd, cd /data, ls, cat /BOOT.TXT.");
+    bootcli_push_line("Prova anche: arksh, login, nsh, net, pwd, cd /data, ls, cat /BOOT.TXT.");
     {
         char line[96];
         line[0] = '\0';
@@ -2330,6 +2427,7 @@ void kernel_main(void)
     vfs_rescan();
     boot_prepare_login_layout();
     boot_apply_keyboard_layout_config();
+    net_init();
     ane_init();
     gpu_init();
     /* Da qui: task switching via timer IRQ ogni 1ms.
@@ -2373,9 +2471,11 @@ void kernel_main(void)
     mk_task_create("fb-server", TASK_TYPE_SERVER, 0);
     mk_task_create("mem-server", TASK_TYPE_SERVER, 0);
     mk_task_create("blk-server", TASK_TYPE_SERVER, 0);
+    mk_task_create("net-server", TASK_TYPE_SERVER, 0);
     mk_task_create("vfs-server", TASK_TYPE_SERVER, 0);
     boot_launch_vfsd();
     boot_launch_blkd();
+    boot_launch_netd();
 
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 
@@ -2403,6 +2503,7 @@ void kernel_main(void)
     uart_puts(keyboard_get_layout_name());
     uart_puts(" (usa 'loadkeys us|it' o 'kbdlayout')\n");
     uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
+    uart_puts("[EnlilOS] Rete: usa 'net' per vedere MAC/link/counter del driver virtio-net\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");
 

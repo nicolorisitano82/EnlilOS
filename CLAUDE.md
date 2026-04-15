@@ -21,7 +21,7 @@ tutto ogni sessione.
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura un checkout esterno di `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila un checkout esterno di `arksh`
-- Stato validato corrente: `SUMMARY total=44 pass=44 fail=0`
+- Stato validato corrente: `SUMMARY total=46 pass=46 fail=0` (dopo M10-02)
 - `make test` oggi lancia QEMU senza wrapper di timeout: dopo `SUMMARY ... PASS/FAIL`
   il kernel entra in halt e QEMU resta aperto finché non viene terminato.
 - Il disco `disk.img` viene lockato da QEMU: se una sessione rimane appesa,
@@ -572,8 +572,10 @@ Questo evita escalation di privilegi: un processo EL0 arbitrario non può legger
 3. `ext4-core` — mount rw ext4, journal replay
 4. `vfsd-core` — VFS server user-space
 5. `blkd-core` — Block server user-space (porta "block", blk_is_ready, capacità)
-6. `elf-loader` — carica ELF statico in EL0
-7. `init-elf` — parse INIT.ELF
+6. `net-core` — driver virtio-net + netd alive
+7. `net-stack` — TCP/IP stack user-space (GARP inviato, tx_packets > 0)
+8. `elf-loader` — carica ELF statico in EL0
+9. `init-elf` — parse INIT.ELF
 8. `nsh-elf` — parse NSH.ELF
 9. `execve` — execve() completo
 10. `exec-target` — target execve con EXEC2.ELF
@@ -620,19 +622,19 @@ Quando si creano task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-14)
 
-Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` sono completi in forma v1.
+Tutto il backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` sono completi in forma v1.
 Il run di riferimento e':
 
 ```text
-SUMMARY total=44 pass=44 fail=0
+SUMMARY total=46 pass=46 fail=0
 ```
 
 **Prossime priorità**:
-1. M10-01 VirtIO network driver
+1. M10-03 BSD socket API
 2. M8-08 plugin arksh
-3. M8-08h i18n / localizzazione stringhe
-4. M11-05 Linux compatibility layer
-5. M12-01 Wayland server minimale
+3. M8-08 plugin arksh
+4. M8-08h i18n / localizzazione stringhe
+5. M11-05 Linux compatibility layer
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
@@ -736,7 +738,73 @@ SUMMARY total=44 pass=44 fail=0
 - Bug reale emerso dal packaging: aggiungere keymap e utility ha portato l'initrd a 70
   entry. Il parser CPIO aveva `INITRD_MAX_ENTRIES = 64`, quindi la rootfs montava come
   `initrd-error`. Fix: alzato a 128.
-- Il selftest di riferimento e' `kbd-layout`; la suite completa valida ora `44/44`.
+- Il selftest di riferimento e' `kbd-layout`; la suite completa valida ora `45/45`.
+
+### Knowledge operativa M10-01 (virtio-net + netd bootstrap)
+
+- Il driver e' in `drivers/net.c` e usa solo il trasporto `virtio-mmio` moderno
+  (`version == 2`) con device ID `1` (`VIRTIO_NET_DEVICE_ID`).
+- Feature realmente negoziate in `v1`: `VIRTIO_F_VERSION_1`, `VIRTIO_NET_F_MAC`,
+  `VIRTIO_NET_F_STATUS`. Non assumere offload avanzati o mergeable buffers.
+- Il modello attuale e' **raw Ethernet only**:
+  - queue `RX` con buffer DMA preallocati
+  - queue `TX` con submit sincrono bounded
+  - ring software statico per consegnare i frame a `net_recv()`
+  - nessun IPv4/ARP/TCP nel kernel
+- L'API kernel-side esposta e':
+  - `net_init()`
+  - `net_is_ready()`
+  - `net_get_info()`
+  - `net_send()`
+  - `net_recv()`
+  - `net_selftest_run()`
+- `netd` e' un server EL0 bootstrap, non ancora lo stack di rete completo.
+  Usa le syscall `SYS_NET_BOOT_SEND`, `SYS_NET_BOOT_RECV`, `SYS_NET_BOOT_INFO`
+  e si limita a:
+  - pubblicare MAC/link
+  - drenare i frame
+  - fungere da ponte per `M10-02`
+- Il boot crea e ribinda esplicitamente la porta microkernel `net`. Il pattern
+  e' speculare a `vfsd`/`blkd`: se la porta esiste ma l'owner non viene riassegnato
+  al task EL0 giusto, le syscall bootstrap rifiutano le richieste.
+- I target `make run`, `make run-fb`, `make run-gpu`, `make run-blk` e `make test`
+  includono ormai `-netdev user,id=net0 -device virtio-net-device,netdev=net0`.
+  Se il driver non sale, verificare prima il command line QEMU.
+- Il selftest di riferimento e' `net-core`. Valida:
+  - presenza della porta `net`
+  - spawn corretto di `/NETD.ELF`
+  - stato `net_is_ready()`
+  - `net_selftest_run()` con TX minimo e contatori
+- Gotcha chiuso durante il bring-up: dopo il cambio default tastiera a `it`,
+  `vfs-rootfs` falliva ancora cercando `KEYMAP=us`. Non era una regressione rete,
+  ma un'aspettativa di selftest stantia.
+
+### Knowledge operativa M10-02 (TCP/IP stack user-space)
+
+**File**: [user/net_stack.h](user/net_stack.h), [user/net_stack.c](user/net_stack.c),
+[user/netd.c](user/netd.c)
+
+- Lo stack e' freestanding, gira dentro `netd` (EL0), senza libc.
+- `net_stack_init(mac, out_fn)` riceve la MAC dal driver kernel (via `SYS_NET_BOOT_INFO`)
+  e un puntatore a funzione per TX (`SYS_NET_BOOT_SEND`).
+- `net_stack_input(frame, len)` e' chiamato nel loop di ricezione di `netd` per ogni
+  frame recepito da `SYS_NET_BOOT_RECV`.
+- `net_stack_send_garp()` va chiamato una volta dopo `net_stack_init`: invia il
+  Gratuitous ARP che fa incrementare `tx_packets` nel driver kernel — la prova
+  funzionale usata dal selftest `net-stack`.
+- Il selftest `net-stack` aspetta fino a 2 s che `net_get_info().tx_packets > 0` e
+  verifica che `NETD.ELF` sia > 4096 byte (net_stack.o linkato).
+- Protocolli supportati in v1: Ethernet, ARP (cache 8 entry), IPv4, ICMP echo reply,
+  UDP (4 socket con callback), TCP passivo (4 connessioni, SYN→SYN+ACK→ESTABLISHED→FIN).
+- IP statica QEMU SLIRP: `10.0.2.15/24`, gateway `10.0.2.2`.
+- Byteorder: tutti i campi di protocollo usano helper `rd16/wr16/rd32/wr32`
+  (byte-by-byte BE); le funzioni `ns_htons/ns_htonl` convertono valori host→network.
+- `net_stack.o` non e' standalone: va linkato esplicitamente in `netd.elf` tramite la
+  regola Makefile esplicita (`user/netd.elf: user/netd.o user/net_stack.o`).
+- Pool sizes: `NET_STACK_ARP_ENTRIES=8`, `NET_STACK_UDP_SOCKETS=4`,
+  `NET_STACK_TCP_CONNS=4`, `NET_STACK_TCP_RXBUF=2048`.
+- In v1 non c'e' retransmit TCP: QEMU/SLIRP su loopback e' lossless.
+- M10-03 aggiunger': BSD socket API (bind/connect/send/recv) esposte via IPC port.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 

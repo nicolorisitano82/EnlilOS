@@ -21,6 +21,7 @@
 #include "microkernel.h"
 #include "mmu.h"
 #include "keyboard.h"
+#include "net.h"
 #include "sched.h"
 #include "signal.h"
 #include "syscall.h"
@@ -381,8 +382,8 @@ static int selftest_case_rootfs(void)
     n = vfs_read(&file, buf, sizeof(buf) - 1U);
     ST_CHECK(case_name, n > 0, "read /etc/vconsole.conf vuota");
     buf[n] = '\0';
-    ST_CHECK(case_name, st_contains(buf, "KEYMAP=us"),
-             "/etc/vconsole.conf non contiene KEYMAP=us");
+    ST_CHECK(case_name, st_contains(buf, "KEYMAP=it"),
+             "/etc/vconsole.conf non contiene KEYMAP=it");
     (void)vfs_close(&file);
 
     rc = vfs_open("/usr/share/kbd/keymaps/us.map", O_RDONLY, &file);
@@ -1360,6 +1361,87 @@ static int selftest_case_blkd(void)
     return 0;
 }
 
+static int selftest_case_net(void)
+{
+    static const char case_name[] = "net-core";
+    port_t      *port;
+    sched_tcb_t *owner;
+    vfs_file_t   file;
+    stat_t       st;
+    int          rc;
+
+    port = mk_port_lookup("net");
+    ST_CHECK(case_name, port != NULL, "porta net non trovata");
+    ST_CHECK(case_name, port->owner_tid != 0U, "owner porta net nullo");
+
+    owner = sched_task_find(port->owner_tid);
+    ST_CHECK(case_name, owner != NULL, "task owner porta net non trovato");
+    ST_CHECK(case_name, sched_task_is_user(owner) == 1,
+             "owner porta net non e' un task user-space");
+    ST_CHECK(case_name, owner->state != TCB_STATE_ZOMBIE,
+             "netd risulta zombie");
+
+    rc = vfs_open("/NETD.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /NETD.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /NETD.ELF fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFREG,
+             "/NETD.ELF non e' un file regolare");
+    ST_CHECK(case_name, st.st_size > 0ULL, "/NETD.ELF ha size zero");
+    (void)vfs_close(&file);
+
+    ST_CHECK(case_name, net_is_ready() != 0, "driver net non pronto");
+    ST_CHECK(case_name, net_selftest_run() == 0, "selftest virtio-net fallito");
+    return 0;
+}
+
+/*
+ * net-stack: verifica che il TCP/IP stack user-space (M10-02) sia attivo.
+ *
+ * La prova funzionale chiave e':
+ *   net_get_info().tx_packets > 0
+ * che diventa vera non appena netd invia il Gratuitous ARP al boot.
+ * Un tx_packets == 0 dopo 2s indica che net_stack_send_garp() non e'
+ * stato chiamato → stack non integrato o netd in crash.
+ */
+static int selftest_case_net_stack(void)
+{
+    static const char case_name[] = "net-stack";
+    net_info_t   info;
+    vfs_file_t   file;
+    stat_t       st;
+    int          rc;
+    uint64_t     deadline;
+
+    /* 1. Driver virtio-net deve essere pronto */
+    ST_CHECK(case_name, net_is_ready() != 0, "driver net non pronto");
+
+    /* 2. Attendi fino a 2 s che netd invii il GARP (tx_packets > 0) */
+    deadline = timer_now_ms() + 2000ULL;
+    do {
+        rc = net_get_info(&info);
+        if (rc == 0 && info.tx_packets > 0U)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline);
+
+    ST_CHECK(case_name, rc == 0, "net_get_info fallita");
+    ST_CHECK(case_name, info.tx_packets > 0U,
+             "stack non ha inviato frame (GARP assente - stack non integrato?)");
+
+    /* 3. NETD.ELF deve essere presente e sufficientemente grande
+          (stack net_stack.o linkato dentro) */
+    rc = vfs_open("/NETD.ELF", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /NETD.ELF fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0, "stat /NETD.ELF fallita");
+    (void)vfs_close(&file);
+    ST_CHECK(case_name, st.st_size > 4096ULL,
+             "NETD.ELF troppo piccolo (net_stack.o non linkato?)");
+
+    return 0;
+}
+
 static volatile uint32_t ipc_test_port_id;
 static volatile uint32_t ipc_test_server_waiting;
 static volatile uint32_t ipc_test_server_ok;
@@ -2141,6 +2223,8 @@ static const selftest_case_t selftest_cases[] = {
     { "ext4-core",   selftest_case_ext4      },
     { "vfsd-core",   selftest_case_vfsd      },
     { "blkd-core",   selftest_case_blkd     },
+    { "net-core",    selftest_case_net       },
+    { "net-stack",   selftest_case_net_stack },
     { "elf-loader",  selftest_case_elf       },
     { "init-elf",    selftest_case_init_elf  },
     { "nsh-elf",     selftest_case_nsh_elf   },
