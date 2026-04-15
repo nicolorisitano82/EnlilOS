@@ -11,6 +11,7 @@
  */
 
 #include "syscall.h"
+#include "sock.h"
 #include "cap.h"
 #include "futex.h"
 #include "kdebug.h"
@@ -48,6 +49,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define FD_TYPE_VFS     1
 #define FD_TYPE_VFSD    2
 #define FD_TYPE_PIPE    3
+#define FD_TYPE_SOCK    4
 
 #define VFSD_HANDLE_MAX 64U
 #define FD_OBJECT_MAX   (SCHED_MAX_TASKS * MAX_FD)
@@ -111,6 +113,8 @@ static fd_entry_t fd_tables[SCHED_MAX_TASKS][MAX_FD];
 static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
 static fd_object_t fd_objects[FD_OBJECT_MAX];
 static pipe_t      pipe_pool[PIPE_POOL_MAX];
+
+static void sock_sync_fd_flags(fd_object_t *obj);
 
 /* Owner check per blkd: solo il server proprietario della porta "block" può usare le blk_boot_* */
 static int blk_srv_owner_ok(void)
@@ -349,6 +353,8 @@ static void fd_object_put(fd_object_t *obj)
             if (pipe->readers == 0U && pipe->writers == 0U)
                 memset(pipe, 0, sizeof(*pipe));
         }
+    } else if (obj->type == FD_TYPE_SOCK) {
+        sock_free((int)obj->remote_handle);
     }
 
     memset(obj, 0, sizeof(*obj));
@@ -2022,6 +2028,7 @@ static uint64_t sys_fcntl(uint64_t args[6])
         keep_flags = obj->flags & (O_RDONLY | O_WRONLY | O_RDWR);
         obj->flags = (uint16_t)(keep_flags |
                                 ((uint32_t)arg & (O_APPEND | O_NONBLOCK)));
+        sock_sync_fd_flags(obj);
         if (obj->type == FD_TYPE_VFS || obj->type == FD_TYPE_VFSD)
             obj->file.flags = obj->flags;
         return 0ULL;
@@ -2316,6 +2323,7 @@ static uint64_t sys_ioctl(uint64_t args[6])
             obj->flags |= O_NONBLOCK;
         else
             obj->flags &= (uint16_t)~O_NONBLOCK;
+        sock_sync_fd_flags(obj);
         if (obj->type == FD_TYPE_VFS || obj->type == FD_TYPE_VFSD)
             obj->file.flags = obj->flags;
         return 0ULL;
@@ -4370,6 +4378,477 @@ static uint64_t sys_enosys(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * Syscall 200–211 — BSD Socket API (M10-03)
+ *
+ * Conversione NBO←→HBO: sin_port/sin_addr passati dal user sono in
+ * network byte order (big-endian). Convertiamo in host order (LE) prima
+ * di chiamare il layer sock.c, che opera in HBO internamente.
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Struttura sockaddr_in minima letta dalla user-space */
+typedef struct {
+    uint16_t sin_family;
+    uint16_t sin_port;   /* network byte order */
+    uint32_t sin_addr;   /* network byte order */
+    uint8_t  sin_zero[8];
+} kern_sockaddr_in_t;
+
+static inline uint16_t sock_ntohs(uint16_t v)
+{
+    return (uint16_t)((v >> 8U) | (v << 8U));
+}
+
+static inline uint32_t sock_ntohl(uint32_t v)
+{
+    return ((v >> 24U) & 0xFFU)
+         | ((v >>  8U) & 0xFF00U)
+         | ((v <<  8U) & 0xFF0000U)
+         | ((v << 24U) & 0xFF000000U);
+}
+
+static void sock_sync_fd_flags(fd_object_t *obj)
+{
+    sock_t *sk;
+
+    if (!obj || obj->type != FD_TYPE_SOCK)
+        return;
+    sk = sock_get((int)obj->remote_handle);
+    if (!sk)
+        return;
+    if (obj->flags & O_NONBLOCK)
+        sk->flags |= SOCK_FL_NONBLOCK;
+    else
+        sk->flags &= (uint16_t)~SOCK_FL_NONBLOCK;
+}
+
+/* Alloca un fd di tipo SOCK e lo collega a un sock_t appena creato. */
+static int sock_open_fd(int sock_idx, uint16_t open_flags, uint8_t fd_flags)
+{
+    fd_object_t *obj;
+    int          fd;
+    int          idx = task_idx();
+
+    obj = fd_object_alloc();
+    if (!obj) {
+        sock_free(sock_idx);
+        return -ENFILE;
+    }
+    obj->type          = FD_TYPE_SOCK;
+    obj->remote_handle = (uint32_t)sock_idx;
+    obj->flags         = open_flags;
+
+    fd = fd_alloc();
+    if (fd < 0) {
+        sock_free(sock_idx);
+        memset(obj, 0, sizeof(*obj));
+        return -ENFILE;
+    }
+    (void)fd_attach_object(&fd_tables[idx][fd], obj);
+    fd_tables[idx][fd].fd_flags = fd_flags;
+    sock_sync_fd_flags(obj);
+    return fd;
+}
+
+/* Estrae il sock_t da un fd di tipo SOCK.
+ * Ritorna NULL e setta *out_err se il fd non è valido o non è SOCK. */
+static sock_t *sock_from_fd(int fd, int *out_err)
+{
+    fd_object_t *obj = fd_get(fd);
+
+    if (!obj) { *out_err = -EBADF; return NULL; }
+    if (obj->type != FD_TYPE_SOCK) { *out_err = -ENOTSOCK; return NULL; }
+    sock_t *s = sock_get((int)obj->remote_handle);
+    if (!s) { *out_err = -EBADF; return NULL; }
+    *out_err = 0;
+    return s;
+}
+
+static uint64_t sys_socket(uint64_t args[6])
+{
+    int domain   = (int)args[0];
+    int type     = (int)args[1];
+    int protocol = (int)args[2];
+    int base_type = type & 0xF;
+    uint16_t open_flags = 0U;
+    uint8_t  fd_flags = 0U;
+    int sock_idx, fd;
+
+    if (type & SOCK_NONBLOCK)
+        open_flags |= O_NONBLOCK;
+    if (type & SOCK_CLOEXEC)
+        fd_flags |= FD_ENTRY_CLOEXEC;
+
+    sock_idx = sock_do_socket(domain, base_type, protocol);
+    if (sock_idx < 0)
+        return ERR(-sock_idx);
+
+    fd = sock_open_fd(sock_idx, open_flags, fd_flags);
+    return (fd < 0) ? ERR(-fd) : (uint64_t)fd;
+}
+
+static uint64_t sys_bind(uint64_t args[6])
+{
+    int                fd      = (int)args[0];
+    uintptr_t          sa_uva  = (uintptr_t)args[1];
+    kern_sockaddr_in_t sa;
+    int                err;
+    int                rc;
+
+    sock_from_fd(fd, &err);   /* solo per validare il fd */
+    if (err)
+        return ERR(-err);
+
+    if (!sa_uva)
+        return ERR(EFAULT);
+    if (user_copy_bytes(sa_uva, &sa, sizeof(sa)) < 0)
+        return ERR(EFAULT);
+    if (sa.sin_family != AF_INET)
+        return ERR(EAFNOSUPPORT);
+
+    fd_object_t *obj = fd_get(fd);
+    rc = sock_do_bind((int)obj->remote_handle,
+                      sock_ntohl(sa.sin_addr),
+                      sock_ntohs(sa.sin_port));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_listen(uint64_t args[6])
+{
+    int fd      = (int)args[0];
+    int backlog = (int)args[1];
+    int err, rc;
+
+    sock_from_fd(fd, &err);
+    if (err)
+        return ERR(-err);
+
+    fd_object_t *obj = fd_get(fd);
+    rc = sock_do_listen((int)obj->remote_handle, backlog);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_accept(uint64_t args[6])
+{
+    int                fd      = (int)args[0];
+    uintptr_t          sa_uva  = (uintptr_t)args[1];
+    uintptr_t          len_uva = (uintptr_t)args[2];
+    int                err;
+    uint32_t           peer_ip   = 0U;
+    uint16_t           peer_port = 0U;
+    int                new_sock_idx, new_fd;
+
+    sock_from_fd(fd, &err);
+    if (err)
+        return ERR(-err);
+
+    fd_object_t *obj = fd_get(fd);
+    new_sock_idx = sock_do_accept((int)obj->remote_handle, &peer_ip, &peer_port);
+    if (new_sock_idx < 0)
+        return ERR(-new_sock_idx);
+
+    /* Scrivi sockaddr peer se richiesto */
+    if (sa_uva) {
+        kern_sockaddr_in_t sa;
+        sa.sin_family   = AF_INET;
+        sa.sin_port     = sock_ntohs(peer_port);
+        sa.sin_addr     = sock_ntohl(peer_ip);
+        sa.sin_zero[0]  = 0U;
+        (void)user_store_bytes(sa_uva, &sa, sizeof(sa));
+        if (len_uva) {
+            uint32_t slen = (uint32_t)sizeof(sa);
+            (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+        }
+    }
+
+    new_fd = sock_open_fd(new_sock_idx, 0U, 0U);
+    return (new_fd < 0) ? ERR(-new_fd) : (uint64_t)new_fd;
+}
+
+static uint64_t sys_connect(uint64_t args[6])
+{
+    int                fd     = (int)args[0];
+    uintptr_t          sa_uva = (uintptr_t)args[1];
+    kern_sockaddr_in_t sa;
+    int                err, rc;
+
+    sock_from_fd(fd, &err);
+    if (err)
+        return ERR(-err);
+
+    if (!sa_uva)
+        return ERR(EFAULT);
+    if (user_copy_bytes(sa_uva, &sa, sizeof(sa)) < 0)
+        return ERR(EFAULT);
+    if (sa.sin_family != AF_INET)
+        return ERR(EAFNOSUPPORT);
+
+    fd_object_t *obj = fd_get(fd);
+    rc = sock_do_connect((int)obj->remote_handle,
+                         sock_ntohl(sa.sin_addr),
+                         sock_ntohs(sa.sin_port));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_send(uint64_t args[6])
+{
+    int       fd    = (int)args[0];
+    uintptr_t buva  = (uintptr_t)args[1];
+    size_t    len   = (size_t)args[2];
+    int       flags = (int)args[3];
+    void     *bounce;
+    int       err;
+    ssize_t   rc;
+
+    sock_t *s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    if (!buva || len == 0U)
+        return 0ULL;
+    if (len > 4096U)
+        len = 4096U;
+
+    bounce = kmalloc((uint32_t)len);
+    if (!bounce)
+        return ERR(ENOMEM);
+    if (user_copy_bytes(buva, bounce, len) < 0) {
+        kfree(bounce);
+        return ERR(EFAULT);
+    }
+
+    fd_object_t *obj = fd_get(fd);
+    sock_sync_fd_flags(obj);
+    rc = sock_do_send((int)obj->remote_handle, bounce, len, flags);
+    kfree(bounce);
+    return (rc < 0) ? ERR((int)-rc) : (uint64_t)rc;
+}
+
+static uint64_t sys_recv(uint64_t args[6])
+{
+    int       fd    = (int)args[0];
+    uintptr_t buva  = (uintptr_t)args[1];
+    size_t    len   = (size_t)args[2];
+    int       flags = (int)args[3];
+    void     *bounce;
+    int       err;
+    ssize_t   rc;
+
+    sock_t *s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    if (!buva || len == 0U)
+        return 0ULL;
+    if (len > 4096U)
+        len = 4096U;
+
+    bounce = kmalloc((uint32_t)len);
+    if (!bounce)
+        return ERR(ENOMEM);
+
+    fd_object_t *obj = fd_get(fd);
+    sock_sync_fd_flags(obj);
+    rc = sock_do_recv((int)obj->remote_handle, bounce, len, flags);
+    if (rc > 0)
+        (void)user_store_bytes(buva, bounce, (size_t)rc);
+    kfree(bounce);
+    return (rc < 0) ? ERR((int)-rc) : (uint64_t)rc;
+}
+
+static uint64_t sys_sendto(uint64_t args[6])
+{
+    int                fd     = (int)args[0];
+    uintptr_t          buva   = (uintptr_t)args[1];
+    size_t             len    = (size_t)args[2];
+    int                flags  = (int)args[3];
+    uintptr_t          sa_uva = (uintptr_t)args[4];
+    uint32_t           dst_ip   = 0U;
+    uint16_t           dst_port = 0U;
+    kern_sockaddr_in_t sa;
+    void              *bounce;
+    int                err;
+    ssize_t            rc;
+
+    sock_t *s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    if (!buva || len == 0U)
+        return 0ULL;
+    if (len > SOCK_UDP_DATA_MAX)
+        len = SOCK_UDP_DATA_MAX;
+
+    if (sa_uva) {
+        if (user_copy_bytes(sa_uva, &sa, sizeof(sa)) < 0)
+            return ERR(EFAULT);
+        dst_ip   = sock_ntohl(sa.sin_addr);
+        dst_port = sock_ntohs(sa.sin_port);
+    }
+
+    bounce = kmalloc((uint32_t)len);
+    if (!bounce)
+        return ERR(ENOMEM);
+    if (user_copy_bytes(buva, bounce, len) < 0) {
+        kfree(bounce);
+        return ERR(EFAULT);
+    }
+
+    fd_object_t *obj = fd_get(fd);
+    sock_sync_fd_flags(obj);
+    rc = sock_do_sendto((int)obj->remote_handle, bounce, len, dst_ip, dst_port, flags);
+    kfree(bounce);
+    return (rc < 0) ? ERR((int)-rc) : (uint64_t)rc;
+}
+
+static uint64_t sys_recvfrom(uint64_t args[6])
+{
+    int                fd      = (int)args[0];
+    uintptr_t          buva    = (uintptr_t)args[1];
+    size_t             len     = (size_t)args[2];
+    int                flags   = (int)args[3];
+    uintptr_t          sa_uva  = (uintptr_t)args[4];
+    uintptr_t          len_uva = (uintptr_t)args[5];
+    uint32_t           src_ip   = 0U;
+    uint16_t           src_port = 0U;
+    void              *bounce;
+    int                err;
+    ssize_t            rc;
+
+    sock_t *s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    if (!buva || len == 0U)
+        return 0ULL;
+    if (len > SOCK_UDP_DATA_MAX)
+        len = SOCK_UDP_DATA_MAX;
+
+    bounce = kmalloc((uint32_t)len);
+    if (!bounce)
+        return ERR(ENOMEM);
+
+    fd_object_t *obj = fd_get(fd);
+    sock_sync_fd_flags(obj);
+    rc = sock_do_recvfrom((int)obj->remote_handle, bounce, len,
+                          &src_ip, &src_port, flags);
+    if (rc > 0) {
+        (void)user_store_bytes(buva, bounce, (size_t)rc);
+        if (sa_uva) {
+            kern_sockaddr_in_t sa;
+            sa.sin_family  = AF_INET;
+            sa.sin_port    = sock_ntohs(src_port);
+            sa.sin_addr    = sock_ntohl(src_ip);
+            sa.sin_zero[0] = 0U;
+            (void)user_store_bytes(sa_uva, &sa, sizeof(sa));
+            if (len_uva) {
+                uint32_t slen = (uint32_t)sizeof(sa);
+                (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+            }
+        }
+    }
+    kfree(bounce);
+    return (rc < 0) ? ERR((int)-rc) : (uint64_t)rc;
+}
+
+static uint64_t sys_setsockopt(uint64_t args[6])
+{
+    int       fd      = (int)args[0];
+    int       level   = (int)args[1];
+    int       optname = (int)args[2];
+    uintptr_t val_uva = (uintptr_t)args[3];
+    socklen_t optlen  = (socklen_t)args[4];
+    sock_t   *s;
+    int       err;
+    uint32_t  val = 0U;
+
+    s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    /* Leggi il valore se presente */
+    if (val_uva && optlen >= sizeof(uint32_t))
+        (void)user_copy_bytes(val_uva, &val, sizeof(val));
+
+    fd_object_t *obj = fd_get(fd);
+    sock_t *sk = sock_get((int)obj->remote_handle);
+    if (!sk)
+        return ERR(EBADF);
+
+    (void)level;
+    switch (optname) {
+    case SO_REUSEADDR:
+        if (val)
+            sk->flags |= SOCK_FL_REUSEADDR;
+        else
+            sk->flags &= (uint16_t)~SOCK_FL_REUSEADDR;
+        return 0ULL;
+    case SO_KEEPALIVE:
+    case SO_SNDBUF:
+    case SO_RCVBUF:
+    case TCP_NODELAY:
+        return 0ULL;   /* accettato, ignorato in v1 */
+    default:
+        return ERR(ENOPROTOOPT);
+    }
+}
+
+static uint64_t sys_getsockopt(uint64_t args[6])
+{
+    int       fd      = (int)args[0];
+    int       level   = (int)args[1];
+    int       optname = (int)args[2];
+    uintptr_t val_uva = (uintptr_t)args[3];
+    uintptr_t len_uva = (uintptr_t)args[4];
+    sock_t   *s;
+    int       err;
+    uint32_t  val = 0U;
+
+    s = sock_from_fd(fd, &err);
+    if (!s)
+        return ERR(-err);
+
+    (void)level;
+    fd_object_t *obj = fd_get(fd);
+    sock_t *sk = sock_get((int)obj->remote_handle);
+    if (!sk)
+        return ERR(EBADF);
+
+    switch (optname) {
+    case SO_ERROR:
+        val = 0U;
+        break;
+    case SO_REUSEADDR:
+        val = (sk->flags & SOCK_FL_REUSEADDR) ? 1U : 0U;
+        break;
+    default:
+        return ERR(ENOPROTOOPT);
+    }
+
+    if (val_uva)
+        (void)user_store_bytes(val_uva, &val, sizeof(val));
+    if (len_uva) {
+        uint32_t slen = sizeof(val);
+        (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+    }
+    return 0ULL;
+}
+
+static uint64_t sys_shutdown(uint64_t args[6])
+{
+    int fd  = (int)args[0];
+    int how = (int)args[1];
+    int err, rc;
+
+    sock_from_fd(fd, &err);
+    if (err)
+        return ERR(-err);
+
+    fd_object_t *obj = fd_get(fd);
+    rc = sock_do_shutdown((int)obj->remote_handle, how);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * syscall_init — popola la tabella e inizializza le strutture dati
  * ════════════════════════════════════════════════════════════════════ */
 void syscall_init(void)
@@ -4384,6 +4863,7 @@ void syscall_init(void)
     vfs_init();
 
     /* 2. Inizializza fd_table e object pool */
+    sock_init();
     memset(fd_objects, 0, sizeof(fd_objects));
     memset(pipe_pool, 0, sizeof(pipe_pool));
     for (int i = 0; i < SCHED_MAX_TASKS; i++) {
@@ -4754,7 +5234,21 @@ void syscall_init(void)
         sys_cap_query,  SYSCALL_FLAG_RT, "cap_query"
     };
 
-    uart_puts("[SYSCALL] 109 syscall base/UX/ipc/vfsd/blkd/netd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd registrate\n");
+    /* ── BSD socket API (M10-03) ── */
+    syscall_table[SYS_SOCKET]     = (syscall_entry_t){ sys_socket,     0, "socket"     };
+    syscall_table[SYS_BIND]       = (syscall_entry_t){ sys_bind,       0, "bind"       };
+    syscall_table[SYS_LISTEN]     = (syscall_entry_t){ sys_listen,     0, "listen"     };
+    syscall_table[SYS_ACCEPT]     = (syscall_entry_t){ sys_accept,     0, "accept"     };
+    syscall_table[SYS_CONNECT]    = (syscall_entry_t){ sys_connect,    0, "connect"    };
+    syscall_table[SYS_SEND]       = (syscall_entry_t){ sys_send,       0, "send"       };
+    syscall_table[SYS_RECV]       = (syscall_entry_t){ sys_recv,       0, "recv"       };
+    syscall_table[SYS_SENDTO]     = (syscall_entry_t){ sys_sendto,     0, "sendto"     };
+    syscall_table[SYS_RECVFROM]   = (syscall_entry_t){ sys_recvfrom,   0, "recvfrom"   };
+    syscall_table[SYS_SETSOCKOPT] = (syscall_entry_t){ sys_setsockopt, 0, "setsockopt" };
+    syscall_table[SYS_GETSOCKOPT] = (syscall_entry_t){ sys_getsockopt, 0, "getsockopt" };
+    syscall_table[SYS_SHUTDOWN]   = (syscall_entry_t){ sys_shutdown,   0, "shutdown"   };
+
+    uart_puts("[SYSCALL] 121 syscall base/UX/ipc/vfsd/blkd/netd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd/sock registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
     syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
     uart_puts(" proc slot\n");

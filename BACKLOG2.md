@@ -1139,29 +1139,42 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 
 ---
 
-### ⬜ M10-03 · BSD Socket API
-**Priorità:** ALTA (dipende da M10-02)
+### ✅ M10-03 · BSD Socket API
+**Priorità:** ALTA (dipende da M10-02) — **completata v1**
 
 **Numeri syscall (range 200–219):**
 
 | Nr | Nome | RT-safe | Note |
 |----|------|---------|------|
-| 200 | `socket` | No | `AF_INET`/`AF_UNIX`, `SOCK_STREAM`/`SOCK_DGRAM` |
+| 200 | `socket` | No | `AF_INET` `v1`, `SOCK_STREAM`/`SOCK_DGRAM`, `SOCK_NONBLOCK`, `SOCK_CLOEXEC` |
 | 201 | `bind` | No | |
 | 202 | `listen` | No | |
 | 203 | `accept` | No | Bloccante con timeout |
 | 204 | `connect` | No | Non-blocking opzionale (`O_NONBLOCK`) |
-| 205 | `send` | Sì (UDP pre-alloc) | `flags`: `MSG_DONTWAIT` per path RT |
-| 206 | `recv` | Sì (UDP polling) | `MSG_DONTWAIT` ritorna `EAGAIN` se vuoto |
+| 205 | `send` | Sì (loopback bounded) | `flags`: `MSG_DONTWAIT`, `MSG_NOSIGNAL` ignorato pulitamente |
+| 206 | `recv` | Sì (polling cooperativo) | `MSG_DONTWAIT` ritorna `EAGAIN` se vuoto |
 | 207 | `sendto` | Sì | UDP con destinazione esplicita |
 | 208 | `recvfrom` | Sì | |
-| 209 | `setsockopt` | No | `SO_REUSEADDR`, `SO_RCVTIMEO`, `SO_SNDTIMEO` |
-| 210 | `getsockopt` | No | |
+| 209 | `setsockopt` | No | `SO_REUSEADDR` `v1` |
+| 210 | `getsockopt` | No | `SO_REUSEADDR`, `SO_ERROR` `v1` |
 | 211 | `shutdown` | Sì | |
 | 212 | `getaddrinfo` | No | Implementato interamente in libc; usa `resolv` server |
 
-**AF_UNIX (socket locali):** zero-copy via capability di buffer condiviso — latenza ~2µs
-invece dei ~50µs del loopback TCP.
+**Chiusura v1:**
+
+- Socket layer kernel-side statico in `kernel/sock.c` con pool globale da 32 socket
+- `AF_INET` `v1`, loopback-only su `127.0.0.1`; destinazioni esterne ritornano `ENETUNREACH`
+- `SOCK_STREAM` + `SOCK_DGRAM` con porte effimere, `listen/accept/connect/send/recv/sendto/recvfrom`
+- Supporto `SOCK_NONBLOCK`, `SOCK_CLOEXEC`, `MSG_DONTWAIT`, `SO_REUSEADDR`, `SO_ERROR`, `shutdown`
+- Smoke `/SOCKDEMO.ELF` e comando boot `socketdemo`
+- Selftest `socket-api`; suite verificata a `47/47`
+
+**Limiti v1:**
+
+- `AF_UNIX` rinviato: non ancora implementato
+- socket API oggi usa un backend loopback kernel-side, non espone ancora la rete esterna del profilo `netd`
+- no `select/poll/epoll`
+- no resolver / `getaddrinfo()` kernel-side
 
 ---
 
@@ -1757,13 +1770,13 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
 | 32 | `dup` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP` |
 | 33 | `dup2` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP2` |
 | 35 | `nanosleep` | ⬜ M11-01 | pianificata |
-| 41 | `socket` | ⬜ M10-03 | pianificata |
-| 42 | `connect` | ⬜ M10-03 | pianificata |
-| 49 | `bind` | ⬜ M10-03 | pianificata |
-| 50 | `listen` | ⬜ M10-03 | pianificata |
-| 51 | `accept` | ⬜ M10-03 | pianificata |
-| 54 | `setsockopt` | ⬜ M10-03 | pianificata |
-| 55 | `getsockopt` | ⬜ M10-03 | pianificata |
+| 41 | `socket` | ✅ M10-03 v1 | `AF_INET` loopback-only |
+| 42 | `connect` | ✅ M10-03 v1 | |
+| 49 | `bind` | ✅ M10-03 v1 | |
+| 50 | `listen` | ✅ M10-03 v1 | |
+| 51 | `accept` | ✅ M10-03 v1 | |
+| 54 | `setsockopt` | ✅ M10-03 v1 | `SO_REUSEADDR` |
+| 55 | `getsockopt` | ✅ M10-03 v1 | `SO_REUSEADDR`, `SO_ERROR` |
 | 61 | `wait4` | ⬜ | `waitpid` + `rusage` stub |
 | 63 | `uname` | ⬜ M11-01 | minimale per bootstrap libc; ABI Linux completa qui |
 | 64 | `semget` | ⬜ | System V sem — wrappa ksem (M8-06) |
@@ -3152,10 +3165,11 @@ a runtime, arksh carica plugin dal filesystem.
 |--------|-----------|---------------|
 | 23 | **M10-01** VirtIO Network Driver | ✅ Completata v1: driver `virtio-net`, `netd` bootstrap, selftest `net-core` |
 | 24 | **M10-02** TCP/IP Stack | ✅ Completata v1: stack custom freestanding in `netd`, ARP/IPv4/ICMP/UDP/TCP, selftest `net-stack` |
-| 25 | **M10-03** BSD Socket API | Espone la rete a user-space. Sblocca `curl`, `wget`, SSH |
+| 25 | **M10-03** BSD Socket API | ✅ Completata v1: `AF_INET` loopback-only, `SOCK_STREAM`/`SOCK_DGRAM`, selftest `socket-api` |
 
-**Checkpoint FASE 5:** `ping 1.1.1.1` funziona, `curl` scarica una pagina,
-un server TCP di test accetta connessioni.
+**Checkpoint FASE 5:** driver `virtio-net` attivo, stack IP/TCP minimale valido,
+BSD socket API `v1` disponibile a user-space e `socketdemo`/selftest `socket-api`
+verdi su loopback `127.0.0.1`.
 
 ---
 
@@ -3296,14 +3310,14 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** `M10-03` BSD socket API, poi `M8-08` plugin arksh, poi `M8-08h` i18n
+- **Prossimo step:** `M8-08` plugin arksh, poi `M8-08h` i18n, poi `M11-05`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M10-02`: suite `selftest` a `46/46`.
+> Stato verificato dopo la chiusura di `M10-03`: suite `selftest` a `47/47`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3311,29 +3325,28 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ **Architettura server / storage v1**: `M9-01`, `M9-02`, `M9-03`, `M9-04`, `M14-01` (`procfs` core v1)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
+- ✅ **BSD socket API v1**: `M10-03` (`AF_INET` loopback-only, TCP/UDP, selftest `socket-api`)
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`
+- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`, TCP/IP `netd`, BSD socket loopback `v1`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M10-03** BSD Socket API | `M10-02` ✅ | Sblocca `curl`, `ssh`, package manager, servizi e AF_UNIX/AF_INET consistenti |
-| 2 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
-| 3 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 4 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Diventa molto piu' interessante appena la rete base e' disponibile |
-| 5 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
+| 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
+| 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
+| 3 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Dopo `M10-03` la compat Linux ha finalmente rete e file I/O piu' credibili |
+| 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
 
-1. **Aprire la rete a user-space**: `M10-03` (M10-02 ✅)
-2. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
-3. **Migliorare l'usabilita' shell/input**: `M8-08h`
-4. **Usare la rete per compatibilita' e desktop**:
+1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
+2. **Migliorare l'usabilita' shell/input**: `M8-08h`
+3. **Usare rete + runtime per compatibilita' e desktop**:
    `M11-05` dipende da `M11-03 + M10-03 + M14-01`
    `M12-01` dipende da `M11-01 + M9-02 + M10-03`
-5. **Scalare su multicore e RT avanzato**:
+4. **Scalare su multicore e RT avanzato**:
    `M13-02 -> M13-03`
    `M13-01` e `M13-04` possono procedere in parallelo dopo il core SMP
    `M13-05` chiude l'integrazione EDF+NAS

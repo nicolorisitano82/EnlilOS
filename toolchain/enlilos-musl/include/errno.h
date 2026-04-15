@@ -32,5 +32,19 @@ extern __thread int errno;
 #define ENOTEMPTY           39
 #define ENAMETOOLONG        36
 #define ETIMEDOUT           110
+#define EOPNOTSUPP          95
+#define EAFNOSUPPORT        97
+#define EADDRINUSE          98
+#define EADDRNOTAVAIL       99
+#define ENETUNREACH         101
+#define ECONNRESET          104
+#define ENOBUFS             105
+#define EISCONN             106
+#define ENOTCONN            107
+#define ECONNREFUSED        111
+#define ENOTSOCK            88
+#define ENOPROTOOPT         92
+#define ENODEV              19
+#define EDEADLOCK           EDEADLK
 
 #endif

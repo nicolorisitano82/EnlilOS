@@ -2217,6 +2217,29 @@ static int selftest_case_kbd_layout(void)
     return (keyboard_selftest_run() == 0) ? 0 : -1;
 }
 
+/*
+ * socket-api: verifica BSD socket API v1 tramite SOCKDEMO.ELF.
+ * Il demo esegue un echo TCP su loopback 127.0.0.1:7070 con fork.
+ */
+static int selftest_case_socket_api(void)
+{
+    static const char case_name[] = "socket-api";
+    static const char expected[] =
+        "sockopt-ok\n"
+        "server-ok\n"
+        "client-ok\n"
+        "udp-ok\n";
+    int rc;
+
+    rc = vfs_unlink("/data/SOCKDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup SOCKDEMO.TXT fallita");
+
+    if (st_run_user_path(case_name, "/SOCKDEMO.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/SOCKDEMO.TXT", expected, 1);
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -2264,6 +2287,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-glob",   selftest_case_musl_glob },
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
     { "kbd-layout",  selftest_case_kbd_layout },
+    { "socket-api",  selftest_case_socket_api },
 };
 
 int selftest_run_named(const char *name)

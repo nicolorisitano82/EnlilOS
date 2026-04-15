@@ -17,7 +17,7 @@ Le milestone completate oggi coprono:
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/usr/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
-- **M10**: driver `virtio-net` MMIO `v1`, RX/TX raw Ethernet con queue statiche, reporting MAC/link, `netd` user-space bootstrap e backend di rete attivo sui target QEMU di run/test.
+- **M10**: driver `virtio-net` MMIO `v1`, `netd` bootstrap con stack IPv4/ARP/ICMP/UDP/TCP minimale e BSD socket API `v1` (`AF_INET`, `SOCK_STREAM`/`SOCK_DGRAM`) loopback-only su `127.0.0.1`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
 - **M11-02a/b/c/d/e**: profilo multi-thread `v1` chiuso, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond`, TLS statico multi-thread per `__thread`, `errno` thread-local e smoke `musl-pthread` + `musl-sem` + `tls-mt`.
@@ -25,7 +25,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=45 pass=45 fail=0`.
+`SUMMARY total=47 pass=47 fail=0`.
 
 ---
 
@@ -99,6 +99,7 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `VFSD.ELF`
 - `BLKD.ELF`
 - `NETD.ELF`
+- `SOCKDEMO.ELF`
 - `MMAPDEMO.ELF`
 - `JOBDEMO.ELF`
 - `NSDEMO.ELF`
@@ -267,6 +268,7 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `tlsmtdemo`
 - `arksh`
 - `net`
+- `socketdemo`
 - `kbdlayout`
 - `loadkeys it`
 - `runelf /MUSLHELLO.ELF`
@@ -293,8 +295,10 @@ valida la configurazione bootstrap in `/etc/vconsole.conf`.
 La rete di bootstrap usa oggi `virtio-net` in modalita' raw Ethernet: il driver
 kernel espone `net_send/net_recv/net_get_info`, mentre `NETD.ELF` viene lanciato
 come server user-space sulla porta `net`. Il comando boot `net` mostra MAC,
-stato link e contatori RX/TX. Lo stack IP/TCP resta esplicitamente nel perimetro
-di `M10-02`.
+stato link e contatori RX/TX. Sopra questo profilo, `M10-03` aggiunge anche una
+BSD socket API `v1` per task EL0: `AF_INET`, `SOCK_STREAM` e `SOCK_DGRAM`,
+solo loopback `127.0.0.1` per ora. Il comando `socketdemo` lancia
+`/SOCKDEMO.ELF` e verifica echo TCP, UDP loopback e `setsockopt/getsockopt`.
 
 `NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
 
@@ -313,9 +317,9 @@ di `M10-02`.
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 45 casi:
+Esiste una suite di self-test kernel-side che oggi copre 47 casi:
 
-- `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`, `net-core`
+- `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`, `net-core`, `net-stack`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
 - `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`, `vfs-namespace`, `mreact-core`, `cap-core`
 - `ksem-core`, `kmon-core`, `ipc-sync`
@@ -325,6 +329,7 @@ Esiste una suite di self-test kernel-side che oggi copre 45 casi:
 - `arksh-toolchain`, `arksh-login`
 - `kbd-layout`
 - `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`
+- `socket-api`
 
 La build dedicata e':
 
@@ -336,7 +341,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=45 pass=45 fail=0
+SUMMARY total=47 pass=47 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

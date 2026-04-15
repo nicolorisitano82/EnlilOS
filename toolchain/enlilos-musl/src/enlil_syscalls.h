@@ -71,6 +71,20 @@
 #define SYS_KSEM_ANON       94
 #define SYS_KILL            134
 
+/* BSD socket API (M10-03) */
+#define SYS_SOCKET          200
+#define SYS_BIND            201
+#define SYS_LISTEN          202
+#define SYS_ACCEPT          203
+#define SYS_CONNECT         204
+#define SYS_SEND            205
+#define SYS_RECV            206
+#define SYS_SENDTO          207
+#define SYS_RECVFROM        208
+#define SYS_SETSOCKOPT      209
+#define SYS_GETSOCKOPT      210
+#define SYS_SHUTDOWN        211
+
 #define MAP_FAILED_VA ((unsigned long)(-1L))
 
 #endif

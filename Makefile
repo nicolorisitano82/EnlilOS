@@ -73,6 +73,7 @@ C_SRCS   = kernel/main.c \
            kernel/vmm.c \
            kernel/procfs.c \
            kernel/vfs.c \
+           kernel/sock.c \
            kernel/syscall.c \
            kernel/ane_syscall.c \
            kernel/gpu_syscall.c \
@@ -157,7 +158,10 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/sys/types.h \
                         $(MUSL_ROOT)/include/sys/uio.h \
                         $(MUSL_ROOT)/include/sys/utsname.h \
-                        $(MUSL_ROOT)/include/sys/wait.h
+                        $(MUSL_ROOT)/include/sys/wait.h \
+                        $(MUSL_ROOT)/include/sys/socket.h \
+                        $(MUSL_ROOT)/include/netinet/in.h \
+                        $(MUSL_ROOT)/include/arpa/inet.h
 MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
 MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/ctype.c \
@@ -174,7 +178,8 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/syscall.c \
                         $(MUSL_ROOT)/src/time.c \
                         $(MUSL_ROOT)/src/malloc.c \
-                        $(MUSL_ROOT)/src/stdio.c
+                        $(MUSL_ROOT)/src/stdio.c \
+                        $(MUSL_ROOT)/src/socket.c
 MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
 MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a
@@ -191,7 +196,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_semaphore.c \
                         toolchain/smoke/musl_tls_mt.c \
                         toolchain/smoke/loadkeys.c \
-                        toolchain/smoke/kbdlayout.c
+                        toolchain/smoke/kbdlayout.c \
+                        toolchain/smoke/socket_demo.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -438,6 +444,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
+		SOCKDEMO.ELF=toolchain/smoke/socket_demo.elf \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \

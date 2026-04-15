@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=46 pass=46 fail=0` (dopo M10-02)
+- Stato validato: `SUMMARY total=47 pass=47 fail=0` (dopo M10-03)
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -55,7 +55,7 @@ PRIO_IDLE   = 255  // task idle, sempre READY
 ```
 
 - `SCHED_MAX_TASKS = 96`
-- Pool task non ricicla ancora TCB zombie; con profilo attuale (`M11-03` incluso) suite completa sale a `43/43`, supera vecchio limite cumulativo 64 task. Valore 96 intenzionale, allineato crescita bring-up userspace.
+- Pool task non ricicla ancora TCB zombie; con profilo attuale (`M10-03` + `M11-03` inclusi) suite completa sale a `47/47`, supera vecchio limite cumulativo 64 task. Valore 96 intenzionale, allineato crescita bring-up userspace.
 
 ### TCB (`sched_tcb_t`) — esattamente 64 byte, layout fisso
 ```
@@ -447,7 +447,7 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 
 **File**: [kernel/selftest.c](kernel/selftest.c)
 
-33 test case in ordine:
+47 test case in ordine:
 1. `vfs-rootfs` — mount initrd, readdir, stat file
 2. `vfs-devfs` — devfs /dev/stdin /dev/stdout
 3. `ext4-core` — mount rw ext4, journal replay
@@ -484,9 +484,19 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 32. `musl-forkexec` — smoke `fork/execve/waitpid`
 33. `musl-pipe` — smoke `pipe/dup2/termios`
 34. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
-35. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
-36. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
-37. `futex-core` — `FUTEX_WAIT/WAKE/REQUEUE/CMP_REQUEUE` + join base
+35. `musl-pipe` — smoke `pipe/dup2/termios`
+36. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
+37. `musl-dlfcn` — `dlopen/dlsym/dlclose/dlerror`
+38. `arksh-toolchain` — smoke toolchain/CMake per port hosted
+39. `arksh-login` — login shell bridge e layout `/home`
+40. `kbd-layout` — layout tastiera `us/it` e persistenza
+41. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
+42. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
+43. `futex-core` — `FUTEX_WAIT/WAKE/REQUEUE/CMP_REQUEUE` + join base
+44. `musl-pthread` — bootstrap `pthread` sopra `clone/futex`
+45. `musl-sem` — `sem_t` bootstrap sopra `ksem`
+46. `tls-mt` — TLS statico multi-thread per `__thread`
+47. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
 
 ### Helper macro
 ```c
@@ -503,19 +513,18 @@ Per task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-14)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
 Run di riferimento:
 
 ```text
-SUMMARY total=46 pass=46 fail=0
+SUMMARY total=47 pass=47 fail=0
 ```
 
 **Prossime priorità**:
-1. M10-03 BSD socket API
-2. M8-08 plugin arksh
-3. M8-08 plugin arksh
-4. M8-08h i18n / localizzazione stringhe
-5. M11-05 Linux compatibility layer
+1. M8-08 plugin arksh
+2. M8-08h i18n / localizzazione stringhe
+3. M11-05 Linux compatibility layer
+4. M12-01 Wayland server minimale
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
@@ -567,7 +576,7 @@ SUMMARY total=46 pass=46 fail=0
   - ordine load al boot: `/data/etc/vconsole.conf` prima, fallback `/etc/vconsole.conf`
 - Comandi utente bootstrap: `/usr/bin/loadkeys` e `/usr/bin/kbdlayout`. Non devono includere header kernel del repo nel path di build musl, altrimenti rompono header libc bootstrap. Usano `user_svc.h` + numeri syscall dedicati, restano isolati dal namespace header kernel.
 - Bug reale da packaging: aggiungere keymap e utility ha portato initrd a 70 entry. Parser CPIO aveva `INITRD_MAX_ENTRIES = 64`, rootfs montava come `initrd-error`. Fix: alzato a 128.
-- Selftest di riferimento: `kbd-layout`; suite completa valida ora `45/45`.
+- Selftest di riferimento: `kbd-layout`; suite completa valida ora `47/47`.
 
 ### Knowledge operativa M10-01 (virtio-net + netd bootstrap)
 
@@ -614,7 +623,24 @@ SUMMARY total=46 pass=46 fail=0
 - `net_stack.o` non è standalone: va linkato esplicitamente in `netd.elf` tramite rule Makefile esplicita (`user/netd.elf: user/netd.o user/net_stack.o`).
 - Pool sizes: `NET_STACK_ARP_ENTRIES=8`, `NET_STACK_UDP_SOCKETS=4`, `NET_STACK_TCP_CONNS=4`, `NET_STACK_TCP_RXBUF=2048`.
 - v1 senza retransmit TCP: QEMU/SLIRP su loopback è lossless.
-- M10-03 aggiungerà: BSD socket API (bind/connect/send/recv) esposte via IPC port.
+- M10-03 chiude la BSD socket API `v1`: syscall 200–211 cablate in kernel/libc bootstrap, `AF_INET` loopback-only, `SOCK_STREAM` + `SOCK_DGRAM`, `SOCK_NONBLOCK`, `SOCK_CLOEXEC`, `MSG_DONTWAIT`, `SO_REUSEADDR`, `SO_ERROR`, `shutdown`.
+
+### Knowledge operativa M10-03 (BSD socket API v1)
+
+- Implementazione in `kernel/sock.c` con pool globale statico da `32` socket (`SOCK_MAX_GLOBAL`).
+- Perimetro `v1` volutamente stretto:
+  - solo `AF_INET`
+  - solo loopback `127.0.0.1`
+  - destinazioni esterne → `-ENETUNREACH`
+  - `SOCK_STREAM` + `SOCK_DGRAM`
+- `connect()` TCP crea un peer kernel-side e lo inserisce nella accept queue del listener; non passa ancora attraverso il backend IP/TCP di `netd`.
+- `send/recv/sendto/recvfrom` supportano path non bloccante sia via `SOCK_NONBLOCK` sia via `MSG_DONTWAIT`; lo stato `O_NONBLOCK` dell'fd va sincronizzato verso `sock_t->flags` con `sock_sync_fd_flags()`.
+- `SOCK_CLOEXEC` viene tradotto subito in `FD_CLOEXEC` sull'entry fd; `accept()` `v1` non espone ancora `accept4()`.
+- Socket demo di riferimento: `/SOCKDEMO.ELF`, comando boot `socketdemo`. Verifica:
+  - `SO_REUSEADDR`
+  - echo TCP su `127.0.0.1:7070`
+  - UDP loopback su `127.0.0.1:7071`
+- Selftest di riferimento: `socket-api`; stato validato insieme al resto della suite a `47/47`.
 
 ### Knowledge operativa M9-04 (namespace + mount dinamico)
 

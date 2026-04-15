@@ -143,6 +143,20 @@
 #define SYS_NET_BOOT_RECV      163
 #define SYS_NET_BOOT_INFO      164
 
+/* ── BSD Socket API (M10-03): 200–211 ──────────────────────────── */
+#define SYS_SOCKET          200
+#define SYS_BIND            201
+#define SYS_LISTEN          202
+#define SYS_ACCEPT          203
+#define SYS_CONNECT         204
+#define SYS_SEND            205
+#define SYS_RECV            206
+#define SYS_SENDTO          207
+#define SYS_RECVFROM        208
+#define SYS_SETSOCKOPT      209
+#define SYS_GETSOCKOPT      210
+#define SYS_SHUTDOWN        211
+
 /* ── Capability System (M9-01): 60–64 ──────────────────────────────── */
 #define SYS_CAP_ALLOC       60
 #define SYS_CAP_SEND        61
@@ -186,6 +200,18 @@
 #define ENOTTY              25
 #define ESPIPE              29
 #define ETIMEDOUT           110
+#define EOPNOTSUPP          95
+#define EAFNOSUPPORT        97
+#define EADDRINUSE          98
+#define EADDRNOTAVAIL       99
+#define ENETUNREACH         101
+#define ECONNRESET          104
+#define ENOBUFS             105
+#define EISCONN             106
+#define ENOTCONN            107
+#define ECONNREFUSED        111
+#define ENOTSOCK            88
+#define ENOPROTOOPT         92
 
 #define ERR(e)  ((uint64_t)(-(int64_t)(e)))
 
@@ -299,6 +325,7 @@ typedef struct {
 } timeval_t;
 
 typedef int64_t off_t;
+typedef uint32_t socklen_t;
 
 typedef struct {
     void   *iov_base;
