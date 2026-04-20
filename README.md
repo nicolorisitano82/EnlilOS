@@ -15,7 +15,7 @@ Le milestone completate oggi coprono:
 - **M5b**: backend GPU `virtio-gpu` / `ramfb`, scanout, memory manager GPU, renderer 2D e boot graphics console.
 - **M6**: loader ELF64 statico e dinamico per task EL0, `execve()`, shared object bootstrap e demo userspace.
 - **M7**: IPC sincrono stile microkernel con donation/budget e shell userspace `NSH`.
-- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/usr/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
+- **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M10**: driver `virtio-net` MMIO `v1`, `netd` bootstrap con stack IPv4/ARP/ICMP/UDP/TCP minimale e BSD socket API `v1` (`AF_INET`, `SOCK_STREAM`/`SOCK_DGRAM`) loopback-only su `127.0.0.1`.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
@@ -25,7 +25,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=47 pass=47 fail=0`.
+`SUMMARY total=49 pass=49 fail=0`.
 
 ---
 
@@ -78,7 +78,7 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `INIT.ELF`
 - `ARKSHBOOT.ELF`
 - `bin/arksh`
-- `usr/bin/arksh.real` (se build esterna `arksh` presente)
+- `bin/arksh.real` (se build esterna `arksh` presente)
 - `bin/nsh`
 - `usr/bin/loadkeys`
 - `usr/bin/kbdlayout`
@@ -189,7 +189,7 @@ make arksh-build ARKSH_DIR=/percorso/arksh
 Il repo `arksh` resta esterno al tree di EnlilOS: la `v1` chiude toolchain file,
 wrapper musl, compat shim di riferimento e smoke CMake. Oggi `make arksh-build`
 compila il binario reale statico `toolchain/build/arksh/arksh`, e il packaging
-dell'`initrd` lo include automaticamente come `/usr/bin/arksh.real`. Da `M8-08f`
+dell'`initrd` lo include automaticamente come `/bin/arksh.real`. Da `M8-08f`
 il sistema avvia una login shell `v1` tramite `/bin/arksh` (launcher/static bridge),
 con fallback automatico a `/bin/nsh`, `rc` bootstrap in `/etc/arkshrc` e
 `/home/user/.config/arksh/arkshrc`, e home persistente preparata su `/data/home`.
@@ -282,7 +282,7 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `selftest`, `selftest [nome]`
 
 Al boot il sistema prova ad avviare `/bin/arksh` come login shell di default. Il
-launcher cerca prima la shell reale in `/usr/bin/arksh` o `/usr/bin/arksh.real`;
+launcher cerca la shell reale in `/bin/arksh.real`;
 se non la trova, degrada in modo pulito su `/bin/nsh`, che resta anche richiamabile
 esplicitamente come recovery shell.
 
@@ -341,7 +341,7 @@ make test
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=47 pass=47 fail=0
+SUMMARY total=49 pass=49 fail=0
 ```
 
 Nota: se il selftest si blocca, conviene leggere il log seriale completo. La suite e' pensata per isolare regressioni su mount, exec, memoria virtuale, IPC, server user-space e stack grafico.

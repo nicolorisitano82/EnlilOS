@@ -207,7 +207,7 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DARKSH_STATIC=ON \
                         -DARKSH_PLUGINS=OFF \
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
-ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),usr/bin/arksh.real=$(ARKSH_REAL_ELF),)
+ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),bin/arksh.real=$(ARKSH_REAL_ELF),)
 LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o

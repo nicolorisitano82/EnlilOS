@@ -38,6 +38,34 @@ typedef struct {
 } signal_state_t;
 
 static signal_state_t signal_state[SCHED_MAX_TASKS];
+
+static void signal_uart_put_u32(uint32_t v)
+{
+    char buf[11];
+    int  len = 0;
+
+    if (v == 0U) {
+        uart_putc('0');
+        return;
+    }
+
+    while (v != 0U && len < (int)sizeof(buf)) {
+        buf[len++] = (char)('0' + (v % 10U));
+        v /= 10U;
+    }
+    while (len > 0)
+        uart_putc(buf[--len]);
+}
+
+static void signal_uart_put_hex64(uint64_t v)
+{
+    static const char digits[] = "0123456789ABCDEF";
+
+    uart_puts("0x");
+    for (int shift = 60; shift >= 0; shift -= 4)
+        uart_putc(digits[(v >> (uint32_t)shift) & 0xFULL]);
+}
+
 static sigaction_t    signal_actions[SCHED_MAX_TASKS][ENLILOS_NSIG];
 
 static inline uint32_t signal_slot_pid(uint32_t pid)
@@ -484,6 +512,7 @@ int signal_deliver_pending(exception_frame_t *frame)
 int signal_handle_user_exception(exception_frame_t *frame, uint32_t ec)
 {
     int sig;
+    const char *path;
 
     if (!current_task || !sched_task_is_user(current_task) || !frame)
         return -1;
@@ -508,6 +537,31 @@ int signal_handle_user_exception(exception_frame_t *frame, uint32_t ec)
         sig = SIGILL;
         break;
     }
+
+    path = sched_task_exec_path(current_task);
+    uart_puts("[SIGNAL] user fault pid=");
+    signal_uart_put_u32(current_task->pid);
+    uart_puts(" sig=");
+    signal_uart_put_u32((uint32_t)sig);
+    uart_puts(" ec=");
+    signal_uart_put_hex64((uint64_t)ec);
+    uart_puts(" pc=");
+    signal_uart_put_hex64(frame->pc);
+    uart_puts(" lr=");
+    signal_uart_put_hex64(frame->x[30]);
+    uart_puts(" far=");
+    signal_uart_put_hex64(frame->far);
+    uart_puts(" x0=");
+    signal_uart_put_hex64(frame->x[0]);
+    uart_puts(" x1=");
+    signal_uart_put_hex64(frame->x[1]);
+    uart_puts(" x2=");
+    signal_uart_put_hex64(frame->x[2]);
+    uart_puts(" x3=");
+    signal_uart_put_hex64(frame->x[3]);
+    uart_puts(" path=");
+    uart_puts((path && path[0] != '\0') ? path : "(unknown)");
+    uart_puts("\n");
 
     (void)signal_send_tgkill(sched_task_tgid(current_task), current_task->pid, sig);
     (void)signal_deliver_pending(frame);

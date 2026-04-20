@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=47 pass=47 fail=0` (dopo M10-03)
+- Stato validato: `SUMMARY total=49 pass=49 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -517,7 +517,7 @@ Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `
 Run di riferimento:
 
 ```text
-SUMMARY total=47 pass=47 fail=0
+SUMMARY total=49 pass=49 fail=0
 ```
 
 **Prossime priorità**:
@@ -534,8 +534,8 @@ SUMMARY total=47 pass=47 fail=0
 - `O_NONBLOCK` utile soprattutto sul path pipe. Non è modello completo di I/O non bloccante generale su tutti i backend VFS.
 - `getcwd()` / `chdir()` non devono mantenere stato parallelo nel kernel: source of truth è `vfsd`, coerente con namespace mount di `M9-04`.
 - Environment bootstrap task lanciati con `elf64_spawn_path()`: `PATH=/bin:/usr/bin`, `HOME=/home/user`, `PWD=/`, `SHELL=/bin/arksh`, `TERM=vt100`, `USER=user`.
-- Dopo `M8-08f`, login shell di default passa da `/bin/arksh`, che resta launcher/static bridge. Con `M11-03` + hardening libc hosted, port esterno reale di `arksh` ora builda host-side in `toolchain/build/arksh/arksh` e viene impacchettato automaticamente nell'`initrd` come `/usr/bin/arksh.real`.
-- Comando boot `arksh` deve provare solo shell reale (`/usr/bin/arksh`, `/usr/bin/arksh.real`) e dare errore chiaro se manca; fallback a `/bin/nsh` resta responsabilità del launcher/login path, non del comando esplicito.
+- Dopo `M8-08f`, login shell di default passa da `/bin/arksh`, che resta launcher/static bridge. Con `M11-03` + hardening libc hosted, port esterno reale di `arksh` ora builda host-side in `toolchain/build/arksh/arksh` e viene impacchettato automaticamente nell'`initrd` come `/bin/arksh.real`.
+- Comando boot `arksh` deve provare solo shell reale `/bin/arksh.real` e dare errore chiaro se manca; fallback a `/bin/nsh` resta responsabilità del launcher/login path, non del comando esplicito.
 - `boot_prepare_login_layout()` in `kernel/main.c` prepara layout persistente e file seed su `/data/home/user`: `.config/arksh/arkshrc` e `.local/state/arksh/history`.
 - Gotcha operativo `M8-08f`: bind `/data/home -> /home` esiste e login shell fa `chdir("/home/user")`, ma accesso EL0 diretto al file history via `/home/user/.local/state/arksh/history` resta timing-sensitive. Selftest valido controlla quindi backing store kernel-side su `/data/home/...` e usa `/ARKSHBOOT.ELF` solo per verificare env/cwd/rc/bin-layout.
 - Validazione `M8-08f`:

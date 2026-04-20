@@ -76,7 +76,7 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 
 #define BOOTCLI_HISTORY_MAX   18U
 #define BOOTCLI_LINE_MAX      78U
-#define BOOTCLI_INPUT_MAX     72U
+#define BOOTCLI_INPUT_MAX     255U
 #define BOOTCLI_PATH_MAX      128U
 #define BOOTCLI_MOUSE_EVENT_MAX 4U
 
@@ -292,10 +292,8 @@ static int boot_path_is_regular_file(const char *path)
 
 static const char *boot_find_real_arksh_path(void)
 {
-    if (boot_path_is_regular_file("/usr/bin/arksh"))
-        return "/usr/bin/arksh";
-    if (boot_path_is_regular_file("/usr/bin/arksh.real"))
-        return "/usr/bin/arksh.real";
+    if (boot_path_is_regular_file("/bin/arksh.real"))
+        return "/bin/arksh.real";
     return NULL;
 }
 
@@ -1423,7 +1421,7 @@ static void bootcli_launch_real_arksh(int announce)
 
     if (!path) {
         if (announce)
-            bootcli_push_line("arksh reale non presente in /usr/bin; usa 'login' per il bridge o 'nsh' per recovery.");
+            bootcli_push_line("arksh reale non presente in /bin; usa 'login' per il bridge o 'nsh' per recovery.");
         return;
     }
 
@@ -1434,6 +1432,8 @@ static int bootcli_poll_shell(void)
 {
     sched_tcb_t *shell;
     char         shell_name[sizeof(bootcli_shell_name)];
+    int32_t      exit_code = 0;
+    int          have_exit_code = 0;
 
     if (bootcli_mode != BOOTCLI_MODE_TERM || bootcli_shell_pid == 0U)
         return 0;
@@ -1441,6 +1441,8 @@ static int bootcli_poll_shell(void)
     shell = sched_task_find(bootcli_shell_pid);
     if (shell && shell->state != TCB_STATE_ZOMBIE)
         return term80_take_dirty();
+    if (shell && sched_task_get_exit_code(shell, &exit_code) == 0)
+        have_exit_code = 1;
 
     bootcli_copy_trunc(shell_name, bootcli_shell_name, sizeof(shell_name));
     term80_deactivate();
@@ -1451,7 +1453,13 @@ static int bootcli_poll_shell(void)
         char line[BOOTCLI_LINE_MAX + 1];
         line[0] = '\0';
         bootcli_buf_append(line, sizeof(line), shell_name);
-        bootcli_buf_append(line, sizeof(line), " terminata. Ritorno alla boot console.");
+        bootcli_buf_append(line, sizeof(line), " terminata");
+        if (have_exit_code) {
+            bootcli_buf_append(line, sizeof(line), " (exit=");
+            bootcli_buf_append_i32(line, sizeof(line), exit_code);
+            bootcli_buf_append(line, sizeof(line), ")");
+        }
+        bootcli_buf_append(line, sizeof(line), ". Ritorno alla boot console.");
         bootcli_push_line(line);
     } else {
         bootcli_push_line("shell terminata. Ritorno alla boot console.");
@@ -1588,14 +1596,38 @@ static void bootcli_render(void)
 
     bootcli_fill_rect(40U, prompt_y - 6U, 720U, 2U, border_color);
 
-    prompt_line[0] = '\0';
-    bootcli_buf_append(prompt_line, sizeof(prompt_line), "[");
-    bootcli_buf_append(prompt_line, sizeof(prompt_line), bootcli_cwd);
-    bootcli_buf_append(prompt_line, sizeof(prompt_line), "] > ");
-    bootcli_buf_append(prompt_line, sizeof(prompt_line), bootcli_input);
-    if ((cursor_phase & 1ULL) == 0ULL)
-        bootcli_buf_append(prompt_line, sizeof(prompt_line), "_");
-    bootcli_draw_text(history_x, prompt_y, prompt_line, prompt_color, panel_color);
+    {
+        /* Prompt: "[cwd] > " prefix + input tail + cursor.
+         * Scorrimento destra: se l'input e' piu' lungo dello spazio
+         * disponibile, mostriamo la coda (posizione cursore) invece
+         * di troncare a sinistra perdendo visibilita'. */
+        char        prefix[64];
+        uint32_t    prefix_len;
+        uint32_t    cursor_len = ((cursor_phase & 1ULL) == 0ULL) ? 1U : 0U;
+        uint32_t    avail;
+        const char *input_tail;
+
+        prefix[0] = '\0';
+        bootcli_buf_append(prefix, sizeof(prefix), "[");
+        bootcli_buf_append(prefix, sizeof(prefix), bootcli_cwd);
+        bootcli_buf_append(prefix, sizeof(prefix), "] > ");
+        prefix_len = bootcli_strlen(prefix);
+
+        avail = (BOOTCLI_LINE_MAX > prefix_len + cursor_len)
+                ? (BOOTCLI_LINE_MAX - prefix_len - cursor_len)
+                : 0U;
+
+        input_tail = bootcli_input;
+        if (bootcli_input_len > avail && avail > 0U)
+            input_tail = bootcli_input + (bootcli_input_len - avail);
+
+        prompt_line[0] = '\0';
+        bootcli_buf_append(prompt_line, sizeof(prompt_line), prefix);
+        bootcli_buf_append(prompt_line, sizeof(prompt_line), input_tail);
+        if (cursor_len)
+            bootcli_buf_append(prompt_line, sizeof(prompt_line), "_");
+        bootcli_draw_text(history_x, prompt_y, prompt_line, prompt_color, panel_color);
+    }
 
     footer[0] = '\0';
     bootcli_buf_append(footer, sizeof(footer), "Scheduler OK | Heartbeat ");
@@ -1647,7 +1679,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("sync      flush esplicito dei mount VFS attivi");
         bootcli_push_line("kbdlayout mostra il layout tastiera attivo");
         bootcli_push_line("loadkeys L attiva il layout tastiera (us/it) e prova a persisterlo");
-        bootcli_push_line("arksh     lancia la shell arksh reale da /usr/bin se presente");
+        bootcli_push_line("arksh     lancia la shell arksh reale da /bin se presente");
         bootcli_push_line("login     rilancia la login shell bridge (/bin/arksh)");
         bootcli_push_line("nsh       lancia la shell ELF statica 80x25 di recovery");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
@@ -2273,7 +2305,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-03: prova 'musldl' per dlopen(), dlsym(), dlclose() e libdl bootstrap.");
     bootcli_push_line("M10-03: prova 'socketdemo' per BSD socket API TCP/UDP su loopback 127.0.0.1.");
     bootcli_push_line("M8-08e: prova 'arkshsmoke' per la toolchain CMake/cross-build EnlilOS.");
-    bootcli_push_line("M8-08f: 'login' usa il bridge /bin/arksh; 'arksh' prova solo la shell reale in /usr/bin.");
+    bootcli_push_line("M8-08f: 'login' usa il bridge /bin/arksh; 'arksh' prova solo la shell reale in /bin/arksh.real.");
     bootcli_push_line("M11-02a: prova 'clonedemo' per clone(), gettid(), CLONE_VM/FS/FILES e TPIDR_EL0 per-thread.");
     bootcli_push_line("M11-02b: prova 'threadlife' per set_tid_address(), tgkill(), clear_child_tid ed exit_group().");
     bootcli_push_line("M11-02c: prova 'futexdemo' per FUTEX_WAIT/WAKE/REQUEUE e join via clear_child_tid.");

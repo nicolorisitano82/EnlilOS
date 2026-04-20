@@ -70,7 +70,7 @@ static inline int kbd_event_empty(void)
 
 static inline int kbd_event_full(void)
 {
-    return (uint8_t)(kbd_event_head + 1U) == kbd_event_tail;
+    return ((kbd_event_head + 1U) % KBD_EVENT_BUF_SIZE) == kbd_event_tail;
 }
 
 static void kbd_event_push(const keyboard_event_t *ev)
@@ -80,7 +80,7 @@ static void kbd_event_push(const keyboard_event_t *ev)
 
     kbd_event_buf[kbd_event_head] = *ev;
     __asm__ volatile("dmb sy" ::: "memory");
-    kbd_event_head++;
+    kbd_event_head = (uint8_t)((kbd_event_head + 1U) % KBD_EVENT_BUF_SIZE);
 }
 
 static int kbd_event_pop(keyboard_event_t *out)
@@ -90,7 +90,7 @@ static int kbd_event_pop(keyboard_event_t *out)
 
     *out = kbd_event_buf[kbd_event_tail];
     __asm__ volatile("dmb sy" ::: "memory");
-    kbd_event_tail++;
+    kbd_event_tail = (uint8_t)((kbd_event_tail + 1U) % KBD_EVENT_BUF_SIZE);
     return 1;
 }
 

@@ -619,6 +619,40 @@ static int vfsd_namespace_resolve_existing(vfsd_namespace_t *ns, const char *vir
         rc = vfsd_boot_path_stat(backend_out, &st);
         if (rc == 0)
             return 0;
+        if (rc != -ENOENT && rc != -ENOTDIR)
+            return rc;
+        mount = vfsd_namespace_mount_best_excluding(ns, virtual_path, mount);
+    }
+
+    return rc;
+}
+
+static int vfsd_namespace_open_existing(vfsd_namespace_t *ns, const char *virtual_path,
+                                        u32 flags, char *backend_out)
+{
+    vfsd_ns_mount_t *mount;
+    int              rc = -ENOENT;
+
+    if (!ns || !virtual_path)
+        return -EINVAL;
+
+    mount = vfsd_namespace_mount_best(ns, virtual_path);
+    while (mount) {
+        char backend[VFSD_PATH_BYTES];
+
+        rc = vfsd_namespace_mount_join(mount, virtual_path, backend, NULL, NULL);
+        if (rc < 0)
+            return rc;
+
+        rc = (int)sys_vfs_boot_open_now(backend, flags);
+        if (rc >= 0) {
+            if (backend_out)
+                vfsd_strlcpy(backend_out, backend, VFSD_PATH_BYTES);
+            return rc;
+        }
+
+        if (!mount->linux_compat || (rc != -ENOENT && rc != -ENOTDIR))
+            return rc;
         mount = vfsd_namespace_mount_best_excluding(ns, virtual_path, mount);
     }
 
@@ -787,7 +821,7 @@ static int vfsd_client_backend_path(vfsd_client_t *client, const char *input,
     if (!ns)
         return -ENOENT;
 
-    return vfsd_namespace_resolve(ns, virtual_out, backend_out, NULL, NULL);
+    return vfsd_namespace_resolve_existing(ns, virtual_out, backend_out, NULL, NULL);
 }
 
 static int vfsd_mount_backend_for(vfsd_client_t *client, u32 fs_type, const char *src,
@@ -1098,20 +1132,25 @@ void _start(void)
             }
             if ((req->flags & O_CREAT) != 0U) {
                 rc = vfsd_namespace_resolve(ns, virtual_path, backend, NULL, NULL);
+                if (rc < 0) {
+                    resp.status = (int)rc;
+                    break;
+                }
+                rc = sys_vfs_boot_open_now(backend, req->flags);
+                if (rc < 0)
+                    resp.status = (int)rc;
+                else {
+                    resp.status = 0;
+                    resp.handle = (int)rc;
+                }
             } else {
-                rc = vfsd_namespace_resolve_existing(ns, virtual_path, backend,
-                                                     NULL, NULL);
-            }
-            if (rc < 0) {
-                resp.status = (int)rc;
-                break;
-            }
-            rc = sys_vfs_boot_open_now(backend, req->flags);
-            if (rc < 0)
-                resp.status = (int)rc;
-            else {
-                resp.status = 0;
-                resp.handle = (int)rc;
+                rc = vfsd_namespace_open_existing(ns, virtual_path, req->flags, backend);
+                if (rc < 0)
+                    resp.status = (int)rc;
+                else {
+                    resp.status = 0;
+                    resp.handle = (int)rc;
+                }
             }
             break;
         }
@@ -1178,8 +1217,8 @@ void _start(void)
                     resp.status = -ENOENT;
                     break;
                 }
-                rc = vfsd_namespace_resolve(ns, virtual_path, backend, NULL,
-                                            &linux_compat);
+                rc = vfsd_namespace_resolve_existing(ns, virtual_path, backend, NULL,
+                                                     &linux_compat);
             }
             if (rc < 0) {
                 resp.status = (int)rc;

@@ -583,7 +583,7 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 
 **Stato attuale:** `M8-08a/b/c/d/e/f` completate `v1`. Il bootstrap shell-side e'
 chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config,
-fallback `/bin/nsh` e binario reale esterno `/usr/bin/arksh.real` sono reali. Restano
+fallback `/bin/nsh` e binario reale esterno `/bin/arksh.real` sono reali. Restano
 aperti i pezzi post-bootstrap piu' avanzati (plugin `.so`, UX/history avanzata e
 hardening del port hosted).
 
@@ -806,7 +806,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - `make arksh-build` builda esplicitamente il target `arksh` del progetto esterno,
   evitando i target benchmark/test che richiedono ancora API hosted fuori perimetro
 - quando `toolchain/build/arksh/arksh` esiste, l'`initrd` lo impacchetta come
-  `/usr/bin/arksh.real` senza richiedere step manuali aggiuntivi
+  `/bin/arksh.real` senza richiedere step manuali aggiuntivi
 
 **Smoke CMake/toolchain:**
 - `toolchain/cmake-smoke/` contiene un progetto CMake minimale cross-buildato con la toolchain EnlilOS
@@ -836,7 +836,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
   - `/INIT.ELF` -> launcher login shell
   - `/ARKSHBOOT.ELF` -> selftest ELF non interattivo
   - `/bin/arksh` -> launcher statico di bootstrap
-  - `/usr/bin/arksh.real` -> shell reale esterna quando il build host-side e' disponibile
+  - `/bin/arksh.real` -> shell reale esterna quando il build host-side e' disponibile
   - `/bin/nsh` -> recovery shell esplicita
   - `/etc/arkshrc`
   - `/home/user/.config/arksh/arkshrc`
@@ -855,7 +855,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
   `SHELL=/bin/arksh`, `TERM=vt100`, `USER=user`
 
 **Fallback e limiti onesti della v1:**
-- se `/usr/bin/arksh` o `/usr/bin/arksh.real` non sono presenti, il launcher degrada
+- se `/bin/arksh.real` non e' presente, il launcher degrada
   automaticamente su `/bin/nsh`
 - la history persistente e' gia' predisposta e validata kernel-side su
   `/data/home/user/.local/state/arksh/history`
@@ -867,8 +867,8 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - comando boot `arksh`
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
-- packaging verificato: `boot/initrd.cpio` contiene `usr/bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=45 pass=45 fail=0`
+- packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
+- suite runtime piu' recente: `SUMMARY total=49 pass=49 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=45 pass=45 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=49 pass=49 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test

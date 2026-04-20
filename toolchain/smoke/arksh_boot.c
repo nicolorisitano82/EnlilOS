@@ -206,10 +206,8 @@ int main(int argc, char **argv, char **envp)
 
     ab_prepare_login_home();
 
-    if (ab_file_exists("/usr/bin/arksh")) {
-        execve("/usr/bin/arksh", real_argv, envp);
-    } else if (ab_file_exists("/usr/bin/arksh.real")) {
-        execve("/usr/bin/arksh.real", real_argv, envp);
+    if (ab_file_exists("/bin/arksh.real")) {
+        execve("/bin/arksh.real", real_argv, envp);
     }
 
     (void)ab_write_all_fd(STDOUT_FILENO, fallback_msg);
