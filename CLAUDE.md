@@ -514,18 +514,21 @@ Per task ausiliari (holder/hog/waiter):
 ## Milestone completate (stato 2026-04-20)
 
 Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
-Aggiunti: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212).
+Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
 SUMMARY total=49 pass=49 fail=0
 ```
 
-**Prossime priorità**:
-1. M8-08 plugin arksh
-2. M8-08h i18n / localizzazione stringhe
-3. M11-05 Linux compatibility layer
-4. M12-01 Wayland server minimale
+**Prossime priorità** (ordine consigliato):
+1. **M8-08h** — i18n / localizzazione stringhe (gettext minimale per arksh)
+2. **M11-04** — `/proc` esteso: `/proc/<pid>/maps`, `/proc/<pid>/fd`, `/proc/<pid>/status` completo
+3. **M11-05** — Linux compatibility layer: completare syscall mancanti per porting binari ELF Linux AArch64 statici
+4. **M11-06** — `select()`/`poll()` non-bloccante generalizzato (oggi solo pipe + FIONBIO su socket)
+5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
+6. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
+7. **M8-08i** — Plugin system arksh (dynamic loading via libdl)
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
