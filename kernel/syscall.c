@@ -58,6 +58,9 @@ extern void *memset(void *dst, int value, size_t n);
 #define PIPE_POOL_MAX   32U
 #define PIPE_BUF_SIZE   4096U
 #define SOCK_REMOTE_NETD_TAG 0x80000000U
+#define FLOCK_MAX_LOCKS 32U
+#define FLOCK_MAX_HOLDERS 16U
+#define FLOCK_MAX_WAITERS SCHED_MAX_TASKS
 
 #define PIPE_END_READ   0U
 #define PIPE_END_WRITE  1U
@@ -120,8 +123,41 @@ static vfs_srv_handle_t vfs_srv_tables[SCHED_MAX_TASKS][VFSD_HANDLE_MAX];
 static fd_object_t fd_objects[FD_OBJECT_MAX];
 static pipe_t      pipe_pool[PIPE_POOL_MAX];
 
+typedef struct {
+    uint8_t            in_use;
+    uint8_t            exclusive;
+    uint8_t            holder_count;
+    uint8_t            _pad0;
+    const vfs_mount_t *mount;
+    uint32_t           node_id;
+    uint32_t           _pad1;
+    char               path[EXEC_MAX_PATH];
+    fd_object_t       *holders[FLOCK_MAX_HOLDERS];
+    struct flock_waiter *wait_head;
+    struct flock_waiter *wait_tail;
+} flock_entry_t;
+
+typedef struct flock_waiter {
+    uint8_t             in_use;
+    uint8_t             active;
+    uint8_t             exclusive;
+    uint8_t             wake_reason;
+    sched_tcb_t        *task;
+    fd_object_t        *obj;
+    flock_entry_t      *entry;
+    struct flock_waiter *next;
+} flock_waiter_t;
+
+#define FLOCK_WAKE_NONE   0U
+#define FLOCK_WAKE_LOCK   1U
+#define FLOCK_WAKE_INTR   2U
+
+static flock_entry_t flock_table[FLOCK_MAX_LOCKS];
+static flock_waiter_t flock_waiters[FLOCK_MAX_WAITERS];
+
 static void sock_sync_fd_flags(fd_object_t *obj);
 static int  netd_proxy_close(uint32_t handle);
+static void syscall_copy_fixed_string(char *dst, size_t cap, const char *src);
 
 static int sock_handle_is_remote_netd(uint32_t handle)
 {
@@ -249,6 +285,437 @@ static int syscall_streq(const char *a, const char *b)
         b++;
     }
     return *a == *b;
+}
+
+static int flock_object_supported(const fd_object_t *obj)
+{
+    if (!obj)
+        return 0;
+    if (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD)
+        return 0;
+    if (obj->file.mount)
+        return 1;
+    return obj->path[0] != '\0';
+}
+
+static flock_waiter_t *flock_waiter_find_task(const sched_tcb_t *task)
+{
+    if (!task)
+        return NULL;
+
+    for (uint32_t i = 0U; i < FLOCK_MAX_WAITERS; i++) {
+        if (flock_waiters[i].in_use && flock_waiters[i].task == task)
+            return &flock_waiters[i];
+    }
+    return NULL;
+}
+
+static flock_waiter_t *flock_waiter_alloc(sched_tcb_t *task, fd_object_t *obj,
+                                          flock_entry_t *entry, int exclusive)
+{
+    flock_waiter_t *waiter = flock_waiter_find_task(task);
+
+    if (waiter)
+        return waiter->active ? NULL : waiter;
+
+    for (uint32_t i = 0U; i < FLOCK_MAX_WAITERS; i++) {
+        if (!flock_waiters[i].in_use) {
+            waiter = &flock_waiters[i];
+            memset(waiter, 0, sizeof(*waiter));
+            waiter->in_use = 1U;
+            break;
+        }
+    }
+
+    if (!waiter)
+        return NULL;
+
+    waiter->active = 1U;
+    waiter->exclusive = exclusive ? 1U : 0U;
+    waiter->wake_reason = FLOCK_WAKE_NONE;
+    waiter->task = task;
+    waiter->obj = obj;
+    waiter->entry = entry;
+    waiter->next = NULL;
+    return waiter;
+}
+
+static void flock_waiter_reset(flock_waiter_t *waiter)
+{
+    if (!waiter)
+        return;
+    memset(waiter, 0, sizeof(*waiter));
+}
+
+static void flock_waitq_push_tail(flock_entry_t *entry, flock_waiter_t *waiter)
+{
+    if (!entry || !waiter)
+        return;
+
+    waiter->next = NULL;
+    if (entry->wait_tail)
+        entry->wait_tail->next = waiter;
+    else
+        entry->wait_head = waiter;
+    entry->wait_tail = waiter;
+}
+
+static void flock_waitq_remove(flock_entry_t *entry, flock_waiter_t *waiter)
+{
+    flock_waiter_t *prev = NULL;
+    flock_waiter_t *cur;
+
+    if (!entry || !waiter)
+        return;
+
+    cur = entry->wait_head;
+    while (cur) {
+        if (cur == waiter) {
+            if (prev)
+                prev->next = cur->next;
+            else
+                entry->wait_head = cur->next;
+            if (entry->wait_tail == cur)
+                entry->wait_tail = prev;
+            cur->next = NULL;
+            cur->active = 0U;
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+}
+
+static flock_waiter_t *flock_waitq_pop_head(flock_entry_t *entry)
+{
+    flock_waiter_t *waiter;
+
+    if (!entry || !entry->wait_head)
+        return NULL;
+
+    waiter = entry->wait_head;
+    entry->wait_head = waiter->next;
+    if (!entry->wait_head)
+        entry->wait_tail = NULL;
+    waiter->next = NULL;
+    waiter->active = 0U;
+    return waiter;
+}
+
+static int flock_entry_matches(const flock_entry_t *entry, const fd_object_t *obj)
+{
+    if (!entry || !entry->in_use || !obj)
+        return 0;
+
+    if (entry->mount && obj->file.mount)
+        return entry->mount == obj->file.mount &&
+               entry->node_id == obj->file.node_id;
+
+    if (entry->path[0] != '\0' && obj->path[0] != '\0')
+        return syscall_streq(entry->path, obj->path);
+
+    return 0;
+}
+
+static int flock_holder_index(const flock_entry_t *entry, const fd_object_t *obj)
+{
+    if (!entry || !obj)
+        return -1;
+
+    for (uint32_t i = 0U; i < entry->holder_count; i++) {
+        if (entry->holders[i] == obj)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void flock_entry_clear(flock_entry_t *entry)
+{
+    if (!entry)
+        return;
+    while (entry->wait_head) {
+        flock_waiter_t *waiter = flock_waitq_pop_head(entry);
+        if (!waiter)
+            break;
+        waiter->wake_reason = FLOCK_WAKE_INTR;
+        if (waiter->task && waiter->task->state == TCB_STATE_BLOCKED)
+            sched_unblock(waiter->task);
+        flock_waiter_reset(waiter);
+    }
+    memset(entry, 0, sizeof(*entry));
+}
+
+static flock_entry_t *flock_find_entry(const fd_object_t *obj)
+{
+    for (uint32_t i = 0U; i < FLOCK_MAX_LOCKS; i++) {
+        if (flock_entry_matches(&flock_table[i], obj))
+            return &flock_table[i];
+    }
+    return NULL;
+}
+
+static flock_entry_t *flock_alloc_entry(const fd_object_t *obj)
+{
+    flock_entry_t *entry;
+
+    if (!obj || !flock_object_supported(obj))
+        return NULL;
+
+    for (uint32_t i = 0U; i < FLOCK_MAX_LOCKS; i++) {
+        if (flock_table[i].in_use)
+            continue;
+
+        entry = &flock_table[i];
+        memset(entry, 0, sizeof(*entry));
+        entry->in_use  = 1U;
+        entry->mount   = obj->file.mount;
+        entry->node_id = obj->file.node_id;
+        if (!entry->mount)
+            syscall_copy_fixed_string(entry->path, sizeof(entry->path), obj->path);
+        return entry;
+    }
+
+    return NULL;
+}
+
+static void flock_drop_holder(flock_entry_t *entry, uint32_t idx)
+{
+    if (!entry || idx >= entry->holder_count)
+        return;
+
+    while (idx + 1U < entry->holder_count) {
+        entry->holders[idx] = entry->holders[idx + 1U];
+        idx++;
+    }
+    if (entry->holder_count > 0U)
+        entry->holder_count--;
+    if (entry->holder_count != 0U && entry->exclusive && entry->holder_count > 1U)
+        entry->exclusive = 0U;
+}
+
+static int flock_task_refs_object(const sched_tcb_t *task, const fd_object_t *obj)
+{
+    int slot;
+
+    if (!task || !obj)
+        return 0;
+
+    slot = (int)sched_task_proc_slot(task);
+    if (slot < 0 || slot >= SCHED_MAX_TASKS)
+        return 0;
+
+    for (int fd = 0; fd < MAX_FD; fd++) {
+        if (fd_tables[slot][fd].obj == obj)
+            return 1;
+    }
+    return 0;
+}
+
+static int flock_deadlock_reaches_task(const sched_tcb_t *target,
+                                       const sched_tcb_t *task,
+                                       uint32_t depth)
+{
+    flock_waiter_t *waiter;
+
+    if (!target || !task)
+        return 0;
+    if (target == task)
+        return 1;
+    if (depth >= SCHED_MAX_TASKS)
+        return 0;
+
+    waiter = flock_waiter_find_task(task);
+    if (!waiter || !waiter->active || !waiter->entry)
+        return 0;
+
+    for (uint32_t i = 0U; i < waiter->entry->holder_count; i++) {
+        fd_object_t *holder_obj = waiter->entry->holders[i];
+
+        if (!holder_obj)
+            continue;
+
+        for (uint32_t j = 0U; j < sched_task_count_total(); j++) {
+            sched_tcb_t *owner = sched_task_at(j);
+
+            if (!owner || owner->state == TCB_STATE_ZOMBIE)
+                continue;
+            if (!flock_task_refs_object(owner, holder_obj))
+                continue;
+            if (flock_deadlock_reaches_task(target, owner, depth + 1U))
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int flock_detect_deadlock(fd_object_t *obj, flock_entry_t *entry)
+{
+    if (!obj || !entry || !current_task)
+        return 0;
+
+    for (uint32_t i = 0U; i < entry->holder_count; i++) {
+        fd_object_t *holder_obj = entry->holders[i];
+
+        if (!holder_obj)
+            continue;
+        for (uint32_t j = 0U; j < sched_task_count_total(); j++) {
+            sched_tcb_t *owner = sched_task_at(j);
+
+            if (!owner || owner->state == TCB_STATE_ZOMBIE)
+                continue;
+            if (!flock_task_refs_object(owner, holder_obj))
+                continue;
+            if (flock_deadlock_reaches_task(current_task, owner, 0U))
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void flock_wake_waiters(flock_entry_t *entry)
+{
+    sched_tcb_t *wake_list[SCHED_MAX_TASKS];
+    uint32_t woke = 0U;
+
+    if (!entry || !entry->in_use || entry->holder_count != 0U)
+        return;
+
+    while (entry->wait_head && woke < SCHED_MAX_TASKS) {
+        flock_waiter_t *waiter = entry->wait_head;
+
+        if (!waiter)
+            break;
+
+        if (waiter->exclusive) {
+            waiter = flock_waitq_pop_head(entry);
+            entry->exclusive = 1U;
+            entry->holders[0] = waiter->obj;
+            entry->holder_count = 1U;
+            waiter->wake_reason = FLOCK_WAKE_LOCK;
+            wake_list[woke++] = waiter->task;
+            break;
+        }
+
+        if (entry->holder_count >= FLOCK_MAX_HOLDERS)
+            break;
+        waiter = flock_waitq_pop_head(entry);
+        entry->holders[entry->holder_count++] = waiter->obj;
+        entry->exclusive = 0U;
+        waiter->wake_reason = FLOCK_WAKE_LOCK;
+        wake_list[woke++] = waiter->task;
+
+        if (!entry->wait_head || entry->wait_head->exclusive)
+            break;
+    }
+
+    for (uint32_t i = 0U; i < woke; i++) {
+        if (wake_list[i] && wake_list[i]->state == TCB_STATE_BLOCKED)
+            sched_unblock(wake_list[i]);
+    }
+}
+
+static void flock_release_object(fd_object_t *obj)
+{
+    if (!obj)
+        return;
+
+    for (uint32_t i = 0U; i < FLOCK_MAX_LOCKS; i++) {
+        flock_entry_t *entry = &flock_table[i];
+        int            idx;
+
+        if (!entry->in_use)
+            continue;
+
+        idx = flock_holder_index(entry, obj);
+        if (idx < 0)
+            continue;
+
+        flock_drop_holder(entry, (uint32_t)idx);
+        flock_wake_waiters(entry);
+        if (entry->holder_count == 0U && entry->wait_head == NULL)
+            flock_entry_clear(entry);
+    }
+}
+
+static int flock_unlock_object(fd_object_t *obj)
+{
+    flock_entry_t *entry;
+    int            idx;
+
+    if (!obj)
+        return -EBADF;
+
+    entry = flock_find_entry(obj);
+    if (!entry)
+        return 0;
+
+    idx = flock_holder_index(entry, obj);
+    if (idx >= 0) {
+        flock_drop_holder(entry, (uint32_t)idx);
+        flock_wake_waiters(entry);
+        if (entry->holder_count == 0U && entry->wait_head == NULL)
+            flock_entry_clear(entry);
+    }
+    return 0;
+}
+
+static int flock_try_lock_object(fd_object_t *obj, uint32_t operation)
+{
+    flock_entry_t *entry;
+    int            idx;
+    int            exclusive;
+
+    if (!flock_object_supported(obj))
+        return -EINVAL;
+
+    exclusive = (operation == LINUX_LOCK_EX) ? 1 : 0;
+    entry = flock_find_entry(obj);
+    if (!entry) {
+        entry = flock_alloc_entry(obj);
+        if (!entry)
+            return -ENOMEM;
+        entry->exclusive = (uint8_t)exclusive;
+        entry->holders[0] = obj;
+        entry->holder_count = 1U;
+        return 0;
+    }
+
+    idx = flock_holder_index(entry, obj);
+    if (entry->wait_head && idx < 0)
+        return -EAGAIN;
+    if (exclusive) {
+        if (idx >= 0) {
+            if (entry->holder_count == 1U) {
+                entry->exclusive = 1U;
+                return 0;
+            }
+            return -EAGAIN;
+        }
+        if (entry->holder_count != 0U)
+            return -EAGAIN;
+        entry->exclusive = 1U;
+        entry->holders[0] = obj;
+        entry->holder_count = 1U;
+        return 0;
+    }
+
+    if (entry->exclusive) {
+        if (idx >= 0 && entry->holder_count == 1U) {
+            entry->exclusive = 0U;
+            return 0;
+        }
+        return -EAGAIN;
+    }
+
+    if (idx >= 0)
+        return 0;
+    if (entry->holder_count >= FLOCK_MAX_HOLDERS)
+        return -ENOMEM;
+
+    entry->holders[entry->holder_count++] = obj;
+    return 0;
 }
 
 static fd_entry_t *fd_entry_get(int fd)
@@ -387,6 +854,8 @@ static void fd_object_put(fd_object_t *obj)
     obj->refcount--;
     if (obj->refcount != 0U)
         return;
+
+    flock_release_object(obj);
 
     if (obj->type == FD_TYPE_VFS) {
         if (obj->file.mount)
@@ -6249,7 +6718,74 @@ static uint64_t sys_linux_faccessat(uint64_t args[6])
 
 static uint64_t sys_linux_flock(uint64_t args[6])
 {
-    return fd_get((int)args[0]) ? 0ULL : ERR(EBADF);
+    fd_object_t *obj = fd_get((int)args[0]);
+    uint32_t     op = (uint32_t)args[1];
+    uint32_t     mode = op & (uint32_t)~LINUX_LOCK_NB;
+    int          nonblock = (op & LINUX_LOCK_NB) != 0U;
+    flock_entry_t  *entry;
+    flock_waiter_t *waiter;
+    int             held_idx;
+    int          rc;
+
+    if (!obj)
+        return ERR(EBADF);
+    if (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD)
+        return ERR(EINVAL);
+
+    switch (mode) {
+    case LINUX_LOCK_UN:
+        rc = flock_unlock_object(obj);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    case LINUX_LOCK_SH:
+    case LINUX_LOCK_EX:
+        break;
+    default:
+        return ERR(EINVAL);
+    }
+
+    rc = flock_try_lock_object(obj, mode);
+    if (rc == 0)
+        return 0ULL;
+    if (rc != -EAGAIN)
+        return ERR(-rc);
+    if (nonblock)
+        return ERR(EAGAIN);
+
+    entry = flock_find_entry(obj);
+    if (!entry)
+        return ERR(EAGAIN);
+
+    if (flock_detect_deadlock(obj, entry))
+        return ERR(EDEADLK);
+
+    held_idx = flock_holder_index(entry, obj);
+    if (mode == LINUX_LOCK_EX && held_idx >= 0 && entry->holder_count > 1U)
+        flock_drop_holder(entry, (uint32_t)held_idx);
+
+    waiter = flock_waiter_alloc(current_task, obj, entry,
+                                mode == LINUX_LOCK_EX);
+    if (!waiter)
+        return ERR(EBUSY);
+
+    flock_waitq_push_tail(entry, waiter);
+
+    for (;;) {
+        if (waiter->wake_reason == FLOCK_WAKE_LOCK) {
+            flock_waiter_reset(waiter);
+            return 0ULL;
+        }
+        if (waiter->wake_reason == FLOCK_WAKE_INTR) {
+            flock_waiter_reset(waiter);
+            return ERR(EINTR);
+        }
+        if (signal_has_unblocked_pending(current_task)) {
+            if (waiter->active)
+                flock_waitq_remove(entry, waiter);
+            flock_waiter_reset(waiter);
+            return ERR(EINTR);
+        }
+        sched_yield();
+    }
 }
 
 static uint64_t sys_linux_mprotect(uint64_t args[6])

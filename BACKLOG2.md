@@ -1779,7 +1779,7 @@ tabella compat, quindi qui sotto teniamo separati:
 
 **Presente ma ancora con semantica v1 / stub**
 - `wait4`: implementata sopra `waitpid` con `rusage` minimo/stub
-- `flock`: advisory lock ancora permissivo, buono per compat minima ma non completo
+- `flock`: advisory lock `v1` reale, whole-file, bounded, con `LOCK_SH/EX/UN/NB`, coda FIFO dedicata e deadlock detection best-effort; resta senza lease/record lock e senza PI dedicata
 - `prlimit64`: profilo principalmente read-only, con scrittura limiti ancora molto limitata
 - `mprotect`: valida il range ma non applica ancora un cambio permessi MMU completo
 - `rseq`: ritorna volutamente `ENOSYS`

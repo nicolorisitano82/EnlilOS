@@ -94,6 +94,12 @@
 #define LINUX_POLLHUP       0x0010U
 #define LINUX_POLLNVAL      0x0020U
 
+/* Linux flock operations */
+#define LINUX_LOCK_SH       1U
+#define LINUX_LOCK_EX       2U
+#define LINUX_LOCK_NB       4U
+#define LINUX_LOCK_UN       8U
+
 /* Linux AT_ flags */
 #define LINUX_AT_FDCWD             (-100)
 #define LINUX_AT_SYMLINK_NOFOLLOW  0x0100

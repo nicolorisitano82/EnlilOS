@@ -195,6 +195,7 @@
 #define EROFS               30
 #define EPIPE               32
 #define ERANGE              34
+#define EDEADLK             35
 #define ENAMETOOLONG        36
 #define ELOOP               40
 #define ENOTEMPTY           39
