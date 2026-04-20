@@ -522,13 +522,66 @@ SUMMARY total=49 pass=49 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
-1. **M8-08h** — i18n / localizzazione stringhe (gettext minimale per arksh)
-2. **M11-04** — `/proc` esteso: `/proc/<pid>/maps`, `/proc/<pid>/fd`, `/proc/<pid>/status` completo
-3. **M11-05** — Linux compatibility layer: completare syscall mancanti per porting binari ELF Linux AArch64 statici
-4. **M11-06** — `select()`/`poll()` non-bloccante generalizzato (oggi solo pipe + FIONBIO su socket)
+1. **M11-05a** — Linux compat: 20 syscall mancanti per bash-linux (vedi analisi sotto) → bash statico AArch64 funzionante
+2. **M11-04** — `/proc` esteso: `/proc/<pid>/maps`, `/proc/<pid>/fd`, `/proc/<pid>/exe`, `/proc/<pid>/status` completo
+3. **M11-06** — `select()`/`poll()` non-bloccante generalizzato (oggi solo pipe + FIONBIO su socket)
+4. **M8-08h** — i18n / localizzazione stringhe (gettext minimale per arksh)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 6. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 7. **M8-08i** — Plugin system arksh (dynamic loading via libdl)
+
+### Analisi gap bash-linux (M11-05a)
+
+**Binario**: `bash-linux/bash-linux-aarch64` — ELF64 AArch64 statically linked, 2.3MB, con debug info.
+Installato in `disk.img:/bin/bash-linux` (mode 0755).
+
+Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat layer: **52**. Mancanti: **20**.
+
+#### Stub banali (return 0 / valore fisso) — ~2h totali
+| Nr | Nome | Uso in bash |
+|---|---|---|
+| 52 | `fchmod` | chmod su fd aperti |
+| 53 | `fchmodat` | chmod con dirfd |
+| 54 | `fchownat` | chown (no modello permessi) → return 0 |
+| 123 | `sched_getaffinity` | legge CPU mask → stub 1 CPU |
+| 143 | `sched_get_priority_max` | → return 0 |
+| 145 | `sched_get_priority_min` | → return 0 |
+| 165 | `getrusage` | statistiche CPU → struct zeroed |
+| 166 | `umask` | → return 022, non tracciare |
+| 233 | `madvise` | hint memoria → return 0 |
+| 439 | `faccessat2` | = faccessat + flags extra → delega |
+
+#### Passthrough a syscall EnlilOS esistenti — ~30min
+| Nr | Nome | EnlilOS equiv |
+|---|---|---|
+| 49 | `chdir` | `sys_chdir` |
+| 129 | `kill` | `sys_kill` |
+| 130 | `tkill` | `sys_tgkill` |
+| 154 | `setpgid` | `sys_setpgid` |
+| 155 | `getpgrp` | `sys_getpgid(0)` |
+| 158 | `setsid` | `sys_setsid` |
+| 163 | `getrlimit` | `sys_prlimit64(0,res,NULL,old)` |
+| 164 | `setrlimit` | `sys_prlimit64(0,res,new,NULL)` |
+
+#### Medio — ~4-6h
+| Nr | Nome | Note |
+|---|---|---|
+| 103 | `setitimer` | `SIGALRM` per `read -t`; serve timer kernel per-task |
+| 216 | `mremap` | **critico**: glibc-malloc statico usa mremap per espandere heap; senza, malloc crasha presto |
+
+#### Oltre le syscall — requisiti aggiuntivi
+- **`/proc/self/exe`**: bash la usa per sapere dove sta → `M11-04` prerequisito
+- **`/proc/self/fd/`**: bash usa per info fd → `M11-04`
+- **`/dev/null`**, **`/dev/tty`**: devfs probabilmente ok
+- ELF loader → `SCHED_ABI_LINUX`: già presente
+
+#### Stima effort totale
+- Syscall stub + passthrough: ~3h
+- `mremap`: ~4h (nuova API `mmu_remap_user_region`)
+- `setitimer`: ~3h (timer per-task + SIGALRM delivery)
+- `/proc/self/exe` + `/proc/self/fd/`: ~2h (parte di M11-04)
+- Debug comportamento bash (prompt, job control, SIGCHLD): ~4-6h
+- **Totale: ~16-20h**. Blocco principale: `mremap` (senza di esso malloc non riesce a espandere → bash crasha subito).
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
