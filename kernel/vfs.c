@@ -1423,6 +1423,17 @@ int vfs_truncate(const char *path, uint64_t size)
     return mount->ops->truncate(mount, relpath_from_mount(mount, resolved), size);
 }
 
+/* Indirizzo minimo valido per un puntatore kernel (testo/dati kernel) */
+#define VFS_KERNEL_PTR_MIN  0x40000000UL
+#define VFS_KERNEL_PTR_MAX  0xC0000000UL
+
+/* Guard: il puntatore è in range kernel e allineato a 4 byte? */
+static int vfs_ptr_sane(const void *p)
+{
+    uintptr_t v = (uintptr_t)p;
+    return (v >= VFS_KERNEL_PTR_MIN) && (v < VFS_KERNEL_PTR_MAX) && ((v & 3U) == 0U);
+}
+
 int vfs_sync(void)
 {
     int first_err = 0;
@@ -1431,7 +1442,11 @@ int vfs_sync(void)
         const vfs_mount_t *mount = &vfs_mounts[i];
         int rc;
 
-        if (!mount->active || !mount->ops || !mount->ops->sync)
+        if (!mount->active)
+            continue;
+        if (!vfs_ptr_sane(mount->ops))
+            continue;
+        if (!vfs_ptr_sane((const void *)mount->ops->sync))
             continue;
 
         rc = mount->ops->sync(mount);

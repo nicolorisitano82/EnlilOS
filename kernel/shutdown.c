@@ -2,13 +2,20 @@
  * EnlilOS — Graceful system shutdown (kernel-side)
  *
  * Sequenza:
- *  1. SIGTERM a tutti i task user-space non kernel/idle
- *  2. Aspetta che terminino (timeout 2 s con sched_yield)
- *  3. SIGKILL ai superstiti
- *  4. vfs_sync() — journal commit ext4 + sync tutti i mount
- *  5. blk_flush_sync() — flush driver virtio-blk
+ *  1. vfs_sync() — journal commit ext4 + sync tutti i mount
+ *     (PRIMA di segnalare i task: stato kernel VFS ancora coerente)
+ *  2. blk_flush_sync() — flush driver virtio-blk
+ *  3. SIGTERM a tutti i task user-space non kernel/idle
+ *  4. Aspetta che terminino (timeout 2 s con sched_yield)
+ *  5. SIGKILL ai superstiti
  *  6. Disabilita IRQ globalmente
  *  7. PSCI SYSTEM_OFF / SYSTEM_RESET / WFE halt
+ *
+ * NOTA: vfs_sync + blk_flush devono essere i PRIMI passi, non gli ultimi.
+ * Se prima facciamo sched_yield() per aspettare i task, i task user-space
+ * (vfsd, blkd, nsd) possono modificare lo stato kernel VFS. Alla fine,
+ * alcuni mount possono avere ops->sync corrotti (puntatore non-NULL ma
+ * invalido) → PC alignment fault.
  */
 
 #include "shutdown.h"
@@ -56,11 +63,23 @@ void shutdown_system(int cmd)
 {
     uart_puts("\n[shutdown] Avvio sequenza di spegnimento...\n");
 
-    /* 1. SIGTERM a tutti i task user */
+    /* 1. Flush filesystem PRIMA di toccare i task user-space.
+     * Stato kernel VFS ancora coerente a questo punto: nessun task
+     * è stato ancora segnalato, nessun sched_yield() ancora fatto. */
+    uart_puts("[shutdown] vfs_sync()...\n");
+    (void)vfs_sync();
+
+    /* 2. Flush driver block device (blkd ancora vivo) */
+    if (blk_is_ready()) {
+        uart_puts("[shutdown] blk_flush_sync()...\n");
+        (void)blk_flush_sync();
+    }
+
+    /* 3. SIGTERM a tutti i task user */
     uart_puts("[shutdown] SIGTERM a tutti i task user-space\n");
     signal_all_user(SIGTERM);
 
-    /* 2. Aspetta fino a 2 s che terminino */
+    /* 4. Aspetta fino a 2 s che terminino */
     {
         uint64_t deadline = timer_now_ms() + 2000ULL;
 
@@ -68,7 +87,7 @@ void shutdown_system(int cmd)
             sched_yield();
     }
 
-    /* 3. SIGKILL ai superstiti */
+    /* 5. SIGKILL ai superstiti */
     if (count_user_alive() > 0U) {
         uart_puts("[shutdown] SIGKILL ai task rimasti\n");
         signal_all_user(SIGKILL);
@@ -76,16 +95,6 @@ void shutdown_system(int cmd)
         uint64_t deadline = timer_now_ms() + 500ULL;
         while (timer_now_ms() < deadline && count_user_alive() > 0U)
             sched_yield();
-    }
-
-    /* 4. Flush filesystem: journal commit ext4 + sync tutti i mount */
-    uart_puts("[shutdown] vfs_sync()...\n");
-    (void)vfs_sync();
-
-    /* 5. Flush driver block device */
-    if (blk_is_ready()) {
-        uart_puts("[shutdown] blk_flush_sync()...\n");
-        (void)blk_flush_sync();
     }
 
     /* 6. Disabilita IRQ */
