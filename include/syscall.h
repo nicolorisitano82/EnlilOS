@@ -123,6 +123,7 @@
 #define SYS_PORT_LOOKUP     140
 #define SYS_IPC_WAIT        141
 #define SYS_IPC_REPLY       142
+#define SYS_IPC_POLL        143
 
 /* Bootstrap VFS backend per vfsd (M9-02 v1) */
 #define SYS_VFS_BOOT_OPEN      150
@@ -178,6 +179,7 @@
 #define ENODEV              19
 #define ECHILD              10
 #define EAGAIN              11
+#define EACCES              13
 #define EINTR               4
 #define ENOMEM              12
 #define EFAULT              14
@@ -194,12 +196,14 @@
 #define EPIPE               32
 #define ERANGE              34
 #define ENAMETOOLONG        36
+#define ELOOP               40
 #define ENOTEMPTY           39
 #define EIO                 5
 #define ENOSYS              38
 #define ENOTTY              25
 #define ESPIPE              29
 #define ETIMEDOUT           110
+#define EINPROGRESS         115
 #define EOPNOTSUPP          95
 #define EAFNOSUPPORT        97
 #define EADDRINUSE          98
@@ -358,6 +362,8 @@ typedef struct {
 #define S_IFREG     0100000U
 #define S_IFDIR     0040000U
 #define S_IFCHR     0020000U
+#define S_IFLNK     0120000U
+#define S_IFSOCK    0140000U
 
 #define S_IRUSR     0400U
 #define S_IWUSR     0200U
@@ -422,6 +428,7 @@ typedef struct {
 
 void syscall_init(void);
 void syscall_dispatch(exception_frame_t *frame);
+int  syscall_describe_fd_current(int fd, char *out, size_t cap);
 
 extern syscall_entry_t syscall_table[SYSCALL_MAX];
 

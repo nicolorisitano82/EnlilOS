@@ -8,7 +8,7 @@
  *   IPv4  (static IP 10.0.2.15/24, no fragmentation)
  *   ICMP  Echo Reply
  *   UDP   (4 sockets, bind + send + recv callback)
- *   TCP   (4 connections, passive open, PSH+ACK, FIN+ACK)
+ *   TCP   (4 connections, passive open + active connect, PSH+ACK, FIN+ACK)
  *
  * Static config matches QEMU SLIRP defaults.
  */
@@ -35,12 +35,13 @@ typedef unsigned int       ns_u32;
 /* ── TCP connection states ───────────────────────────────── */
 #define NS_TCP_CLOSED       0
 #define NS_TCP_LISTEN       1
-#define NS_TCP_SYN_RCVD     2
-#define NS_TCP_ESTABLISHED  3
-#define NS_TCP_FIN_WAIT_1   4
-#define NS_TCP_FIN_WAIT_2   5
-#define NS_TCP_CLOSE_WAIT   6
-#define NS_TCP_LAST_ACK     7
+#define NS_TCP_SYN_SENT     2
+#define NS_TCP_SYN_RCVD     3
+#define NS_TCP_ESTABLISHED  4
+#define NS_TCP_FIN_WAIT_1   5
+#define NS_TCP_FIN_WAIT_2   6
+#define NS_TCP_CLOSE_WAIT   7
+#define NS_TCP_LAST_ACK     8
 
 /* ── Stats ───────────────────────────────────────────────── */
 typedef struct {
@@ -73,6 +74,17 @@ typedef void (*tcp_closed_cb)(int conn);
 /* Raw Ethernet output function provided by netd */
 typedef void (*net_output_fn)(const ns_u8 *frame, ns_u32 len);
 
+typedef struct {
+    ns_u8  state;
+    ns_u8  peer_closed;
+    ns_u16 local_port;
+    ns_u16 remote_port;
+    ns_u16 rx_len;
+    ns_u32 local_ip;
+    ns_u32 remote_ip;
+    int    so_error;
+} net_stack_tcp_info_t;
+
 /* ── Public API ──────────────────────────────────────────── */
 
 /* Initialise stack. Must be called once with our MAC and output hook. */
@@ -103,10 +115,23 @@ int  net_stack_udp_send(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 src_port,
 int  net_stack_tcp_listen(ns_u16 port, tcp_data_cb data_cb,
                            tcp_closed_cb closed_cb);
 
+/* Active TCP connect; local_port=0 => ephemeral allocation. */
+int  net_stack_tcp_connect(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 local_port,
+                           tcp_data_cb data_cb, tcp_closed_cb closed_cb);
+
 /* Send data on an ESTABLISHED connection; returns bytes sent or -1. */
 int  net_stack_tcp_send(int conn, const ns_u8 *data, ns_u16 len);
 
+/* Receive buffered data on a TCP connection; returns bytes, 0 on EOF, -1 if empty. */
+int  net_stack_tcp_recv(int conn, ns_u8 *buf, ns_u16 maxlen);
+
+/* Copy current connection info; returns 0 or -1 if conn invalid. */
+int  net_stack_tcp_info(int conn, net_stack_tcp_info_t *out);
+
 /* Initiate graceful close (send FIN). */
 void net_stack_tcp_close(int conn);
+
+/* Release a closed connection slot retained for userspace inspection. */
+void net_stack_tcp_release(int conn);
 
 #endif /* ENLILOS_NET_STACK_H */

@@ -42,6 +42,8 @@ typedef enum {
     VFSD_REQ_LSEEK = 14,
 } vfsd_req_op_t;
 
+#define VFSD_RESP_FLAG_LINUX_COMPAT   0x00000001U
+
 typedef struct {
     uint32_t pid;
     uint32_t tgid;

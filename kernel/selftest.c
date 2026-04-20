@@ -1959,6 +1959,228 @@ static int selftest_case_procfs(void)
     return 0;
 }
 
+static int selftest_case_linux_proc_dev_etc(void)
+{
+    static const char case_name[] = "linux-proc-dev-etc";
+    static char       buf[512];
+    static uint8_t    zbuf[32];
+    static uint8_t    rbuf[32];
+    vfs_file_t        file;
+    ssize_t           n;
+    int               rc;
+
+    rc = vfs_open("/proc/version", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/version fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /proc/version vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "Linux version"),
+             "/proc/version inattesa");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/proc/meminfo", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/meminfo fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /proc/meminfo vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "MemTotal:"),
+             "/proc/meminfo senza MemTotal");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/proc/cpuinfo", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/cpuinfo fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /proc/cpuinfo vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "processor"),
+             "/proc/cpuinfo senza processor");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/proc/self/cmdline", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/self/cmdline fallita");
+    n = vfs_read(&file, buf, sizeof(buf));
+    ST_CHECK(case_name, n > 0, "read /proc/self/cmdline vuota");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/proc/self/environ", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/self/environ fallita");
+    n = vfs_read(&file, buf, sizeof(buf));
+    ST_CHECK(case_name, n > 0, "read /proc/self/environ vuota");
+    (void)vfs_close(&file);
+
+    rc = vfs_readlink("/proc/self/fd/1", buf, sizeof(buf));
+    ST_CHECK(case_name, rc == 0, "readlink /proc/self/fd/1 fallita");
+    ST_CHECK(case_name, st_contains(buf, "/dev/stdout") || st_contains(buf, "/dev/tty"),
+             "target /proc/self/fd/1 inatteso");
+    rc = vfs_open("/proc/self/fd/1", O_WRONLY, &file);
+    ST_CHECK(case_name, rc == 0, "follow open /proc/self/fd/1 fallita");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/dev/zero", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /dev/zero fallita");
+    n = vfs_read(&file, zbuf, sizeof(zbuf));
+    ST_CHECK(case_name, n == (ssize_t)sizeof(zbuf), "read /dev/zero corta");
+    for (size_t i = 0U; i < sizeof(zbuf); i++)
+        ST_CHECK(case_name, zbuf[i] == 0U, "/dev/zero non restituisce zeri");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/dev/urandom", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /dev/urandom fallita");
+    n = vfs_read(&file, rbuf, sizeof(rbuf));
+    ST_CHECK(case_name, n == (ssize_t)sizeof(rbuf), "read /dev/urandom corta");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/etc/passwd", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/passwd fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /etc/passwd vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "root:x:0:0:"),
+             "/etc/passwd inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_open("/etc/os-release", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/os-release fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /etc/os-release vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "ID=enlilos"),
+             "/etc/os-release inatteso");
+    (void)vfs_close(&file);
+
+    ST_CHECK(case_name, vfs_path_is_linux_compat("/usr/bin/bash") == 1,
+             "/usr non marcato linux_compat");
+    ST_CHECK(case_name, vfs_path_is_linux_compat("/lib/ld-linux-aarch64.so.1") == 1,
+             "/lib non marcato linux_compat");
+    ST_CHECK(case_name, vfs_path_is_linux_compat("/bin/sh") == 1,
+             "/bin/sh non marcato linux_compat");
+
+    return 0;
+}
+
+static int selftest_case_linux_at_paths(void)
+{
+    static const char case_name[] = "linux-at-paths";
+    static const char target_name[] = "TARGET.TXT";
+    static const char dir_target_name[] = "SUBDIR";
+    static const char payload[] = "linux-at-ok\n";
+    static const char nested_payload[] = "linux-dir-link-ok\n";
+    static char       linkbuf[64];
+    static char       readbuf[64];
+    vfs_file_t        file;
+    stat_t            st;
+    ssize_t           n;
+    int               rc;
+
+    if (!blk_is_ready() || !ext4_is_mounted())
+        return 0;
+
+    (void)vfs_unlink("/data/LNXAT.DIR/LINK");
+    (void)vfs_unlink("/data/LNXAT.DIR/LINKDIR");
+    (void)vfs_unlink("/data/LNXAT.DIR/LINKCREATE");
+    (void)vfs_unlink("/data/LNXAT.DIR/CREATED.TXT");
+    (void)vfs_unlink("/data/LNXAT.DIR/SUBDIR/NESTED.TXT");
+    (void)vfs_unlink("/data/LNXAT.DIR/SUBDIR");
+    (void)vfs_unlink("/data/LNXAT.DIR/TARGET.TXT");
+    (void)vfs_unlink("/data/LNXAT.DIR");
+
+    rc = vfs_mkdir("/data/LNXAT.DIR", 0755U);
+    ST_CHECK(case_name, rc == 0, "mkdir /data/LNXAT.DIR fallita");
+
+    rc = vfs_open("/data/LNXAT.DIR/TARGET.TXT", O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open target file fallita");
+    n = vfs_write(&file, payload, st_strlen(payload));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(payload), "write target file corta");
+    (void)vfs_close(&file);
+
+    rc = vfs_symlink(target_name, "/data/LNXAT.DIR/LINK");
+    ST_CHECK(case_name, rc == 0, "symlink LINK -> TARGET.TXT fallita");
+
+    rc = vfs_open("/data/LNXAT.DIR/LINK", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open tramite symlink finale fallita");
+    n = vfs_read(&file, readbuf, sizeof(readbuf) - 1U);
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(payload),
+             "read tramite symlink finale corta");
+    readbuf[n] = '\0';
+    ST_CHECK(case_name, st_streq(readbuf, payload),
+             "payload tramite symlink finale inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_mkdir("/data/LNXAT.DIR/SUBDIR", 0755U);
+    ST_CHECK(case_name, rc == 0, "mkdir SUBDIR fallita");
+    rc = vfs_open("/data/LNXAT.DIR/SUBDIR/NESTED.TXT",
+                  O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open nested file fallita");
+    n = vfs_write(&file, nested_payload, st_strlen(nested_payload));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(nested_payload),
+             "write nested file corta");
+    (void)vfs_close(&file);
+
+    rc = vfs_symlink(dir_target_name, "/data/LNXAT.DIR/LINKDIR");
+    ST_CHECK(case_name, rc == 0, "symlink LINKDIR -> SUBDIR fallita");
+    rc = vfs_open("/data/LNXAT.DIR/LINKDIR/NESTED.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open tramite symlink di directory fallita");
+    n = vfs_read(&file, readbuf, sizeof(readbuf) - 1U);
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(nested_payload),
+             "read tramite symlink di directory corta");
+    readbuf[n] = '\0';
+    ST_CHECK(case_name, st_streq(readbuf, nested_payload),
+             "payload tramite symlink di directory inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_symlink("CREATED.TXT", "/data/LNXAT.DIR/LINKCREATE");
+    ST_CHECK(case_name, rc == 0, "symlink LINKCREATE -> CREATED.TXT fallita");
+    rc = vfs_open("/data/LNXAT.DIR/LINKCREATE", O_WRONLY | O_CREAT | O_TRUNC, &file);
+    ST_CHECK(case_name, rc == 0, "open O_CREAT tramite symlink finale fallita");
+    n = vfs_write(&file, payload, st_strlen(payload));
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(payload),
+             "write O_CREAT tramite symlink finale corta");
+    (void)vfs_close(&file);
+    rc = vfs_open("/data/LNXAT.DIR/CREATED.TXT", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "target creato tramite symlink non trovato");
+    n = vfs_read(&file, readbuf, sizeof(readbuf) - 1U);
+    ST_CHECK(case_name, n == (ssize_t)st_strlen(payload),
+             "read target creato tramite symlink corta");
+    readbuf[n] = '\0';
+    ST_CHECK(case_name, st_streq(readbuf, payload),
+             "payload target creato tramite symlink inatteso");
+    (void)vfs_close(&file);
+
+    rc = vfs_readlink("/data/LNXAT.DIR/LINK", linkbuf, sizeof(linkbuf));
+    ST_CHECK(case_name, rc == 0, "readlink LINK fallita");
+    ST_CHECK(case_name, st_streq(linkbuf, target_name),
+             "target readlink inatteso");
+
+    rc = vfs_lstat("/data/LNXAT.DIR/LINK", &st);
+    ST_CHECK(case_name, rc == 0, "lstat LINK fallita");
+    ST_CHECK(case_name, (st.st_mode & S_IFMT) == S_IFLNK,
+             "LINK non risulta symlink");
+    ST_CHECK(case_name, st.st_size == (uint64_t)st_strlen(target_name),
+             "size symlink inattesa");
+
+    rc = vfs_unlink("/data/LNXAT.DIR");
+    ST_CHECK(case_name, rc == -ENOTEMPTY,
+             "unlink dir non-vuota non ritorna ENOTEMPTY");
+
+    rc = vfs_unlink("/data/LNXAT.DIR/LINK");
+    ST_CHECK(case_name, rc == 0, "unlink LINK fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/LINKDIR");
+    ST_CHECK(case_name, rc == 0, "unlink LINKDIR fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/LINKCREATE");
+    ST_CHECK(case_name, rc == 0, "unlink LINKCREATE fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/CREATED.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink CREATED.TXT fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/SUBDIR/NESTED.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink NESTED.TXT fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/SUBDIR");
+    ST_CHECK(case_name, rc == 0, "unlink SUBDIR fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/TARGET.TXT");
+    ST_CHECK(case_name, rc == 0, "unlink TARGET.TXT fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR");
+    ST_CHECK(case_name, rc == 0, "unlink dir vuota fallita");
+    return 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * mmap-file (M8-02) — mmap() file-backed: MAP_PRIVATE + MAP_SHARED
  *
@@ -2276,6 +2498,8 @@ static const selftest_case_t selftest_cases[] = {
     { "kdebug-core", kdebug_selftest_run     },
     { "gpu-stack",   gpu_selftest_run        },
     { "procfs-core", selftest_case_procfs    },
+    { "linux-proc-dev-etc", selftest_case_linux_proc_dev_etc },
+    { "linux-at-paths", selftest_case_linux_at_paths },
     { "mmap-file",   selftest_case_mmap_file },
     { "tls-tp",      selftest_case_tls_tp   },
     { "crt-startup", selftest_case_crt_startup },

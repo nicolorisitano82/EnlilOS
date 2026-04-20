@@ -286,6 +286,19 @@ static void tty_pump_input(void)
         tty_handle_input_char((uint8_t)c);
 }
 
+void tty_poll_input(void)
+{
+    tty_pump_input();
+}
+
+int tty_has_input(void)
+{
+    tty_pump_input();
+    if (tty_eof_pending && tty_ready_empty())
+        return 1;
+    return tty_ready_empty() ? 0 : 1;
+}
+
 void tty_init(void)
 {
     tty_edit_len = 0U;

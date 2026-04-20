@@ -51,6 +51,11 @@
 #define SCHED_TICK_QUANTUM  10          /* ms di time slice per task     */
 #define TASK_STACK_ORDER    2           /* 16 KiB stack kernel per task  */
 #define TASK_STACK_SIZE     (4096U << TASK_STACK_ORDER)
+#define SCHED_EXEC_PATH_MAX 256U
+
+/* ── ABI mode per processo ───────────────────────────────────────── */
+#define SCHED_ABI_ENLILOS   0U
+#define SCHED_ABI_LINUX     1U
 
 /* ── Stati del TCB ──────────────────────────────────────────────── */
 #define TCB_STATE_RUNNING   0
@@ -215,6 +220,10 @@ uint32_t    sched_task_pgid(const sched_tcb_t *t);
 uint32_t    sched_task_sid(const sched_tcb_t *t);
 uint32_t    sched_task_proc_slot(const sched_tcb_t *t);
 uint32_t    sched_task_proc_refcount(const sched_tcb_t *t);
+uint32_t    sched_task_abi_mode(const sched_tcb_t *t);
+int         sched_task_set_abi_mode(sched_tcb_t *t, uint32_t abi_mode);
+const char *sched_task_exec_path(const sched_tcb_t *t);
+int         sched_task_set_exec_path(sched_tcb_t *t, const char *path);
 int         sched_task_is_thread(const sched_tcb_t *t);
 int         sched_task_is_process_waitable(const sched_tcb_t *t);
 int         sched_task_has_session(uint32_t sid);

@@ -597,6 +597,16 @@ static int ext4_inode_is_dir(const ext4_inode_t *inode)
     return (inode->i_mode & S_IFMT) == S_IFDIR;
 }
 
+static int ext4_inode_is_symlink(const ext4_inode_t *inode)
+{
+    return (inode->i_mode & S_IFMT) == S_IFLNK;
+}
+
+static int ext4_inode_is_fast_symlink(const ext4_inode_t *inode)
+{
+    return ext4_inode_is_symlink(inode) && ext4_inode_blocks(inode) == 0ULL;
+}
+
 static int ext4_inode_has_extents(const ext4_inode_t *inode)
 {
     return (inode->i_flags & EXT4_INODE_FLAG_EXTENTS) != 0U;
@@ -2199,6 +2209,7 @@ static uint8_t ext4_inode_file_type(const ext4_inode_t *inode)
     case S_IFREG: return EXT4_FT_REG_FILE;
     case S_IFDIR: return EXT4_FT_DIR;
     case S_IFCHR: return EXT4_FT_CHRDEV;
+    case S_IFLNK: return EXT4_FT_SYMLINK;
     default:      return EXT4_FT_UNKNOWN;
     }
 }
@@ -2568,6 +2579,7 @@ static uint32_t ext4_mode_from_ftype(uint8_t ft)
     case EXT4_FT_REG_FILE: return S_IFREG;
     case EXT4_FT_DIR:      return S_IFDIR;
     case EXT4_FT_CHRDEV:   return S_IFCHR;
+    case EXT4_FT_SYMLINK:  return S_IFLNK;
     default:               return 0U;
     }
 }
@@ -2796,6 +2808,58 @@ static int ext4_create_dir(const char *relpath, uint32_t mode)
     return ext4_mark_inode_dirty(parent_ino, &parent_inode);
 }
 
+static int ext4_create_symlink(const char *relpath, const char *target)
+{
+    ext4_inode_t parent_inode;
+    ext4_inode_t new_inode;
+    uint32_t     parent_ino;
+    uint32_t     new_ino;
+    size_t       target_len;
+    char         name[EXT4_NAME_MAX + 1];
+    int          rc;
+
+    if (!target)
+        return -EFAULT;
+
+    target_len = e_strlen(target);
+    if (target_len == 0U || target_len > sizeof(new_inode.i_block))
+        return -ENAMETOOLONG;
+
+    rc = ext4_lookup_parent_path(relpath, &parent_ino, &parent_inode, name, sizeof(name));
+    if (rc < 0) return rc;
+    if (!ext4_inode_is_dir(&parent_inode))
+        return -ENOTDIR;
+    if (ext4_lookup_child(parent_ino, &parent_inode, name, e_strlen(name), &new_ino, &new_inode) == 0)
+        return -EEXIST;
+
+    rc = ext4_alloc_inode_preferred((parent_ino - 1U) / g_ext4.inodes_per_group, 0, &new_ino);
+    if (rc < 0) return rc;
+
+    ext4_init_new_inode(&new_inode, (uint16_t)(S_IFLNK | 0777U), new_ino);
+    new_inode.i_flags = 0U;
+    new_inode.i_links_count = 1U;
+    e_memset(new_inode.i_block, 0U, sizeof(new_inode.i_block));
+    e_memcpy(new_inode.i_block, target, target_len);
+    ext4_inode_set_size(&new_inode, target_len);
+    new_inode.i_blocks_lo = 0U;
+    new_inode.i_blocks_high = 0U;
+
+    if (ext4_mark_inode_dirty(new_ino, &new_inode) < 0) {
+        (void)ext4_free_inode_bitmap(new_ino, 0);
+        return -EIO;
+    }
+
+    rc = ext4_dir_add_entry(parent_ino, &parent_inode, new_ino, EXT4_FT_SYMLINK,
+                            name, (uint16_t)e_strlen(name));
+    if (rc < 0) {
+        (void)ext4_free_inode_bitmap(new_ino, 0);
+        return rc;
+    }
+    if (ext4_mark_inode_dirty(parent_ino, &parent_inode) < 0)
+        return -EIO;
+    return 0;
+}
+
 static int ext4_remove_path(const char *relpath)
 {
     ext4_inode_t parent_inode;
@@ -2825,11 +2889,39 @@ static int ext4_remove_path(const char *relpath)
     child_inode.i_links_count = 0U;
     child_inode.i_mtime = child_inode.i_dtime;
     child_inode.i_ctime = child_inode.i_dtime;
-    rc = ext4_free_inode_all_blocks(&child_inode);
-    if (rc < 0) return rc;
+    if (!ext4_inode_is_fast_symlink(&child_inode)) {
+        rc = ext4_free_inode_all_blocks(&child_inode);
+        if (rc < 0) return rc;
+    }
     if (ext4_mark_inode_dirty(child_ino, &child_inode) < 0)
         return -EIO;
     return ext4_free_inode_bitmap(child_ino, ext4_inode_is_dir(&child_inode));
+}
+
+static int ext4_readlink_path(const char *relpath, char *out, size_t cap)
+{
+    ext4_inode_t inode;
+    uint32_t     ino;
+    size_t       len;
+    int          rc;
+
+    if (!out || cap < 2U)
+        return -EFAULT;
+
+    rc = ext4_lookup_path(relpath, &ino, &inode);
+    if (rc < 0)
+        return rc;
+    (void)ino;
+    if (!ext4_inode_is_symlink(&inode))
+        return -EINVAL;
+
+    len = (size_t)ext4_inode_size(&inode);
+    if (len > sizeof(inode.i_block) || len + 1U > cap)
+        return -ENAMETOOLONG;
+
+    e_memcpy(out, inode.i_block, len);
+    out[len] = '\0';
+    return 0;
 }
 
 static int ext4_rename_path(const char *old_relpath, const char *new_relpath)
@@ -3222,6 +3314,25 @@ static int ext4_stat_vfs(vfs_file_t *file, stat_t *out)
     return 0;
 }
 
+static int ext4_lstat_vfs(const vfs_mount_t *mount, const char *relpath, stat_t *out)
+{
+    ext4_inode_t inode;
+    uint32_t     ino;
+    int          rc;
+
+    (void)mount;
+    if (!out) return -EFAULT;
+    rc = ext4_lookup_path(relpath, &ino, &inode);
+    if (rc < 0) return rc;
+    (void)ino;
+
+    out->st_mode = inode.i_mode;
+    out->st_blksize = g_ext4.block_size;
+    out->st_size = ext4_inode_size(&inode);
+    out->st_blocks = ext4_inode_blocks(&inode);
+    return 0;
+}
+
 static int ext4_close_vfs(vfs_file_t *file)
 {
     uint32_t access;
@@ -3251,6 +3362,22 @@ static int ext4_unlink_vfs(const vfs_mount_t *mount, const char *relpath)
     if (ext4_internal_journal_path(relpath))
         return -EROFS;
     return ext4_remove_path(relpath);
+}
+
+static int ext4_symlink_vfs(const vfs_mount_t *mount, const char *target,
+                            const char *relpath)
+{
+    (void)mount;
+    if (ext4_internal_journal_path(relpath))
+        return -EROFS;
+    return ext4_create_symlink(relpath, target);
+}
+
+static int ext4_readlink_vfs(const vfs_mount_t *mount, const char *relpath,
+                             char *out, size_t cap)
+{
+    (void)mount;
+    return ext4_readlink_path(relpath, out, cap);
 }
 
 static int ext4_rename_vfs(const vfs_mount_t *old_mount, const char *old_relpath,
@@ -3297,9 +3424,12 @@ static const vfs_ops_t ext4_ops = {
     .write   = ext4_write_vfs,
     .readdir = ext4_readdir_vfs,
     .stat    = ext4_stat_vfs,
+    .lstat   = ext4_lstat_vfs,
     .close   = ext4_close_vfs,
     .mkdir   = ext4_mkdir_vfs,
     .unlink  = ext4_unlink_vfs,
+    .symlink = ext4_symlink_vfs,
+    .readlink = ext4_readlink_vfs,
     .rename  = ext4_rename_vfs,
     .fsync   = ext4_fsync_vfs,
     .truncate = ext4_truncate_vfs,

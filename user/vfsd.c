@@ -25,7 +25,8 @@ typedef unsigned char  u8;
 typedef struct {
     u8   active;
     u8   readonly;
-    u16  _pad0;
+    u8   linux_compat;
+    u8   _pad0;
     char mount_at[VFSD_PATH_BYTES];
     char backend[VFSD_PATH_BYTES];
 } vfsd_ns_mount_t;
@@ -49,6 +50,8 @@ typedef struct {
 static vfsd_namespace_t g_namespaces[VFSD_MAX_NAMESPACES];
 static vfsd_client_t    g_clients[VFSD_MAX_CLIENTS];
 static u32              g_next_ns_id = VFSD_ROOT_NS_ID + 1U;
+
+static int vfsd_boot_path_stat(const char *path, stat_t *st);
 
 static long sys_call1(long nr, long a0)
 {
@@ -441,6 +444,34 @@ static void vfsd_namespace_seed(vfsd_namespace_t *ns)
     ns->mounts[4].readonly = 0U;
     vfsd_strlcpy(ns->mounts[4].mount_at, "/sysroot", sizeof(ns->mounts[4].mount_at));
     vfsd_strlcpy(ns->mounts[4].backend, "/sysroot", sizeof(ns->mounts[4].backend));
+
+    ns->mounts[5].active = 1U;
+    ns->mounts[5].readonly = 1U;
+    ns->mounts[5].linux_compat = 1U;
+    vfsd_strlcpy(ns->mounts[5].mount_at, "/lib", sizeof(ns->mounts[5].mount_at));
+    vfsd_strlcpy(ns->mounts[5].backend, "/sysroot/lib", sizeof(ns->mounts[5].backend));
+
+    ns->mounts[6].active = 1U;
+    ns->mounts[6].readonly = 1U;
+    ns->mounts[6].linux_compat = 1U;
+    vfsd_strlcpy(ns->mounts[6].mount_at, "/usr", sizeof(ns->mounts[6].mount_at));
+    vfsd_strlcpy(ns->mounts[6].backend, "/sysroot/usr", sizeof(ns->mounts[6].backend));
+
+    ns->mounts[7].active = 1U;
+    ns->mounts[7].readonly = 0U;
+    vfsd_strlcpy(ns->mounts[7].mount_at, "/var", sizeof(ns->mounts[7].mount_at));
+    vfsd_strlcpy(ns->mounts[7].backend, "/data/var", sizeof(ns->mounts[7].backend));
+
+    ns->mounts[8].active = 1U;
+    ns->mounts[8].readonly = 0U;
+    vfsd_strlcpy(ns->mounts[8].mount_at, "/tmp", sizeof(ns->mounts[8].mount_at));
+    vfsd_strlcpy(ns->mounts[8].backend, "/data/tmp", sizeof(ns->mounts[8].backend));
+
+    ns->mounts[9].active = 1U;
+    ns->mounts[9].readonly = 1U;
+    ns->mounts[9].linux_compat = 1U;
+    vfsd_strlcpy(ns->mounts[9].mount_at, "/bin/sh", sizeof(ns->mounts[9].mount_at));
+    vfsd_strlcpy(ns->mounts[9].backend, "/sysroot/usr/bin/bash", sizeof(ns->mounts[9].backend));
 }
 
 static void vfsd_namespace_init(void)
@@ -514,8 +545,89 @@ static vfsd_ns_mount_t *vfsd_namespace_mount_best(vfsd_namespace_t *ns, const ch
     return best;
 }
 
+static vfsd_ns_mount_t *vfsd_namespace_mount_best_excluding(vfsd_namespace_t *ns,
+                                                            const char *path,
+                                                            const vfsd_ns_mount_t *exclude)
+{
+    vfsd_ns_mount_t *best = NULL;
+    u32              best_len = 0U;
+
+    if (!ns || !path)
+        return NULL;
+
+    for (u32 i = 0U; i < VFSD_MAX_NS_MOUNTS; i++) {
+        u32 len;
+
+        if (!ns->mounts[i].active || &ns->mounts[i] == exclude)
+            continue;
+        if (!vfsd_path_has_prefix(path, ns->mounts[i].mount_at))
+            continue;
+
+        len = vfsd_strlen(ns->mounts[i].mount_at);
+        if (!best || len > best_len) {
+            best = &ns->mounts[i];
+            best_len = len;
+        }
+    }
+
+    return best;
+}
+
+static int vfsd_namespace_mount_join(const vfsd_ns_mount_t *mount,
+                                     const char *virtual_path,
+                                     char *backend_out,
+                                     u8 *readonly_out,
+                                     u8 *linux_compat_out)
+{
+    const char *suffix;
+
+    if (!mount || !virtual_path || !backend_out)
+        return -EINVAL;
+
+    suffix = virtual_path;
+    if (!(mount->mount_at[0] == '/' && mount->mount_at[1] == '\0'))
+        suffix += vfsd_strlen(mount->mount_at);
+
+    if (vfsd_path_join(mount->backend, suffix, backend_out, VFSD_PATH_BYTES) < 0)
+        return -ENAMETOOLONG;
+    if (readonly_out)
+        *readonly_out = mount->readonly;
+    if (linux_compat_out)
+        *linux_compat_out = mount->linux_compat;
+    return 0;
+}
+
+static int vfsd_namespace_resolve_existing(vfsd_namespace_t *ns, const char *virtual_path,
+                                           char *backend_out, u8 *readonly_out,
+                                           u8 *linux_compat_out)
+{
+    vfsd_ns_mount_t *mount;
+    stat_t           st;
+    int              rc = -ENOENT;
+
+    if (!ns || !virtual_path || !backend_out)
+        return -EINVAL;
+
+    mount = vfsd_namespace_mount_best(ns, virtual_path);
+    while (mount) {
+        rc = vfsd_namespace_mount_join(mount, virtual_path, backend_out,
+                                       readonly_out, linux_compat_out);
+        if (rc < 0)
+            return rc;
+        if (!mount->linux_compat)
+            return 0;
+        rc = vfsd_boot_path_stat(backend_out, &st);
+        if (rc == 0)
+            return 0;
+        mount = vfsd_namespace_mount_best_excluding(ns, virtual_path, mount);
+    }
+
+    return rc;
+}
+
 static int vfsd_namespace_mount_add(vfsd_namespace_t *ns, const char *mount_at,
-                                    const char *backend, u8 readonly)
+                                    const char *backend, u8 readonly,
+                                    u8 linux_compat)
 {
     if (!ns || !mount_at || !backend)
         return -EINVAL;
@@ -527,6 +639,7 @@ static int vfsd_namespace_mount_add(vfsd_namespace_t *ns, const char *mount_at,
             continue;
         ns->mounts[i].active = 1U;
         ns->mounts[i].readonly = readonly;
+        ns->mounts[i].linux_compat = linux_compat;
         vfsd_strlcpy(ns->mounts[i].mount_at, mount_at, sizeof(ns->mounts[i].mount_at));
         vfsd_strlcpy(ns->mounts[i].backend, backend, sizeof(ns->mounts[i].backend));
         return 0;
@@ -560,10 +673,10 @@ static int vfsd_namespace_umount(vfsd_namespace_t *ns, const char *mount_at)
 }
 
 static int vfsd_namespace_resolve(vfsd_namespace_t *ns, const char *virtual_path,
-                                  char *backend_out, u8 *readonly_out)
+                                  char *backend_out, u8 *readonly_out,
+                                  u8 *linux_compat_out)
 {
     vfsd_ns_mount_t *mount;
-    const char      *suffix;
 
     if (!ns || !virtual_path || !backend_out)
         return -EINVAL;
@@ -571,16 +684,8 @@ static int vfsd_namespace_resolve(vfsd_namespace_t *ns, const char *virtual_path
     mount = vfsd_namespace_mount_best(ns, virtual_path);
     if (!mount)
         return -ENOENT;
-
-    suffix = virtual_path;
-    if (!(mount->mount_at[0] == '/' && mount->mount_at[1] == '\0'))
-        suffix += vfsd_strlen(mount->mount_at);
-
-    if (vfsd_path_join(mount->backend, suffix, backend_out, VFSD_PATH_BYTES) < 0)
-        return -ENAMETOOLONG;
-    if (readonly_out)
-        *readonly_out = mount->readonly;
-    return 0;
+    return vfsd_namespace_mount_join(mount, virtual_path, backend_out,
+                                     readonly_out, linux_compat_out);
 }
 
 static vfsd_client_t *vfsd_client_find(u32 tgid)
@@ -682,7 +787,7 @@ static int vfsd_client_backend_path(vfsd_client_t *client, const char *input,
     if (!ns)
         return -ENOENT;
 
-    return vfsd_namespace_resolve(ns, virtual_out, backend_out, NULL);
+    return vfsd_namespace_resolve(ns, virtual_out, backend_out, NULL, NULL);
 }
 
 static int vfsd_mount_backend_for(vfsd_client_t *client, u32 fs_type, const char *src,
@@ -748,8 +853,18 @@ static int vfsd_client_chdir(vfsd_client_t *client, const char *path)
     char   backend[VFSD_PATH_BYTES];
     stat_t st;
     int    rc;
+    vfsd_namespace_t *ns;
 
-    rc = vfsd_client_backend_path(client, path, virtual_path, backend);
+    if (!client)
+        return -EINVAL;
+
+    rc = vfsd_client_virtual_path(client, path, virtual_path);
+    if (rc < 0)
+        return rc;
+    ns = vfsd_namespace_find(client->ns_id);
+    if (!ns)
+        return -ENOENT;
+    rc = vfsd_namespace_resolve_existing(ns, virtual_path, backend, NULL, NULL);
     if (rc < 0)
         return rc;
 
@@ -791,7 +906,7 @@ static int vfsd_client_mount(vfsd_client_t *client, u32 fs_type, u32 flags,
     if (!ns)
         return -ENOENT;
 
-    return vfsd_namespace_mount_add(ns, target_virtual, backend, readonly);
+    return vfsd_namespace_mount_add(ns, target_virtual, backend, readonly, 0U);
 }
 
 static int vfsd_client_umount(vfsd_client_t *client, const char *path)
@@ -886,7 +1001,9 @@ static int vfsd_client_pivot_root(vfsd_client_t *client,
         return -EBUSY;
 
     vfsd_strlcpy(old_backend, root_mount->backend, sizeof(old_backend));
-    rc = vfsd_namespace_mount_add(ns, old_rebased, old_backend, root_mount->readonly);
+    rc = vfsd_namespace_mount_add(ns, old_rebased, old_backend,
+                                  root_mount->readonly,
+                                  root_mount->linux_compat);
     if (rc < 0)
         return rc;
 
@@ -967,9 +1084,24 @@ void _start(void)
         case VFSD_REQ_OPEN: {
             char backend[VFSD_PATH_BYTES];
             char virtual_path[VFSD_IO_BYTES];
+            vfsd_namespace_t *ns;
 
-            rc = vfsd_client_backend_path(client, req->u.paths.path,
-                                          virtual_path, backend);
+            rc = vfsd_client_virtual_path(client, req->u.paths.path, virtual_path);
+            if (rc < 0) {
+                resp.status = (int)rc;
+                break;
+            }
+            ns = vfsd_namespace_find(client->ns_id);
+            if (!ns) {
+                resp.status = -ENOENT;
+                break;
+            }
+            if ((req->flags & O_CREAT) != 0U) {
+                rc = vfsd_namespace_resolve(ns, virtual_path, backend, NULL, NULL);
+            } else {
+                rc = vfsd_namespace_resolve_existing(ns, virtual_path, backend,
+                                                     NULL, NULL);
+            }
             if (rc < 0) {
                 resp.status = (int)rc;
                 break;
@@ -1034,14 +1166,34 @@ void _start(void)
         case VFSD_REQ_RESOLVE: {
             char backend[VFSD_PATH_BYTES];
             char virtual_path[VFSD_IO_BYTES];
+            u8   linux_compat = 0U;
 
-            rc = vfsd_client_backend_path(client, req->u.paths.path,
-                                          virtual_path, backend);
+            if (vfsd_client_virtual_path(client, req->u.paths.path, virtual_path) < 0) {
+                resp.status = -ENAMETOOLONG;
+                break;
+            }
+            {
+                vfsd_namespace_t *ns = vfsd_namespace_find(client->ns_id);
+                if (!ns) {
+                    resp.status = -ENOENT;
+                    break;
+                }
+                rc = vfsd_namespace_resolve(ns, virtual_path, backend, NULL,
+                                            &linux_compat);
+            }
             if (rc < 0) {
                 resp.status = (int)rc;
                 break;
             }
-            (void)vfsd_client_respond_path(port_id, backend);
+            resp.status = 0;
+            resp.handle = linux_compat ? (int)VFSD_RESP_FLAG_LINUX_COMPAT : 0;
+            resp.data_len = vfsd_strlen(backend) + 1U;
+            if (resp.data_len > VFSD_IO_BYTES) {
+                resp.status = -ENAMETOOLONG;
+                break;
+            }
+            vfsd_memcpy(resp.u.data, backend, resp.data_len);
+            (void)sys_ipc_reply_msg(port_id, IPC_MSG_VFS_RESP, &resp, (u32)sizeof(resp));
             continue;
         }
         case VFSD_REQ_CHDIR:

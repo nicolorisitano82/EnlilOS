@@ -12,7 +12,7 @@
 #include "syscall.h"
 #include "types.h"
 
-#define VFS_MAX_MOUNTS   10U
+#define VFS_MAX_MOUNTS   16U
 #define VFS_NAME_MAX     32U
 
 typedef struct {
@@ -43,6 +43,12 @@ typedef struct {
     int     (*mkdir)(const struct vfs_mount *mount, const char *relpath,
                      uint32_t mode);
     int     (*unlink)(const struct vfs_mount *mount, const char *relpath);
+    int     (*symlink)(const struct vfs_mount *mount, const char *target,
+                       const char *relpath);
+    int     (*readlink)(const struct vfs_mount *mount, const char *relpath,
+                        char *out, size_t cap);
+    int     (*lstat)(const struct vfs_mount *mount, const char *relpath,
+                     stat_t *out);
     int     (*rename)(const struct vfs_mount *old_mount, const char *old_relpath,
                       const struct vfs_mount *new_mount, const char *new_relpath);
     int     (*fsync)(vfs_file_t *file);
@@ -54,6 +60,7 @@ typedef struct {
 typedef struct vfs_mount {
     bool             active;
     bool             readonly;
+    bool             linux_compat;
     const char      *path;
     const char      *name;
     const char      *fs_type;
@@ -72,9 +79,13 @@ int     vfs_stat(vfs_file_t *file, stat_t *out);
 int     vfs_close(vfs_file_t *file);
 int     vfs_mkdir(const char *path, uint32_t mode);
 int     vfs_unlink(const char *path);
+int     vfs_symlink(const char *target, const char *path);
+int     vfs_readlink(const char *path, char *out, size_t cap);
+int     vfs_lstat(const char *path, stat_t *out);
 int     vfs_rename(const char *old_path, const char *new_path);
 int     vfs_fsync(vfs_file_t *file);
 int     vfs_truncate(const char *path, uint64_t size);
 int     vfs_sync(void);
+int     vfs_path_is_linux_compat(const char *path);
 
 #endif /* ENLILOS_VFS_H */

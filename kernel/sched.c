@@ -72,7 +72,8 @@ typedef struct {
     uint8_t     in_use;
     uint8_t     waitable;
     uint8_t     group_exiting;
-    uint8_t     _pad0;
+    uint8_t     abi_mode;
+    char        exec_path[SCHED_EXEC_PATH_MAX];
 } sched_proc_ctx_t;
 
 static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
@@ -325,6 +326,7 @@ static int proc_alloc(mm_space_t *mm, uint32_t tgid, uint32_t parent_pid,
         proc->in_use    = 1U;
         proc->waitable  = 0U;
         proc->group_exiting = 0U;
+        proc->abi_mode  = SCHED_ABI_ENLILOS;
         return (int)i;
     }
 
@@ -1222,6 +1224,44 @@ uint32_t sched_task_proc_refcount(const sched_tcb_t *t)
 {
     sched_proc_ctx_t *proc = proc_of(t);
     return proc ? (uint32_t)proc->refcount : 0U;
+}
+
+uint32_t sched_task_abi_mode(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+    return proc ? (uint32_t)proc->abi_mode : (uint32_t)SCHED_ABI_ENLILOS;
+}
+
+int sched_task_set_abi_mode(sched_tcb_t *t, uint32_t abi_mode)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+
+    if (!proc)
+        return -1;
+    if (abi_mode != SCHED_ABI_ENLILOS && abi_mode != SCHED_ABI_LINUX)
+        return -1;
+
+    proc->abi_mode = (uint8_t)abi_mode;
+    return 0;
+}
+
+const char *sched_task_exec_path(const sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+
+    if (!proc || proc->exec_path[0] == '\0')
+        return NULL;
+    return proc->exec_path;
+}
+
+int sched_task_set_exec_path(sched_tcb_t *t, const char *path)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+
+    if (!proc)
+        return -1;
+    sched_strlcpy(proc->exec_path, path ? path : "", sizeof(proc->exec_path));
+    return 0;
 }
 
 int sched_task_is_thread(const sched_tcb_t *t)

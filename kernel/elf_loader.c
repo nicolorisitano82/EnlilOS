@@ -2006,6 +2006,12 @@ int elf64_spawn_path(const char *path, const char *argv0,
         return -1;
     }
 
+    (void)sched_task_set_abi_mode(task,
+                                  vfs_path_is_linux_compat(path)
+                                      ? SCHED_ABI_LINUX
+                                      : SCHED_ABI_ENLILOS);
+    (void)sched_task_set_exec_path(task, path);
+
     if (pid_out) *pid_out = task->pid;
     return 0;
 }

@@ -24,6 +24,7 @@
 #include "uart.h"
 
 #define VNET_F_MAC_NUM       5U
+#define VNET_F_MRG_RXBUF_NUM 15U
 #define VNET_F_STATUS_NUM    16U
 
 #define VNET_S_LINK_UP       1U
@@ -52,6 +53,7 @@ typedef struct __attribute__((packed)) {
     uint16_t gso_size;
     uint16_t csum_start;
     uint16_t csum_offset;
+    uint16_t num_buffers;
 } vnet_hdr_t;
 
 typedef struct {
@@ -68,8 +70,8 @@ static uint8_t tx_dma[NET_TX_QUEUE_DEPTH][sizeof(vnet_hdr_t) + NET_FRAME_MAX]
     __attribute__((aligned(64)));
 
 static net_frame_t net_rx_ring[NET_RX_RING_SIZE];
-static uint8_t     net_rx_head;
-static uint8_t     net_rx_tail;
+static volatile uint8_t net_rx_head;
+static volatile uint8_t net_rx_tail;
 
 #define RX_DESC  ((vring_desc_t *)(rx_vq_mem + 0))
 #define RX_AVAIL ((vnet_avail_t *)(rx_vq_mem + 256))
@@ -83,12 +85,29 @@ static uintptr_t net_base;
 static uint32_t  net_irq;
 static uint16_t  rx_queue_size;
 static uint16_t  tx_queue_size;
-static uint16_t  rx_next_avail;
-static uint16_t  rx_last_used;
-static uint16_t  tx_next_avail;
-static uint16_t  tx_last_used;
+static volatile uint16_t rx_next_avail;
+static volatile uint16_t rx_last_used;
+static volatile uint16_t tx_next_avail;
+static volatile uint16_t tx_last_used;
 static uint8_t   tx_inflight[NET_TX_QUEUE_DEPTH];
 static net_info_t net_info;
+
+static inline uint64_t net_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile(
+        "mrs %0, daif\n"
+        "msr daifset, #2\n"
+        : "=r"(flags)
+        :
+        : "memory");
+    return flags;
+}
+
+static inline void net_irq_restore(uint64_t flags)
+{
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+}
 
 static inline int net_rx_ring_empty(void)
 {
@@ -97,7 +116,7 @@ static inline int net_rx_ring_empty(void)
 
 static inline int net_rx_ring_full(void)
 {
-    return (uint8_t)(net_rx_head + 1U) == net_rx_tail;
+    return (uint8_t)((net_rx_head + 1U) % NET_RX_RING_SIZE) == net_rx_tail;
 }
 
 static void net_rx_ring_push(const uint8_t *buf, uint16_t len)
@@ -110,12 +129,12 @@ static void net_rx_ring_push(const uint8_t *buf, uint16_t len)
         return;
     }
 
-    net_rx_ring[net_rx_head].len = len;
+    net_rx_ring[net_rx_head % NET_RX_RING_SIZE].len = len;
     for (uint16_t i = 0U; i < len; i++)
-        net_rx_ring[net_rx_head].data[i] = buf[i];
+        net_rx_ring[net_rx_head % NET_RX_RING_SIZE].data[i] = buf[i];
 
     __asm__ volatile("dmb sy" ::: "memory");
-    net_rx_head++;
+    net_rx_head = (uint8_t)((net_rx_head + 1U) % NET_RX_RING_SIZE);
     net_info.rx_packets++;
 }
 
@@ -127,15 +146,15 @@ static int net_rx_ring_pop(void *buf, uint32_t maxlen)
     if (!buf || maxlen == 0U || net_rx_ring_empty())
         return 0;
 
-    len = net_rx_ring[net_rx_tail].len;
+    len = net_rx_ring[net_rx_tail % NET_RX_RING_SIZE].len;
     if (len > maxlen)
         len = (uint16_t)maxlen;
 
     for (uint16_t i = 0U; i < len; i++)
-        dst[i] = net_rx_ring[net_rx_tail].data[i];
+        dst[i] = net_rx_ring[net_rx_tail % NET_RX_RING_SIZE].data[i];
 
     __asm__ volatile("dmb sy" ::: "memory");
-    net_rx_tail++;
+    net_rx_tail = (uint8_t)((net_rx_tail + 1U) % NET_RX_RING_SIZE);
     return (int)len;
 }
 
@@ -184,6 +203,18 @@ static void net_print_mac(const uint8_t mac[6])
         if (i != 5U)
             uart_putc(':');
     }
+}
+
+static uint16_t net_ethertype(const uint8_t *frame, uint16_t len)
+{
+    if (!frame || len < 14U)
+        return 0U;
+    return (uint16_t)(((uint16_t)frame[12] << 8) | frame[13]);
+}
+
+static int net_ethertype_supported(uint16_t proto)
+{
+    return proto == 0x0800U || proto == 0x0806U || proto == 0x86DDU;
 }
 
 static uintptr_t net_find_device(void)
@@ -291,16 +322,41 @@ static void net_drain_rx_used(void)
         uint32_t total_len = elem.len;
 
         if (desc_id < rx_queue_size) {
+            uint16_t       hdr_len = (uint16_t)sizeof(vnet_hdr_t);
+            uint16_t       payload_len;
+            const uint8_t *payload;
+
             if (total_len > (uint32_t)(sizeof(vnet_hdr_t) + NET_FRAME_MAX))
                 total_len = (uint32_t)(sizeof(vnet_hdr_t) + NET_FRAME_MAX);
             if (total_len > sizeof(vnet_hdr_t)) {
-                uint16_t payload_len = (uint16_t)(total_len - sizeof(vnet_hdr_t));
+                cache_invalidate_range((uintptr_t)rx_dma[desc_id], total_len);
+
+                payload_len = (uint16_t)(total_len - hdr_len);
+                payload = &rx_dma[desc_id][hdr_len];
+
+                /*
+                 * Alcune combinazioni QEMU/virtio-net consegnano ancora RX con
+                 * header base da 10 byte anche quando il TX usa 12 byte.
+                 * Se il frame risultante non assomiglia a Ethernet ma lo fa
+                 * spostando l'offset indietro di 2 byte, accettiamo il layout
+                 * alternativo e consegniamo il frame corretto allo stack.
+                 */
+                if (!net_ethertype_supported(net_ethertype(payload, payload_len)) &&
+                    total_len > (uint32_t)(sizeof(vnet_hdr_t) - sizeof(uint16_t))) {
+                    uint16_t       alt_hdr_len = (uint16_t)(sizeof(vnet_hdr_t) - sizeof(uint16_t));
+                    uint16_t       alt_payload_len = (uint16_t)(total_len - alt_hdr_len);
+                    const uint8_t *alt_payload = &rx_dma[desc_id][alt_hdr_len];
+
+                    if (net_ethertype_supported(net_ethertype(alt_payload, alt_payload_len))) {
+                        payload = alt_payload;
+                        payload_len = alt_payload_len;
+                    }
+                }
 
                 if (payload_len > NET_FRAME_MAX)
                     payload_len = NET_FRAME_MAX;
 
-                cache_invalidate_range((uintptr_t)rx_dma[desc_id], total_len);
-                net_rx_ring_push(&rx_dma[desc_id][sizeof(vnet_hdr_t)], payload_len);
+                net_rx_ring_push(payload, payload_len);
             } else {
                 net_info.rx_drops++;
             }
@@ -352,6 +408,8 @@ static int net_transport_init(void)
         drv0 |= (1U << VNET_F_MAC_NUM);
         net_info.has_mac = 1U;
     }
+    if (dev0 & (1U << VNET_F_MRG_RXBUF_NUM))
+        drv0 |= (1U << VNET_F_MRG_RXBUF_NUM);
     if (dev0 & (1U << VNET_F_STATUS_NUM)) {
         drv0 |= (1U << VNET_F_STATUS_NUM);
         net_info.has_status = 1U;
@@ -497,17 +555,24 @@ int net_get_info(net_info_t *out)
 
 int net_recv(void *buf, uint32_t maxlen)
 {
+    uint64_t flags;
+    int      rc;
+
     if (!net_base)
         return NET_ERR_NOT_READY;
     if (!buf || maxlen == 0U)
         return NET_ERR_RANGE;
 
+    flags = net_irq_save();
     net_drain_queues();
-    return net_rx_ring_pop(buf, maxlen);
+    rc = net_rx_ring_pop(buf, maxlen);
+    net_irq_restore(flags);
+    return rc;
 }
 
 int net_send(const void *buf, uint32_t len)
 {
+    uint64_t flags;
     uint16_t slot = 0xFFFFU;
     uint32_t timeout = NET_TX_TIMEOUT;
     uint8_t *dst;
@@ -518,6 +583,7 @@ int net_send(const void *buf, uint32_t len)
     if (!buf || len == 0U || len > NET_FRAME_MAX)
         return NET_ERR_RANGE;
 
+    flags = net_irq_save();
     net_drain_queues();
 
     for (uint16_t i = 0U; i < tx_queue_size; i++) {
@@ -527,7 +593,7 @@ int net_send(const void *buf, uint32_t len)
         }
     }
     if (slot == 0xFFFFU)
-        return NET_ERR_BUSY;
+        goto busy_out;
 
     dst = tx_dma[slot];
     frame_len = (len < 60U) ? 60U : len;
@@ -558,11 +624,20 @@ int net_send(const void *buf, uint32_t len)
     while (timeout-- > 0U) {
         net_drain_queues();
         if (!tx_inflight[slot])
-            return NET_OK;
+            goto ok_out;
     }
 
     net_info.tx_errors++;
+    net_irq_restore(flags);
     return NET_ERR_TIMEOUT;
+
+busy_out:
+    net_irq_restore(flags);
+    return NET_ERR_BUSY;
+
+ok_out:
+    net_irq_restore(flags);
+    return NET_OK;
 }
 
 int net_selftest_run(void)

@@ -198,7 +198,7 @@ static void boot_launch_netd(void)
         return;
     }
 
-    if (elf64_spawn_path("/NETD.ELF", "/NETD.ELF", PRIO_NORMAL, &pid) < 0) {
+    if (elf64_spawn_path("/NETD.ELF", "/NETD.ELF", PRIO_HIGH, &pid) < 0) {
         uart_puts("[NETD] Spawn fallita, networking resta kernel-side\n");
         return;
     }

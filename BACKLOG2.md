@@ -1728,17 +1728,22 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 
 ---
 
-### ⬜ M11-05 · Linux AArch64 Compatibility Layer
+### ⏳ M11-05 · Linux AArch64 Compatibility Layer
 **Priorità:** ALTA
 
-> **Vantaggio strutturale unico:** EnlilOS usa già l'ABI syscall Linux AArch64 —
-> stessi numeri, stessa convenzione (`svc #0`, nr in `x8`, args in `x0–x5`, ret in `x0`).
-> Non serve una tabella di traduzione come per Mach-O (M11-04).
-> Il layer di compatibilità Linux è principalmente:
-> 1. Completare le syscall Linux non ancora implementate
-> 2. Fornire `ld-linux-aarch64.so.1` per i binari dinamici
-> 3. Simulare il filesystem `/proc`, `/sys`, `/dev` che Linux glibc si aspetta
-> 4. Gestire le differenze semantiche minori (clone flags, ioctl, ecc.)
+> **Stato reale attuale:** la base Linux compat è già avviata.
+> EnlilOS ha oggi:
+> 1. una tabella syscall Linux AArch64 separata da quella nativa
+> 2. selezione ABI per-task (`ENLILOS` vs `LINUX`)
+> 3. primo layer filesystem compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`)
+> 4. un subset ampio di syscall Linux già funzionanti
+>
+> Il lavoro residuo non è più “iniziare la compatibilità”, ma chiudere:
+> - gli ultimi gap syscall reali (`M11-05a`)
+> - `epoll` (`M11-05b`)
+> - System V IPC (`M11-05c`)
+> - loader/linker e shim glibc più completi (`M11-05d/g`)
+> - filesystem Linux-like e PTY completi (`M11-05e/f`)
 
 **Target:** binari ELF AArch64 compilati per Linux con glibc o musl.
 Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreutils.
@@ -1746,9 +1751,14 @@ Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreut
 ---
 
 #### M11-05a · Syscall Linux Mancanti
+**Stato attuale:** quasi chiusa, residuo piccolo
 
-EnlilOS ha già i numeri Linux — mancano solo le implementazioni delle syscall
-non ancora pianificate. Lista completa di quelle richieste dai binari Linux comuni:
+Il backlog storico di questa sottostoria è rimasto indietro rispetto al codice.
+Oggi EnlilOS ha già una larga parte del subset Linux AArch64 realmente bindato nella
+tabella compat, quindi qui sotto teniamo separati:
+- ciò che è **già chiuso**
+- ciò che è **presente ma con semantica ancora minima/stub**
+- ciò che **manca davvero** per chiudere bene `M11-05a`
 
 **Nota di riallineamento dal GAP M11-01:**
 - alcune primitive che in origine vivevano solo in questa sezione vengono anticipate
@@ -1758,73 +1768,43 @@ non ancora pianificate. Lista completa di quelle richieste dai binari Linux comu
   `lseek`, `readv/writev`, `newfstatat/fstatat` e verifica `auxv` (`AT_RANDOM`)
 - in questa milestone resta il completamento ABI Linux più ampio, non il primo supporto libc
 
-| Nr Linux | Nome | Stato EnlilOS | Note implementazione |
-|---|---|---|---|
-| 17 | `getcwd` | ✅ M8-08b v1 | syscall EnlilOS disponibile come `SYS_GETCWD` |
-| 22 | `pipe` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_PIPE` |
-| 23 | `select` | ⬜ questa milestone | fd multipli con timeout |
-| 24 | `sched_yield` | ⬜ | chiama `schedule()` — triviale |
-| 29 | `shmget` | ⬜ | shared memory System V |
-| 30 | `shmat` | ⬜ | attach shared memory |
-| 31 | `shmctl` | ⬜ | controllo + IPC_RMID |
-| 32 | `dup` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP` |
-| 33 | `dup2` | ✅ M8-08a v1 | syscall EnlilOS disponibile come `SYS_DUP2` |
-| 35 | `nanosleep` | ⬜ M11-01 | pianificata |
-| 41 | `socket` | ✅ M10-03 v1 | `AF_INET` loopback-only |
-| 42 | `connect` | ✅ M10-03 v1 | |
-| 49 | `bind` | ✅ M10-03 v1 | |
-| 50 | `listen` | ✅ M10-03 v1 | |
-| 51 | `accept` | ✅ M10-03 v1 | |
-| 54 | `setsockopt` | ✅ M10-03 v1 | `SO_REUSEADDR` |
-| 55 | `getsockopt` | ✅ M10-03 v1 | `SO_REUSEADDR`, `SO_ERROR` |
-| 61 | `wait4` | ⬜ | `waitpid` + `rusage` stub |
-| 63 | `uname` | ⬜ M11-01 | minimale per bootstrap libc; ABI Linux completa qui |
-| 64 | `semget` | ⬜ | System V sem — wrappa ksem (M8-06) |
-| 65 | `semop` | ⬜ | System V semop — wrappa ksem |
-| 66 | `semctl` | ⬜ | controllo semaforo System V |
-| 72 | `fcntl` | ⬜ M11-01 | subset libc in M11-01, estensioni/compat Linux qui |
-| 73 | `flock` | ⬜ | advisory lock su fd — stub OK |
-| 74 | `fsync` | ⬜ | flush dirty pages al VFS server |
-| 76 | `truncate` | ⬜ | tronca file a N byte |
-| 77 | `ftruncate` | ⬜ | come truncate ma su fd |
-| 78 | `getdents64` | ⬜ | readdir POSIX → formato Linux dirent64 |
-| 80 | `chdir` | ✅ M8-08b v1 | syscall EnlilOS disponibile come `SYS_CHDIR` |
-| 82 | `rename` | ⬜ M5-04 | già pianificata |
-| 83 | `mkdir` | ⬜ M5-04 | già pianificata |
-| 84 | `rmdir` | ⬜ M5-04 | già pianificata |
-| 87 | `unlink` | ⬜ M5-04 | già pianificata |
-| 88 | `symlink` | ⬜ | crea symlink nel VFS |
-| 89 | `readlink` | ⬜ | legge target del symlink |
-| 92 | `chown` | ⬜ | stub OK (EnlilOS single-user) |
-| 93 | `fchown` | ⬜ | stub OK |
-| 94 | `lchown` | ⬜ | stub OK |
-| 101 | `ptrace` | ⬜ | stub EPERM — sicurezza |
-| 107 | `gettimeofday` | ⬜ M11-01 | pianificata |
-| 108 | `getrusage` | ⬜ | ritorna runtime_ns dal TCB |
-| 110 | `getppid` | ⬜ M11-01 | pianificata |
-| 113 | `setuid` | ⬜ | stub OK (single-user) |
-| 114 | `setgid` | ⬜ | stub OK |
-| 131 | `tgkill` | ✅ M11-02b | invia segnale a thread specifico |
-| 160 | `settimeofday` | ⬜ | privilegiato — solo root |
-| 203 | `sched_setaffinity` | ⬜ | dopo M13-02 SMP; stub OK prima |
-| 204 | `sched_getaffinity` | ⬜ | ritorna maschera CPU disponibili |
-| 218 | `set_tid_address` | ✅ M11-02b | clear-child-tid per thread join |
-| 220 | `clone3` | ⬜ | estensione di clone() per thread (M11-02) |
-| 222 | `mmap` | ✅ M3-02 | già implementata |
-| 226 | `mprotect` | ⬜ | cambia permessi MMU su range |
-| 233 | `epoll_create1` | ⬜ | event polling scalabile (vedi sotto) |
-| 235 | `epoll_ctl` | ⬜ | registra fd in epoll |
-| 236 | `epoll_wait` | ⬜ | attende eventi su fd multipli |
-| 260 | `wait4` | ⬜ | alias |
-| 261 | `faccessat` | ⬜ | access con dirfd |
-| 263 | `unlinkat` | ⬜ | unlink con dirfd |
-| 267 | `readlinkat` | ⬜ | readlink con dirfd |
-| 277 | `openat` | ⬜ M11-01 | minimo libc in M11-01, dirfd/compat avanzata qui |
-| 280 | `utimensat` | ⬜ | aggiorna timestamp file |
-| 291 | `epoll_create` | ⬜ | alias epoll_create1 |
+**Già chiuso nel codice attuale**
+- I/O e fd: `read`, `write`, `close`, `openat`, `newfstatat`, `fstat`, `getdents64`, `lseek`, `readv`, `writev`, `ioctl`, `dup`, `dup3`, `pipe2`, `fcntl`
+- tempo/processo/thread: `nanosleep`, `clock_gettime`, `sched_yield`, `wait4`, `getpid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`, `gettid`, `set_tid_address`, `clone`, `execve`, `futex`, `tgkill`, `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`
+- memoria/runtime: `mmap`, `munmap`, `brk`, `prlimit64`, `sysinfo`, `getrandom`
+- VFS Linux compat: `mkdirat`, `unlinkat`, `readlinkat`, `renameat`, `faccessat`, `truncate`, `ftruncate`, `fsync`, `flock`, `symlinkat`
+- rete/socket: `socket`, `bind`, `listen`, `accept`, `connect`, `getsockname`, `getpeername`, `sendto`, `recvfrom`, `setsockopt`, `getsockopt`, `shutdown`
+- multiplexing: `pselect6`, `ppoll`
+- semantica `*at` gia' chiusa in `v1`: `AT_REMOVEDIR` in `unlinkat`, `AT_SYMLINK_NOFOLLOW` in `newfstatat`, `readlinkat` sopra VFS reale e alias Linux compat
 
-**Priorità implementazione:** le syscall con `⬜ questa milestone` sono quelle che
-bloccano glibc e i binari comuni ma non sono ancora in nessuna altra milestone.
+**Presente ma ancora con semantica v1 / stub**
+- `wait4`: implementata sopra `waitpid` con `rusage` minimo/stub
+- `flock`: advisory lock ancora permissivo, buono per compat minima ma non completo
+- `prlimit64`: profilo principalmente read-only, con scrittura limiti ancora molto limitata
+- `mprotect`: valida il range ma non applica ancora un cambio permessi MMU completo
+- `rseq`: ritorna volutamente `ENOSYS`
+
+**Manca davvero per chiudere bene `M11-05a`**
+- `utimensat`
+- stub Linux espliciti e coerenti per:
+  `chown`, `fchown`, `lchown`, `setuid`, `setgid`, `settimeofday`,
+  `sched_setaffinity`, `sched_getaffinity`, `getrusage`, `ptrace`
+- eventuale `clone3` stub/compat minima documentata
+
+**Fuori da `M11-05a` e già spostati correttamente**
+- `epoll_*` appartiene a `M11-05b`
+- `shm*` e `sem*` System V appartengono a `M11-05c`
+- il vecchio riferimento a `select/poll` generici è obsoleto sul path AArch64 Linux:
+  il profilo attuale usa già `pselect6/ppoll`
+
+**Selftest gia' aggiunti**
+- `linux-proc-dev-etc`
+- `linux-at-paths` per `symlinkat`, `readlink`, `lstat` e semantica directory/file su `unlinkat`
+
+**Criterio di chiusura aggiornato**
+- chiudere i gap veri sopra
+- aggiungere ancora un test dedicato al dispatch ABI Linux, oltre a `linux-proc-dev-etc` e `linux-at-paths`
+- riallineare README e note milestone quando il residuo scende a zero o a stub esplicitamente accettati
 
 ---
 

@@ -55,12 +55,41 @@ def newc_entry(name: str, mode: int, data: bytes) -> bytes:
     return align4(body)
 
 
-def parse_spec(spec: str) -> tuple[str, int, bytes]:
+def emit_tree(dest_root: str, src_root: Path) -> list[tuple[str, int, bytes]]:
+    entries: list[tuple[str, int, bytes]] = []
+
+    if not src_root.is_dir():
+        raise ValueError(f"tree source missing: {src_root}")
+
+    dest_root = dest_root.strip("/")
+    if dest_root:
+        entries.append((dest_root, stat.S_IFDIR | 0o755, b""))
+
+    for path in sorted(src_root.rglob("*")):
+        rel = path.relative_to(src_root).as_posix()
+        name = f"{dest_root}/{rel}" if dest_root else rel
+        if path.is_dir():
+            entries.append((name, stat.S_IFDIR | 0o755, b""))
+        else:
+            entries.append((name, stat.S_IFREG | 0o644, path.read_bytes()))
+    return entries
+
+
+def parse_spec(spec: str) -> list[tuple[str, int, bytes]]:
     if spec.startswith("dir:"):
         name = spec[4:]
         if not name:
             raise ValueError("directory name missing")
-        return name, stat.S_IFDIR | 0o755, b""
+        return [(name, stat.S_IFDIR | 0o755, b"")]
+
+    if spec.startswith("tree:"):
+        body = spec[5:]
+        if "=" not in body:
+            raise ValueError(f"invalid tree spec: {spec}")
+        name, src = body.split("=", 1)
+        if not name or not src:
+            raise ValueError(f"invalid tree spec: {spec}")
+        return emit_tree(name, Path(src))
 
     if "=" not in spec:
         raise ValueError(f"invalid spec: {spec}")
@@ -68,7 +97,7 @@ def parse_spec(spec: str) -> tuple[str, int, bytes]:
     if not name or not src:
         raise ValueError(f"invalid spec: {spec}")
     data = Path(src).read_bytes()
-    return name, stat.S_IFREG | 0o644, data
+    return [(name, stat.S_IFREG | 0o644, data)]
 
 
 def main(argv: list[str]) -> int:
@@ -77,7 +106,9 @@ def main(argv: list[str]) -> int:
         return 1
 
     output = Path(argv[1])
-    entries = [parse_spec(spec) for spec in argv[2:]]
+    entries: list[tuple[str, int, bytes]] = []
+    for spec in argv[2:]:
+        entries.extend(parse_spec(spec))
     archive = bytearray()
 
     for name, mode, data in entries:

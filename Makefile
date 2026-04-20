@@ -127,6 +127,8 @@ ARKSH_SMOKE_ELF       = $(ARKSH_SMOKE_BUILD)/arkshsmoke.elf
 ARKSH_BOOT_ELF        = toolchain/smoke/arksh_boot.elf
 ARKSH_SELFTEST_ELF    = toolchain/smoke/arksh_selftest.elf
 ARKSH_REAL_ELF        = $(ARKSH_BUILD_DIR)/arksh
+LINUX_COMPAT_STAGE_DIR ?= toolchain/build/linux-compat
+LINUX_COMPAT_STAGE_MARK = $(LINUX_COMPAT_STAGE_DIR)/.staged
 MUSL_SYSROOT_INC      = $(MUSL_SYSROOT)/usr/include
 MUSL_SYSROOT_LIB      = $(MUSL_SYSROOT)/usr/lib
 MUSL_WRAPPER_GCC      = toolchain/bin/aarch64-enlilos-musl-gcc
@@ -197,7 +199,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_tls_mt.c \
                         toolchain/smoke/loadkeys.c \
                         toolchain/smoke/kbdlayout.c \
-                        toolchain/smoke/socket_demo.c
+                        toolchain/smoke/socket_demo.c \
+                        toolchain/smoke/net_outbound.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -205,6 +208,7 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DARKSH_PLUGINS=OFF \
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),usr/bin/arksh.real=$(ARKSH_REAL_ELF),)
+LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -233,7 +237,7 @@ PASS1_SELFTEST_KERNEL = enlil-selftest.pass1.elf
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke arksh-configure arksh-build arksh-smoke
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke arksh-configure arksh-build arksh-smoke linux-compat-stage linux-compat-check
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -352,6 +356,25 @@ arksh-build: arksh-configure
 arksh-smoke: $(ARKSH_SMOKE_ELF)
 	@echo "Smoke CMake/arksh pronta: $(ARKSH_SMOKE_ELF)"
 
+linux-compat-stage:
+	@if [ -z "$(LINUX_ROOT_DIR)" ]; then \
+		echo "linux-compat-stage: imposta LINUX_ROOT_DIR=/percorso/root-linux-aarch64"; \
+		exit 1; \
+	fi
+	python3 tools/stage_linux_compat.py "$(LINUX_ROOT_DIR)" "$(LINUX_COMPAT_STAGE_DIR)"
+
+linux-compat-check:
+	@if [ ! -f "$(LINUX_COMPAT_STAGE_MARK)" ]; then \
+		echo "linux-compat-check: esegui prima 'make linux-compat-stage LINUX_ROOT_DIR=...'"; \
+		exit 1; \
+	fi
+	@test -f "$(LINUX_COMPAT_STAGE_DIR)/usr/bin/bash" || (echo "manca usr/bin/bash" && exit 1)
+	@test -f "$(LINUX_COMPAT_STAGE_DIR)/usr/bin/curl" || (echo "manca usr/bin/curl" && exit 1)
+	@test -f "$(LINUX_COMPAT_STAGE_DIR)/usr/bin/env" || (echo "manca usr/bin/env" && exit 1)
+	@test -f "$(LINUX_COMPAT_STAGE_DIR)/lib/ld-linux-aarch64.so.1" -o -f "$(LINUX_COMPAT_STAGE_DIR)/lib/ld-musl-aarch64.so.1" || \
+		(echo "manca dynamic linker AArch64 compat" && exit 1)
+	@echo "Linux compat staging OK in $(LINUX_COMPAT_STAGE_DIR)"
+
 user/%.elf: user/%.o user/user.ld
 	$(LD) -T user/user.ld -nostdlib -o $@ $<
 
@@ -384,9 +407,14 @@ user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
 
-$(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS) \
-                $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) $(ARKSH_SMOKE_ELF) \
-                $(ARKSH_SELFTEST_ELF) $(wildcard $(ARKSH_REAL_ELF))
+$(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
+                initrd/vconsole.conf initrd/arkshrc initrd/arksh_user_rc \
+                initrd/us.map initrd/it.map initrd/hostname initrd/hosts \
+                initrd/passwd initrd/group initrd/os-release \
+                initrd/nsswitch.conf initrd/ld.so.conf initrd/resolv.conf \
+                $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) \
+                $(ARKSH_SMOKE_ELF) $(ARKSH_SELFTEST_ELF) \
+                $(wildcard $(ARKSH_REAL_ELF)) $(wildcard $(LINUX_COMPAT_STAGE_MARK))
 	python3 tools/mkinitrd.py $@ \
 		README.TXT=initrd/README.TXT \
 		BOOT.TXT=initrd/BOOT.TXT \
@@ -401,7 +429,14 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		dir:home/user/.local \
 		dir:home/user/.local/state \
 		dir:home/user/.local/state/arksh \
+		dir:tmp \
+		dir:var \
 		dir:sysroot \
+		dir:sysroot/usr \
+		dir:sysroot/usr/bin \
+		dir:sysroot/usr/share \
+		dir:sysroot/usr/share/kbd \
+		dir:sysroot/usr/share/kbd/keymaps \
 		dir:usr \
 		dir:usr/bin \
 		dir:usr/share \
@@ -445,6 +480,7 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		SEMDEMO.ELF=toolchain/smoke/musl_semaphore.elf \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
 		SOCKDEMO.ELF=toolchain/smoke/socket_demo.elf \
+		NETOUT.ELF=toolchain/smoke/net_outbound.elf \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
@@ -452,14 +488,26 @@ $(INITRD_CPIO): tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT $(USER_ELFS)
 		$(ARKSH_REAL_INITRD) \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
+		sysroot/usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
+		sysroot/usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
 		usr/share/kbd/keymaps/us.map=initrd/us.map \
 		usr/share/kbd/keymaps/it.map=initrd/it.map \
+		sysroot/usr/share/kbd/keymaps/us.map=initrd/us.map \
+		sysroot/usr/share/kbd/keymaps/it.map=initrd/it.map \
 		etc/vconsole.conf=initrd/vconsole.conf \
+		etc/hostname=initrd/hostname \
+		etc/hosts=initrd/hosts \
+		etc/passwd=initrd/passwd \
+		etc/group=initrd/group \
+		etc/os-release=initrd/os-release \
+		etc/nsswitch.conf=initrd/nsswitch.conf \
+		etc/ld.so.conf=initrd/ld.so.conf \
+		etc/resolv.conf=initrd/resolv.conf \
 		etc/arkshrc=initrd/arkshrc \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
-		NSH.ELF=user/nsh.elf
+		$(LINUX_COMPAT_INITRD) NSH.ELF=user/nsh.elf
 
 $(INITRD_EMBEDOBJ): $(INITRD_CPIO)
 	$(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 $< $@

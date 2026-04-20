@@ -76,6 +76,8 @@ typedef struct {
 #define IPC_MSG_BLK_RESP    6
 #define IPC_MSG_VFS_REQ     7
 #define IPC_MSG_VFS_RESP    8
+#define IPC_MSG_NET_REQ     9
+#define IPC_MSG_NET_RESP    10
 #define IPC_MSG_SHUTDOWN    0xFF
 
 /* === Port System (stile Mach/Hurd) === */
@@ -116,6 +118,7 @@ int         mk_ipc_call(uint32_t port_id, uint32_t type,
                         const void *data, uint32_t len,
                         ipc_message_t *reply_out);
 int         mk_ipc_wait(uint32_t port_id, ipc_message_t *msg);
+int         mk_ipc_poll(uint32_t port_id, ipc_message_t *msg);
 int         mk_ipc_reply(uint32_t port_id, uint32_t type,
                          const void *data, uint32_t len);
 

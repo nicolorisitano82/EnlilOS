@@ -10,7 +10,7 @@
  *   IPv4        rx/tx, no fragmentation, checksum
  *   ICMP        echo reply (ping)
  *   UDP         4 sockets, bind + send + recv callback
- *   TCP         4 connections, passive open, PSH+ACK, FIN+ACK
+ *   TCP         4 connections, passive open + active connect, PSH+ACK, FIN+ACK
  */
 
 #include "net_stack.h"
@@ -150,6 +150,7 @@ static ns_u16 transport_cksum(ns_u32 src_ip, ns_u32 dst_ip, ns_u8 proto,
 #define UDP_HDR_LEN     8U
 
 #define TCP_MSS         1460U
+#define NS_ERR_CONNREFUSED 111
 
 /* ── Internal state ─────────────────────────────────────── */
 
@@ -337,7 +338,7 @@ static void ip_hdr_fill(ns_u8 *buf, ns_u8 proto, ns_u32 dst, ns_u16 tot_len)
     buf[IP_OFF_PROTO] = proto;
     wr32(buf + IP_OFF_SRC, g_ip);
     wr32(buf + IP_OFF_DST, dst);
-    wr16(buf + IP_OFF_CKSUM, ns_htons(ip_cksum(buf, IP_HDR_LEN)));
+    wr16(buf + IP_OFF_CKSUM, ip_cksum(buf, IP_HDR_LEN));
 }
 
 /*
@@ -402,7 +403,7 @@ static void icmp_rx(const ns_u8 *ip_hdr, ns_u32 ip_len)
     out_icmp[ICMP_OFF_TYPE] = ICMP_ECHO_REPLY;
     out_icmp[ICMP_OFF_CODE] = 0U;
     wr16(out_icmp + ICMP_OFF_CKSUM, 0U);
-    wr16(out_icmp + ICMP_OFF_CKSUM, ns_htons(ip_cksum(out_icmp, icmp_len)));
+    wr16(out_icmp + ICMP_OFF_CKSUM, ip_cksum(out_icmp, icmp_len));
 
     g_stats.tx_icmp++;
     ipv4_send_assembled(IP_PROTO_ICMP, src_ip, icmp_len);
@@ -494,7 +495,10 @@ int net_stack_udp_send(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 src_port,
 #define TCP_OFF_URG     18U
 
 typedef struct {
+    ns_u8  allocated;
     ns_u8  state;
+    ns_u8  preserve_on_close;
+    ns_u8  peer_closed;
     ns_u16 local_port;
     ns_u16 remote_port;
     ns_u32 local_ip;    /* always g_ip in v1 */
@@ -502,6 +506,7 @@ typedef struct {
     ns_u32 snd_nxt;     /* next seq to send */
     ns_u32 rcv_nxt;     /* next seq expected from peer */
     ns_u16 snd_win;     /* peer's receive window */
+    int    so_error;
 
     tcp_data_cb   data_cb;
     tcp_closed_cb closed_cb;
@@ -523,12 +528,38 @@ static tcp_listen_t g_tcp_listen[NET_STACK_TCP_CONNS];
 
 /* Pseudo-random ISN seed, incremented each time we open a connection */
 static ns_u32 g_isn_seed = 0xA5A5A500U;
+static ns_u16 g_tcp_ephemeral = 49152U;
 
 static int tcp_alloc_conn(void)
 {
     for (int i = 0; i < NET_STACK_TCP_CONNS; i++)
-        if (g_tcp_conns[i].state == NS_TCP_CLOSED) return i;
+        if (!g_tcp_conns[i].allocated) return i;
     return -1;
+}
+
+static ns_u16 tcp_alloc_ephemeral_port(void)
+{
+    ns_u16 start = g_tcp_ephemeral;
+
+    do {
+        ns_u16 port = g_tcp_ephemeral;
+        int    conflict = 0;
+
+        g_tcp_ephemeral = (g_tcp_ephemeral == 65535U)
+                        ? 49152U : (ns_u16)(g_tcp_ephemeral + 1U);
+
+        for (int i = 0; i < NET_STACK_TCP_CONNS; i++) {
+            if (g_tcp_conns[i].allocated &&
+                g_tcp_conns[i].local_port == port) {
+                conflict = 1;
+                break;
+            }
+        }
+        if (!conflict)
+            return port;
+    } while (g_tcp_ephemeral != start);
+
+    return 0U;
 }
 
 /* Build and send a TCP segment. payload already in g_tx transport area
@@ -566,7 +597,7 @@ static void tcp_send_seg(int ci, ns_u8 flags, ns_u32 seq, ns_u32 ack,
     wr16(tcp_hdr + TCP_OFF_CKSUM, 0U);
     ns_u16 ck = transport_cksum(g_ip, c->remote_ip, IP_PROTO_TCP,
                                   tcp_hdr, seg_len);
-    wr16(tcp_hdr + TCP_OFF_CKSUM, ns_htons(ck));
+    wr16(tcp_hdr + TCP_OFF_CKSUM, ck);
 
     g_stats.tx_tcp++;
     ipv4_send_assembled(IP_PROTO_TCP, c->remote_ip, seg_len);
@@ -607,7 +638,7 @@ static void tcp_send_rst(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 src_port,
         (void)fake;
         ns_u16 ck = transport_cksum(g_ip, dst_ip, IP_PROTO_TCP,
                                      tcp_hdr, hlen);
-        wr16(tcp_hdr + TCP_OFF_CKSUM, ns_htons(ck));
+        wr16(tcp_hdr + TCP_OFF_CKSUM, ck);
     }
 
     /* Must build IP + Ethernet without going through a conn */
@@ -625,7 +656,12 @@ static void tcp_send_rst(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 src_port,
 static void tcp_close_conn(int ci)
 {
     tcp_conn_t *c = &g_tcp_conns[ci];
+    c->peer_closed = 1U;
     if (c->closed_cb) c->closed_cb(ci);
+    if (c->preserve_on_close) {
+        c->state = NS_TCP_CLOSED;
+        return;
+    }
     ns_memset(c, 0U, sizeof(*c));
     c->state = NS_TCP_CLOSED;
 }
@@ -691,6 +727,8 @@ static void tcp_rx(const ns_u8 *ip_hdr, ns_u32 ip_len)
         }
 
         tcp_conn_t *c   = &g_tcp_conns[ci];
+        ns_memset(c, 0U, sizeof(*c));
+        c->allocated    = 1U;
         c->state        = NS_TCP_SYN_RCVD;
         c->local_port   = dport;
         c->remote_port  = sport;
@@ -715,11 +753,25 @@ static void tcp_rx(const ns_u8 *ip_hdr, ns_u32 ip_len)
 
     /* RST: close immediately */
     if (flags & TCP_FLAG_RST) {
+        if (c->state == NS_TCP_SYN_SENT)
+            c->so_error = NS_ERR_CONNREFUSED;
         tcp_close_conn(ci);
         return;
     }
 
     switch (c->state) {
+    case NS_TCP_SYN_SENT:
+        if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
+            ack_val == c->snd_nxt) {
+            c->snd_win = rd16(tcp + TCP_OFF_WINDOW);
+            c->rcv_nxt = seq + 1U;
+            c->state   = NS_TCP_ESTABLISHED;
+            tcp_send_seg(ci, TCP_FLAG_ACK,
+                         c->snd_nxt, c->rcv_nxt,
+                         (const ns_u8 *)0, 0U, 0);
+        }
+        break;
+
     case NS_TCP_SYN_RCVD:
         /* Expecting ACK to our SYN+ACK */
         if ((flags & TCP_FLAG_ACK) && ack_val == c->snd_nxt) {
@@ -733,11 +785,19 @@ static void tcp_rx(const ns_u8 *ip_hdr, ns_u32 ip_len)
             c->snd_win = rd16(tcp + TCP_OFF_WINDOW);
 
         if (data_len > 0U) {
+            ns_u16 room = (ns_u16)(NET_STACK_TCP_RXBUF - c->rx_len);
+            ns_u16 copy_len = (data_len < room) ? data_len : room;
+
             c->rcv_nxt += data_len;
+
+            if (copy_len > 0U) {
+                ns_memcpy(c->rx_buf + c->rx_len, data, copy_len);
+                c->rx_len = (ns_u16)(c->rx_len + copy_len);
+            }
 
             /* Deliver to application */
             if (c->data_cb) {
-                c->data_cb(ci, data, data_len);
+                c->data_cb(ci, data, copy_len);
             }
 
             /* ACK the data */
@@ -803,6 +863,44 @@ int net_stack_tcp_listen(ns_u16 port, tcp_data_cb data_cb,
     return -1;
 }
 
+int net_stack_tcp_connect(ns_u32 dst_ip, ns_u16 dst_port, ns_u16 local_port,
+                           tcp_data_cb data_cb, tcp_closed_cb closed_cb)
+{
+    int        ci;
+    tcp_conn_t *c;
+
+    ci = tcp_alloc_conn();
+    if (ci < 0)
+        return -1;
+
+    if (local_port == 0U) {
+        local_port = tcp_alloc_ephemeral_port();
+        if (local_port == 0U)
+            return -1;
+    }
+
+    c = &g_tcp_conns[ci];
+    ns_memset(c, 0U, sizeof(*c));
+    c->allocated         = 1U;
+    c->preserve_on_close = 1U;
+    c->state             = NS_TCP_SYN_SENT;
+    c->local_port        = local_port;
+    c->remote_port       = dst_port;
+    c->local_ip          = g_ip;
+    c->remote_ip         = dst_ip;
+    c->snd_nxt           = g_isn_seed;
+    c->rcv_nxt           = 0U;
+    c->snd_win           = TCP_MSS;
+    c->data_cb           = data_cb;
+    c->closed_cb         = closed_cb;
+    g_isn_seed          += 0x10000U;
+
+    tcp_send_seg(ci, TCP_FLAG_SYN, c->snd_nxt, 0U,
+                 (const ns_u8 *)0, 0U, 1);
+    c->snd_nxt++;
+    return ci;
+}
+
 int net_stack_tcp_send(int conn, const ns_u8 *data, ns_u16 len)
 {
     if (conn < 0 || conn >= NET_STACK_TCP_CONNS) return -1;
@@ -812,6 +910,8 @@ int net_stack_tcp_send(int conn, const ns_u8 *data, ns_u16 len)
 
     /* Clamp to MSS and peer window */
     ns_u16 max_send = (c->snd_win < TCP_MSS) ? c->snd_win : TCP_MSS;
+    if (max_send == 0U)
+        return -1;
     if (len > max_send) len = max_send;
 
     tcp_send_seg(conn, TCP_FLAG_PSH | TCP_FLAG_ACK,
@@ -820,10 +920,65 @@ int net_stack_tcp_send(int conn, const ns_u8 *data, ns_u16 len)
     return (int)len;
 }
 
+int net_stack_tcp_recv(int conn, ns_u8 *buf, ns_u16 maxlen)
+{
+    tcp_conn_t *c;
+    ns_u16      copy_len;
+    ns_u16      i;
+
+    if (conn < 0 || conn >= NET_STACK_TCP_CONNS || !buf || maxlen == 0U)
+        return -1;
+
+    c = &g_tcp_conns[conn];
+    if (!c->allocated)
+        return -1;
+
+    if (c->rx_len == 0U) {
+        if (c->state == NS_TCP_CLOSED || c->peer_closed)
+            return 0;
+        return -1;
+    }
+
+    copy_len = (maxlen < c->rx_len) ? maxlen : c->rx_len;
+    ns_memcpy(buf, c->rx_buf, copy_len);
+    for (i = copy_len; i < c->rx_len; i++)
+        c->rx_buf[i - copy_len] = c->rx_buf[i];
+    c->rx_len = (ns_u16)(c->rx_len - copy_len);
+    return (int)copy_len;
+}
+
+int net_stack_tcp_info(int conn, net_stack_tcp_info_t *out)
+{
+    tcp_conn_t *c;
+
+    if (conn < 0 || conn >= NET_STACK_TCP_CONNS || !out)
+        return -1;
+    c = &g_tcp_conns[conn];
+    if (!c->allocated)
+        return -1;
+
+    out->state       = c->state;
+    out->peer_closed = c->peer_closed;
+    out->local_port  = c->local_port;
+    out->remote_port = c->remote_port;
+    out->rx_len      = c->rx_len;
+    out->local_ip    = c->local_ip;
+    out->remote_ip   = c->remote_ip;
+    out->so_error    = c->so_error;
+    return 0;
+}
+
 void net_stack_tcp_close(int conn)
 {
     if (conn < 0 || conn >= NET_STACK_TCP_CONNS) return;
     tcp_conn_t *c = &g_tcp_conns[conn];
+    if (!c->allocated)
+        return;
+    if (c->state == NS_TCP_SYN_SENT) {
+        c->state = NS_TCP_CLOSED;
+        c->peer_closed = 1U;
+        return;
+    }
     if (c->state != NS_TCP_ESTABLISHED
         && c->state != NS_TCP_CLOSE_WAIT) return;
 
@@ -831,6 +986,14 @@ void net_stack_tcp_close(int conn)
                  c->snd_nxt, c->rcv_nxt, (const ns_u8 *)0, 0U, 0);
     c->snd_nxt++;
     c->state = NS_TCP_FIN_WAIT_1;
+}
+
+void net_stack_tcp_release(int conn)
+{
+    if (conn < 0 || conn >= NET_STACK_TCP_CONNS)
+        return;
+    ns_memset(&g_tcp_conns[conn], 0U, sizeof(g_tcp_conns[conn]));
+    g_tcp_conns[conn].state = NS_TCP_CLOSED;
 }
 
 /* ── IPv4 RX ────────────────────────────────────────────── */
@@ -878,6 +1041,7 @@ void net_stack_init(const ns_u8 *mac, net_output_fn out_fn)
     g_output   = out_fn;
     g_ip_id    = 1U;
     g_isn_seed = 0xA5A5A500U;
+    g_tcp_ephemeral = 49152U;
 }
 
 void net_stack_input(const ns_u8 *frame, ns_u32 len)

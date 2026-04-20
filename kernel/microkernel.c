@@ -332,6 +332,37 @@ int mk_ipc_wait(uint32_t port_id, ipc_message_t *msg)
     return 0;
 }
 
+int mk_ipc_poll(uint32_t port_id, ipc_message_t *msg)
+{
+    port_t   *port;
+    uint64_t  flags;
+    uint32_t  server_tid = mk_current_tid();
+
+    if (!msg || !current_task)
+        return -EFAULT;
+
+    port = mk_port_by_id(port_id);
+    if (!port)
+        return -ENOENT;
+    if (server_tid != port->owner_tid)
+        return -EPERM;
+
+    flags = mk_irq_save();
+    if (port->active_client_tid != 0U && !port->pending_valid) {
+        mk_irq_restore(flags);
+        return -EBUSY;
+    }
+    if (!port->pending_valid) {
+        mk_irq_restore(flags);
+        return -EAGAIN;
+    }
+
+    mk_ipc_copy_msg(msg, &port->pending_msg);
+    port->pending_valid = false;
+    mk_irq_restore(flags);
+    return 0;
+}
+
 int mk_ipc_reply(uint32_t port_id, uint32_t type,
                  const void *data, uint32_t len)
 {

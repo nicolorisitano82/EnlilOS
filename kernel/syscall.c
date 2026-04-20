@@ -16,7 +16,9 @@
 #include "futex.h"
 #include "kdebug.h"
 #include "keyboard.h"
+#include "linux_compat.h"
 #include "net.h"
+#include "net_ipc.h"
 #include "elf_loader.h"
 #include "kheap.h"
 #include "kmon.h"
@@ -55,6 +57,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define FD_OBJECT_MAX   (SCHED_MAX_TASKS * MAX_FD)
 #define PIPE_POOL_MAX   32U
 #define PIPE_BUF_SIZE   4096U
+#define SOCK_REMOTE_NETD_TAG 0x80000000U
 
 #define PIPE_END_READ   0U
 #define PIPE_END_WRITE  1U
@@ -73,6 +76,8 @@ typedef struct {
     vfs_file_t file;
 } vfs_srv_handle_t;
 
+#define EXEC_MAX_PATH       SCHED_EXEC_PATH_MAX
+
 typedef struct {
     uint8_t    in_use;
     uint8_t    type;
@@ -84,6 +89,7 @@ typedef struct {
     uint32_t   remote_handle;
     void      *pipe;
     vfs_file_t file;
+    char       path[EXEC_MAX_PATH];
 } fd_object_t;
 
 typedef struct {
@@ -115,6 +121,22 @@ static fd_object_t fd_objects[FD_OBJECT_MAX];
 static pipe_t      pipe_pool[PIPE_POOL_MAX];
 
 static void sock_sync_fd_flags(fd_object_t *obj);
+static int  netd_proxy_close(uint32_t handle);
+
+static int sock_handle_is_remote_netd(uint32_t handle)
+{
+    return (handle & SOCK_REMOTE_NETD_TAG) != 0U;
+}
+
+static uint32_t sock_handle_to_remote_netd(uint32_t handle)
+{
+    return handle | SOCK_REMOTE_NETD_TAG;
+}
+
+static uint32_t sock_handle_from_remote_netd(uint32_t handle)
+{
+    return handle & ~SOCK_REMOTE_NETD_TAG;
+}
 
 /* Owner check per blkd: solo il server proprietario della porta "block" può usare le blk_boot_* */
 static int blk_srv_owner_ok(void)
@@ -148,7 +170,6 @@ static uint64_t task_brk[SCHED_MAX_TASKS];
 static exception_frame_t *active_syscall_frame;
 static uint8_t            active_syscall_replaced;
 
-#define EXEC_MAX_PATH       256U
 #define EXEC_MAX_ARGS       ELF_LOADER_MAX_ARGS
 #define EXEC_MAX_ENVP       ELF_LOADER_MAX_ENVP
 #define EXEC_STRPOOL_SIZE   2048U
@@ -166,6 +187,7 @@ typedef struct {
 static int  vfsd_proxy_close(uint32_t handle);
 static void stat_fill(stat_t *st, uint32_t mode, uint64_t size,
                       uint32_t blksize);
+static void syscall_copy_fixed_string(char *dst, size_t cap, const char *src);
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -256,6 +278,40 @@ static fd_object_t *fd_get(int fd)
 {
     fd_entry_t *e = fd_entry_get(fd);
     return e ? e->obj : NULL;
+}
+
+int syscall_describe_fd_current(int fd, char *out, size_t cap)
+{
+    fd_object_t *obj = fd_get(fd);
+
+    if (!out || cap < 2U)
+        return -EINVAL;
+    out[0] = '\0';
+
+    if (!obj)
+        return -EBADF;
+
+    if (obj->path[0] != '\0') {
+        syscall_copy_fixed_string(out, cap, obj->path);
+        return 0;
+    }
+
+    switch (obj->type) {
+    case FD_TYPE_PIPE:
+        syscall_copy_fixed_string(out, cap,
+                                  obj->pipe_end == PIPE_END_READ ? "pipe:[read]" : "pipe:[write]");
+        return 0;
+    case FD_TYPE_SOCK:
+        syscall_copy_fixed_string(out, cap, "socket:[inet]");
+        return 0;
+    case FD_TYPE_VFS:
+    case FD_TYPE_VFSD:
+        syscall_copy_fixed_string(out, cap, "anon:[file]");
+        return 0;
+    default:
+        syscall_copy_fixed_string(out, cap, "anon:[fd]");
+        return 0;
+    }
 }
 
 static fd_object_t *fd_object_alloc(void)
@@ -354,7 +410,10 @@ static void fd_object_put(fd_object_t *obj)
                 memset(pipe, 0, sizeof(*pipe));
         }
     } else if (obj->type == FD_TYPE_SOCK) {
-        sock_free((int)obj->remote_handle);
+        if (sock_handle_is_remote_netd(obj->remote_handle))
+            (void)netd_proxy_close(sock_handle_from_remote_netd(obj->remote_handle));
+        else
+            sock_free((int)obj->remote_handle);
     }
 
     memset(obj, 0, sizeof(*obj));
@@ -406,6 +465,7 @@ static int fd_bind_path_idx(int idx, int fd, const char *path, uint16_t flags)
 
     obj->type  = FD_TYPE_VFS;
     obj->flags = flags;
+    syscall_copy_fixed_string(obj->path, sizeof(obj->path), path);
     return fd_attach_object(&fd_tables[idx][fd], obj);
 }
 
@@ -466,6 +526,7 @@ static int fd_bind_path(fd_entry_t *e, const char *path, uint16_t flags)
 
     obj->type  = FD_TYPE_VFS;
     obj->flags = flags;
+    syscall_copy_fixed_string(obj->path, sizeof(obj->path), path);
     return fd_attach_object(e, obj);
 }
 
@@ -483,6 +544,7 @@ static int fd_bind_remote(fd_entry_t *e, uint32_t handle, uint16_t flags)
     obj->type = FD_TYPE_VFSD;
     obj->flags = flags;
     obj->remote_handle = handle;
+    obj->path[0] = '\0';
     return fd_attach_object(e, obj);
 }
 
@@ -490,6 +552,7 @@ static int fd_bind_remote_shadow(fd_entry_t *e, const char *path, uint16_t flags
 {
     uint16_t shadow_flags;
     fd_object_t *obj;
+    int rc;
 
     if (!e || !path)
         return -EINVAL;
@@ -503,7 +566,11 @@ static int fd_bind_remote_shadow(fd_entry_t *e, const char *path, uint16_t flags
      */
     obj = e->obj;
     shadow_flags = (uint16_t)(flags & (uint16_t)~(O_TRUNC | O_CREAT | O_APPEND));
-    return vfs_open(path, shadow_flags, &obj->file);
+    rc = vfs_open(path, shadow_flags, &obj->file);
+    if (rc < 0)
+        return rc;
+    syscall_copy_fixed_string(obj->path, sizeof(obj->path), path);
+    return 0;
 }
 
 static int fd_is_tty_object(const fd_object_t *obj)
@@ -842,7 +909,8 @@ static ssize_t vfsd_proxy_write(uint32_t handle, const void *src, size_t count)
     return (ssize_t)resp.data_len;
 }
 
-static int vfsd_proxy_resolve(const char *path, char *out, size_t cap)
+static int vfsd_proxy_resolve_meta(const char *path, char *out, size_t cap,
+                                   uint32_t *flags_out)
 {
     vfsd_request_t  req;
     vfsd_response_t resp;
@@ -860,7 +928,14 @@ static int vfsd_proxy_resolve(const char *path, char *out, size_t cap)
         return rc;
     if (resp.status < 0)
         return resp.status;
+    if (flags_out)
+        *flags_out = (uint32_t)((resp.handle >= 0) ? resp.handle : 0);
     return vfsd_resp_get_path(&resp, out, cap);
+}
+
+static int vfsd_proxy_resolve(const char *path, char *out, size_t cap)
+{
+    return vfsd_proxy_resolve_meta(path, out, cap, NULL);
 }
 
 static int vfsd_proxy_chdir(const char *path)
@@ -1066,6 +1141,297 @@ static int64_t vfsd_proxy_lseek(uint32_t handle, int64_t offset, int whence)
 
     memcpy(&result, resp.u.data, sizeof(result));
     return result;
+}
+
+static int netd_proxy_available(void)
+{
+    port_t *port;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return 0;
+
+    port = mk_port_lookup("net");
+    if (!port || port->owner_tid == 0U)
+        return 0;
+    if (port->owner_tid == sched_task_tgid(current_task))
+        return 0;
+    return 1;
+}
+
+static int netd_proxy_call(const netd_request_t *req, netd_response_t *resp)
+{
+    port_t        *port;
+    ipc_message_t  reply;
+    uint64_t       deadline_ms;
+    int            rc;
+
+    if (!req || !resp)
+        return -EFAULT;
+
+    port = mk_port_lookup("net");
+    if (!port || port->owner_tid == 0U)
+        return -ENOENT;
+
+    deadline_ms = timer_now_ms() + 1000ULL;
+    do {
+        rc = mk_ipc_call(port->port_id, IPC_MSG_NET_REQ, req, sizeof(*req), &reply);
+        if (rc != -EBUSY && rc != -EAGAIN)
+            break;
+        sched_yield();
+    } while (timer_now_ms() < deadline_ms);
+
+    if (rc < 0)
+        return rc;
+    if (reply.msg_type != IPC_MSG_NET_RESP || reply.msg_len < sizeof(*resp))
+        return -EIO;
+
+    memcpy(resp, reply.payload, sizeof(*resp));
+    return 0;
+}
+
+static int netd_proxy_socket(int domain, int type, int protocol, uint32_t *handle_out)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    if (!handle_out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op   = NETD_REQ_SOCKET;
+    req.arg0 = (uint32_t)domain;
+    req.arg1 = (uint32_t)type;
+    req.arg2 = (uint32_t)protocol;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    if (resp.handle <= 0)
+        return -EIO;
+
+    *handle_out = (uint32_t)resp.handle;
+    return 0;
+}
+
+static int netd_proxy_bind(uint32_t handle, uint32_t ip, uint16_t port)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_BIND;
+    req.handle = (int32_t)handle;
+    req.arg0   = ip;
+    req.arg1   = (uint32_t)port;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int netd_proxy_connect(uint32_t handle, uint32_t ip, uint16_t port)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_CONNECT;
+    req.handle = (int32_t)handle;
+    req.arg0   = ip;
+    req.arg1   = (uint32_t)port;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static ssize_t netd_proxy_send(uint32_t handle, const void *src, size_t count)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    if (!src)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_SEND;
+    req.handle = (int32_t)handle;
+    req.count  = (count > NETD_IO_BYTES) ? NETD_IO_BYTES : (uint32_t)count;
+    memcpy(req.data, src, req.count);
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    return (ssize_t)resp.data_len;
+}
+
+static ssize_t netd_proxy_recv(uint32_t handle, void *dst, size_t count)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    if (!dst)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_RECV;
+    req.handle = (int32_t)handle;
+    req.count  = (count > NETD_IO_BYTES) ? NETD_IO_BYTES : (uint32_t)count;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    if (resp.data_len > NETD_IO_BYTES)
+        return -EIO;
+
+    memcpy(dst, resp.data, resp.data_len);
+    return (ssize_t)resp.data_len;
+}
+
+static int netd_proxy_poll(uint32_t handle, uint32_t *mask_out)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    if (!mask_out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_POLL;
+    req.handle = (int32_t)handle;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+    *mask_out = resp.flags;
+    return 0;
+}
+
+static int netd_proxy_getsockopt(uint32_t handle, int level, int optname,
+                                 void *dst, size_t *len_io)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+    size_t          len;
+
+    if (!dst || !len_io)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_GETSOCKOPT;
+    req.handle = (int32_t)handle;
+    req.arg0   = (uint32_t)level;
+    req.arg1   = (uint32_t)optname;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+
+    len = *len_io;
+    if (len > resp.data_len)
+        len = resp.data_len;
+    memcpy(dst, resp.data, len);
+    *len_io = len;
+    return 0;
+}
+
+static int netd_proxy_setsockopt(uint32_t handle, int level, int optname,
+                                 const void *src, size_t len)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_SETSOCKOPT;
+    req.handle = (int32_t)handle;
+    req.arg0   = (uint32_t)level;
+    req.arg1   = (uint32_t)optname;
+    req.count  = (len > NETD_IO_BYTES) ? NETD_IO_BYTES : (uint32_t)len;
+    if (src && req.count > 0U)
+        memcpy(req.data, src, req.count);
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int netd_proxy_addr(uint32_t handle, int peer, uint32_t *ip_out, uint16_t *port_out)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    if (!ip_out || !port_out)
+        return -EFAULT;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_ADDR;
+    req.handle = (int32_t)handle;
+    req.arg0   = (uint32_t)(peer ? 1 : 0);
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    if (resp.status < 0)
+        return resp.status;
+
+    *ip_out = resp.addr_ip;
+    *port_out = resp.addr_port;
+    return 0;
+}
+
+static int netd_proxy_shutdown(uint32_t handle, int how)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_SHUTDOWN;
+    req.handle = (int32_t)handle;
+    req.arg0   = (uint32_t)how;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
+}
+
+static int netd_proxy_close(uint32_t handle)
+{
+    netd_request_t  req;
+    netd_response_t resp;
+    int             rc;
+
+    memset(&req, 0, sizeof(req));
+    req.op     = NETD_REQ_CLOSE;
+    req.handle = (int32_t)handle;
+
+    rc = netd_proxy_call(&req, &resp);
+    if (rc < 0)
+        return rc;
+    return resp.status;
 }
 
 static void fd_split_open_flags(uint16_t in_flags, uint16_t *file_flags,
@@ -1348,7 +1714,8 @@ static int user_probe_write(uintptr_t uva, size_t size)
     return 0;
 }
 
-static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
+static int resolve_user_vfs_path_meta(const char *input, char *out, size_t cap,
+                                      uint32_t *flags_out)
 {
     size_t i = 0U;
 
@@ -1356,7 +1723,7 @@ static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
         return -EFAULT;
 
     if (current_task && sched_task_is_user(current_task) && vfsd_proxy_available())
-        return vfsd_proxy_resolve(input, out, cap);
+        return vfsd_proxy_resolve_meta(input, out, cap, flags_out);
 
     while (input[i] != '\0' && i + 1U < cap) {
         out[i] = input[i];
@@ -1365,7 +1732,15 @@ static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
     if (input[i] != '\0')
         return -ENAMETOOLONG;
     out[i] = '\0';
+    if (flags_out)
+        *flags_out = vfs_path_is_linux_compat(out) ?
+                     VFSD_RESP_FLAG_LINUX_COMPAT : 0U;
     return 0;
+}
+
+static int resolve_user_vfs_path(const char *input, char *out, size_t cap)
+{
+    return resolve_user_vfs_path_meta(input, out, cap, NULL);
 }
 
 static int sys_mount_parse_fs(const char *fstype, uint32_t flags, uint32_t *fs_out)
@@ -1507,6 +1882,377 @@ static int exec_copy_from_user(exec_copy_t *copy,
  * ════════════════════════════════════════════════════════════════════ */
 
 syscall_entry_t syscall_table[SYSCALL_MAX];
+static syscall_entry_t linux_syscall_table[LINUX_SYSCALL_MAX];
+static uint64_t        linux_rand_state = 0x9E3779B97F4A7C15ULL;
+
+#define LINUX_O_ACCMODE      00000003U
+#define LINUX_O_CREAT        00000100U
+#define LINUX_O_TRUNC        00001000U
+#define LINUX_O_APPEND       00002000U
+#define LINUX_O_NONBLOCK     00004000U
+#define LINUX_O_CLOEXEC      02000000U
+
+#define LINUX_F_OK           0U
+#define LINUX_X_OK           1U
+#define LINUX_W_OK           2U
+#define LINUX_R_OK           4U
+
+#define LINUX_RUSAGE_SELF    0
+#define LINUX_RUSAGE_CHILDREN (-1)
+
+#define LINUX_DT_UNKNOWN     0U
+#define LINUX_DT_FIFO        1U
+#define LINUX_DT_CHR         2U
+#define LINUX_DT_DIR         4U
+#define LINUX_DT_REG         8U
+#define LINUX_DT_LNK         10U
+
+static int syscall_path_join_abs(const char *base, const char *rel,
+                                 char *out, size_t cap)
+{
+    size_t base_len = 0U;
+    size_t rel_off = 0U;
+    size_t pos = 0U;
+
+    if (!base || !rel || !out || cap < 2U)
+        return -EINVAL;
+
+    while (base[base_len] != '\0')
+        base_len++;
+    while (rel[rel_off] == '/')
+        rel_off++;
+
+    if (base_len == 0U || base[0] != '/')
+        return -EINVAL;
+    if (base_len + 2U > cap)
+        return -ENAMETOOLONG;
+
+    syscall_copy_fixed_string(out, cap, base);
+    pos = 0U;
+    while (out[pos] != '\0')
+        pos++;
+
+    if (rel[rel_off] == '\0')
+        return 0;
+
+    if (!(pos == 1U && out[0] == '/')) {
+        if (out[pos - 1U] != '/') {
+            if (pos + 1U >= cap)
+                return -ENAMETOOLONG;
+            out[pos++] = '/';
+        }
+    }
+
+    while (rel[rel_off] != '\0' && pos + 1U < cap)
+        out[pos++] = rel[rel_off++];
+    if (rel[rel_off] != '\0')
+        return -ENAMETOOLONG;
+    out[pos] = '\0';
+    return 0;
+}
+
+static int resolve_dirfd_path_meta(int dirfd, const char *path,
+                                   int allow_empty,
+                                   char *resolved, size_t cap,
+                                   uint32_t *flags_out)
+{
+    fd_object_t *dir_obj;
+    char         joined[VFSD_IO_BYTES];
+    stat_t       st;
+    int          rc;
+
+    if (!path || !resolved || cap < 2U)
+        return -EFAULT;
+
+    if (path[0] == '/' || dirfd == AT_FDCWD)
+        return resolve_user_vfs_path_meta(path, resolved, cap, flags_out);
+
+    dir_obj = fd_get(dirfd);
+    if (!dir_obj)
+        return -EBADF;
+    if (dir_obj->type != FD_TYPE_VFS && dir_obj->type != FD_TYPE_VFSD)
+        return -EBADF;
+    if (dir_obj->path[0] == '\0')
+        return -ENOSYS;
+
+    if (allow_empty && path[0] == '\0')
+        return resolve_user_vfs_path_meta(dir_obj->path, resolved, cap, flags_out);
+
+    rc = (dir_obj->type == FD_TYPE_VFSD)
+             ? vfsd_proxy_stat(dir_obj->remote_handle, &st)
+             : vfs_stat(&dir_obj->file, &st);
+    if (rc < 0)
+        return rc;
+    if ((st.st_mode & S_IFMT) != S_IFDIR)
+        return -ENOTDIR;
+
+    rc = syscall_path_join_abs(dir_obj->path, path, joined, sizeof(joined));
+    if (rc < 0)
+        return rc;
+    return resolve_user_vfs_path_meta(joined, resolved, cap, flags_out);
+}
+
+static uint32_t linux_open_flags_to_native(uint32_t flags)
+{
+    uint32_t native = 0U;
+
+    switch (flags & LINUX_O_ACCMODE) {
+    case 0U: native |= O_RDONLY; break;
+    case 1U: native |= O_WRONLY; break;
+    case 2U: native |= O_RDWR;   break;
+    default: native |= O_RDONLY; break;
+    }
+    if (flags & LINUX_O_CREAT)    native |= O_CREAT;
+    if (flags & LINUX_O_TRUNC)    native |= O_TRUNC;
+    if (flags & LINUX_O_APPEND)   native |= O_APPEND;
+    if (flags & LINUX_O_NONBLOCK) native |= O_NONBLOCK;
+    if (flags & LINUX_O_CLOEXEC)  native |= O_CLOEXEC;
+    return native;
+}
+
+static void linux_stat_from_native(const stat_t *src, linux_stat_t *dst)
+{
+    if (!src || !dst)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->st_mode = src->st_mode;
+    dst->st_nlink = ((src->st_mode & S_IFMT) == S_IFDIR) ? 2U : 1U;
+    dst->st_uid = 0U;
+    dst->st_gid = 0U;
+    dst->st_size = (int64_t)src->st_size;
+    dst->st_blksize = (int32_t)src->st_blksize;
+    dst->st_blocks = (int64_t)src->st_blocks;
+}
+
+static uint8_t linux_dtype_from_mode(uint32_t mode)
+{
+    switch (mode & S_IFMT) {
+    case S_IFIFO: return LINUX_DT_FIFO;
+    case S_IFCHR: return LINUX_DT_CHR;
+    case S_IFDIR: return LINUX_DT_DIR;
+    case S_IFREG: return LINUX_DT_REG;
+    case S_IFLNK: return LINUX_DT_LNK;
+    default:      return LINUX_DT_UNKNOWN;
+    }
+}
+
+static uint64_t linux_random_next(void)
+{
+    uint64_t x = linux_rand_state;
+
+    x ^= timer_now_ns();
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    linux_rand_state = x;
+    return x * 0x2545F4914F6CDD1DULL;
+}
+
+static void linux_random_fill(void *dst, size_t len)
+{
+    uint8_t *out = (uint8_t *)dst;
+    size_t   off = 0U;
+
+    while (off < len) {
+        uint64_t word = linux_random_next();
+        size_t   chunk = len - off;
+
+        if (chunk > sizeof(word))
+            chunk = sizeof(word);
+        memcpy(out + off, &word, chunk);
+        off += chunk;
+    }
+}
+
+static void linux_fill_rusage(linux_rusage_t *ru)
+{
+    if (!ru)
+        return;
+    memset(ru, 0, sizeof(*ru));
+}
+
+static void linux_fill_sysinfo(linux_sysinfo_t *info)
+{
+    if (!info)
+        return;
+    memset(info, 0, sizeof(*info));
+    info->uptime   = (int64_t)(timer_now_ms() / 1000ULL);
+    info->totalram = 512ULL * 1024ULL * 1024ULL;
+    info->freeram  = 384ULL * 1024ULL * 1024ULL;
+    info->mem_unit = 1U;
+    info->procs    = (uint16_t)sched_task_count_total();
+}
+
+static int linux_path_readlink(const char *path, char *out, size_t cap)
+{
+    uint32_t fd = 0U;
+    fd_object_t *obj;
+
+    if (!path || !out || cap < 2U)
+        return -EINVAL;
+    if (syscall_streq(path, "/bin/sh")) {
+        syscall_copy_fixed_string(out, cap, "/usr/bin/bash");
+        return 0;
+    }
+    if (syscall_streq(path, "/dev/random")) {
+        syscall_copy_fixed_string(out, cap, "/dev/urandom");
+        return 0;
+    }
+    if (syscall_streq(path, "/proc/self/exe")) {
+        const char *exe = sched_task_exec_path(current_task);
+        if (!exe)
+            return -ENOENT;
+        syscall_copy_fixed_string(out, cap, exe);
+        return 0;
+    }
+    if (path[0] == '/' && path[1] == 'p' && path[2] == 'r' && path[3] == 'o' &&
+        path[4] == 'c' && path[5] == '/' && path[6] == 's' && path[7] == 'e' &&
+        path[8] == 'l' && path[9] == 'f' && path[10] == '/' && path[11] == 'f' &&
+        path[12] == 'd' && path[13] == '/') {
+        const char *p = &path[14];
+
+        if (*p == '\0')
+            return -ENOENT;
+        while (*p >= '0' && *p <= '9') {
+            fd = fd * 10U + (uint32_t)(*p - '0');
+            p++;
+        }
+        if (*p != '\0')
+            return -ENOENT;
+        obj = fd_get((int)fd);
+        if (!obj || obj->path[0] == '\0')
+            return -ENOENT;
+        syscall_copy_fixed_string(out, cap, obj->path);
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static int linux_parent_dir(const char *path, char *out, size_t cap)
+{
+    size_t len = 0U;
+    size_t last_slash = 0U;
+
+    if (!path || !out || cap < 2U || path[0] != '/')
+        return -EINVAL;
+
+    while (path[len] != '\0') {
+        if (path[len] == '/')
+            last_slash = len;
+        len++;
+    }
+
+    if (last_slash == 0U) {
+        out[0] = '/';
+        out[1] = '\0';
+        return 0;
+    }
+    if (last_slash >= cap)
+        return -ENAMETOOLONG;
+
+    memcpy(out, path, last_slash);
+    out[last_slash] = '\0';
+    return 0;
+}
+
+static int linux_resolve_link_target(const char *path, const char *target,
+                                     char *out, size_t cap)
+{
+    char parent[VFSD_IO_BYTES];
+    int  rc;
+
+    if (!path || !target || !out || cap < 2U)
+        return -EFAULT;
+    if (target[0] == '/') {
+        syscall_copy_fixed_string(out, cap, target);
+        return 0;
+    }
+
+    rc = linux_parent_dir(path, parent, sizeof(parent));
+    if (rc < 0)
+        return rc;
+    return syscall_path_join_abs(parent, target, out, cap);
+}
+
+static int linux_path_lstat_fill(const char *path, stat_t *out)
+{
+    char   target[VFSD_IO_BYTES];
+    size_t len = 0U;
+    int    rc;
+
+    if (!path || !out)
+        return -EFAULT;
+
+    rc = linux_path_readlink(path, target, sizeof(target));
+    if (rc == 0) {
+        while (target[len] != '\0')
+            len++;
+        stat_fill(out, S_IFLNK | S_IRUSR | S_IRGRP | S_IROTH, (uint64_t)len, 512U);
+        return 0;
+    }
+
+    return vfs_lstat(path, out);
+}
+
+static int linux_path_follow_once(const char *path, char *out, size_t cap)
+{
+    char target[VFSD_IO_BYTES];
+    int  rc;
+
+    if (!path || !out || cap < 2U)
+        return -EFAULT;
+
+    rc = linux_path_readlink(path, target, sizeof(target));
+    if (rc < 0)
+        rc = vfs_readlink(path, target, sizeof(target));
+    if (rc < 0)
+        return rc;
+
+    return linux_resolve_link_target(path, target, out, cap);
+}
+
+static int path_stat_fill_native(const char *path, int nofollow, stat_t *out)
+{
+    char     current[VFSD_IO_BYTES];
+    char     next[VFSD_IO_BYTES];
+    fd_object_t *obj;
+    fd_entry_t  *e;
+    int      fd;
+    int      rc;
+
+    if (!path || !out)
+        return -EFAULT;
+    if (nofollow)
+        return linux_path_lstat_fill(path, out);
+
+    syscall_copy_fixed_string(current, sizeof(current), path);
+    for (uint32_t depth = 0U; depth < 4U; depth++) {
+        rc = linux_path_follow_once(current, next, sizeof(next));
+        if (rc < 0)
+            break;
+        syscall_copy_fixed_string(current, sizeof(current), next);
+    }
+
+    fd = fd_open_path_current(current, O_RDONLY, 0U);
+    if (fd < 0)
+        return fd;
+
+    obj = fd_get(fd);
+    if (!obj) {
+        rc = -EBADF;
+    } else if (obj->type == FD_TYPE_VFSD) {
+        rc = vfsd_proxy_stat(obj->remote_handle, out);
+    } else if (obj->type == FD_TYPE_VFS) {
+        rc = vfs_stat(&obj->file, out);
+    } else {
+        rc = -EBADF;
+    }
+
+    e = fd_entry_get(fd);
+    if (e)
+        fd_release_slot(e);
+    return rc;
+}
 
 /* ════════════════════════════════════════════════════════════════════
  * Syscall 1 — write
@@ -2056,8 +2802,10 @@ static uint64_t sys_openat(uint64_t args[6])
     const char *path = (const char *)(uintptr_t)args[1];
     const char *path_arg = path;
     char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
     uint16_t    oflags = 0U;
     uint8_t     fd_flags = 0U;
+    uint32_t    resolve_flags = 0U;
     int         rc;
 
     if (!path)
@@ -2072,14 +2820,15 @@ static uint64_t sys_openat(uint64_t args[6])
 
     if (path_arg[0] == '\0')
         return ERR(ENOENT);
-    if (path_arg[0] != '/' && dirfd != AT_FDCWD) {
-        if (!fd_get(dirfd))
-            return ERR(EBADF);
-        return ERR(ENOSYS);
-    }
 
     fd_split_open_flags((uint16_t)args[2], &oflags, &fd_flags);
-    rc = fd_open_path_current(path_arg, oflags, fd_flags);
+    rc = resolve_dirfd_path_meta(dirfd, path_arg, 0, resolved, sizeof(resolved),
+                                 &resolve_flags);
+    (void)resolve_flags;
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = fd_open_path_current(resolved, oflags, fd_flags);
     return (rc < 0) ? ERR(-rc) : (uint64_t)rc;
 }
 
@@ -2092,10 +2841,9 @@ static uint64_t sys_fstatat(uint64_t args[6])
     uintptr_t   stat_uva = (uintptr_t)args[2];
     uint32_t    flags = (uint32_t)args[3];
     char        path_buf[EXEC_MAX_PATH];
-    uint64_t    stat_args[6] = { 0 };
-    uint64_t    close_args[6] = { 0 };
-    uint64_t    rc;
-    int         fd;
+    char        resolved[VFSD_IO_BYTES];
+    stat_t      st;
+    int         rc;
     int         copy_rc;
 
     if (!stat_uva)
@@ -2114,35 +2862,16 @@ static uint64_t sys_fstatat(uint64_t args[6])
         path_arg = "";
     }
 
-    if (path_arg[0] == '\0') {
-        if ((flags & AT_EMPTY_PATH) == 0U)
-            return ERR(ENOENT);
-        if (dirfd == AT_FDCWD) {
-            path_arg = ".";
-        } else {
-            stat_args[0] = (uint64_t)dirfd;
-            stat_args[1] = stat_uva;
-            return sys_fstat(stat_args);
-        }
-    }
+    rc = resolve_dirfd_path_meta(dirfd, path_arg, (flags & AT_EMPTY_PATH) != 0U,
+                                 resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
 
-    if (path_arg[0] != '/' && dirfd != AT_FDCWD) {
-        if (!fd_get(dirfd))
-            return ERR(EBADF);
-        return ERR(ENOSYS);
-    }
-
-    fd = fd_open_path_current(path_arg, O_RDONLY, 0U);
-    if (fd < 0)
-        return ERR(-fd);
-
-    stat_args[0] = (uint64_t)fd;
-    stat_args[1] = stat_uva;
-    rc = sys_fstat(stat_args);
-
-    close_args[0] = (uint64_t)fd;
-    (void)sys_close(close_args);
-    return rc;
+    rc = path_stat_fill_native(resolved, (flags & AT_SYMLINK_NOFOLLOW) != 0U, &st);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = user_store_bytes(stat_uva, &st, sizeof(st));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
 static uint64_t sys_mkdir(uint64_t args[6])
@@ -2580,6 +3309,7 @@ static uint64_t sys_execve(uint64_t args[6])
     exception_frame_t *frame = active_syscall_frame;
     mm_space_t        *old_mm;
     char               resolved_path[VFSD_IO_BYTES];
+    uint32_t           resolve_flags = 0U;
     int                rc;
 
     if (!current_task || !sched_task_is_user(current_task) || !frame)
@@ -2602,7 +3332,8 @@ static uint64_t sys_execve(uint64_t args[6])
         return ERR(-rc);
     }
 
-    rc = resolve_user_vfs_path(copy->path, resolved_path, sizeof(resolved_path));
+    rc = resolve_user_vfs_path_meta(copy->path, resolved_path, sizeof(resolved_path),
+                                    &resolve_flags);
     if (rc < 0) {
         kdebug_watchdog_resume();
         kfree(copy);
@@ -2640,6 +3371,11 @@ static uint64_t sys_execve(uint64_t args[6])
         mmu_space_destroy(old_mm);
 
     signal_task_reset_for_exec(current_task);
+    (void)sched_task_set_abi_mode(current_task,
+                                  (resolve_flags & VFSD_RESP_FLAG_LINUX_COMPAT) != 0U
+                                      ? SCHED_ABI_LINUX
+                                      : SCHED_ABI_ENLILOS);
+    (void)sched_task_set_exec_path(current_task, resolved_path);
     task_brk[task_idx()] = 0ULL;
     elf64_dlreset_proc((uint32_t)task_idx());
     /* Rebase del thread pointer sul TLS iniziale preparato dal loader.
@@ -2702,6 +3438,7 @@ static uint64_t sys_fork(uint64_t args[6])
     fd_clone_task_table(child_idx, parent_idx);
     task_brk[child_idx] = task_brk[parent_idx];
     signal_task_fork(child, current_task);
+    (void)sched_task_set_abi_mode(child, sched_task_abi_mode(current_task));
 
     return (uint64_t)child->pid;
 }
@@ -3965,6 +4702,25 @@ static uint64_t sys_ipc_wait(uint64_t args[6])
     return 0;
 }
 
+static uint64_t sys_ipc_poll(uint64_t args[6])
+{
+    uintptr_t     msg_uva = (uintptr_t)args[1];
+    ipc_message_t msg;
+    int           rc;
+
+    if (!msg_uva)
+        return ERR(EFAULT);
+
+    rc = mk_ipc_poll((uint32_t)args[0], &msg);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = user_store_bytes(msg_uva, &msg, sizeof(msg));
+    if (rc < 0)
+        return ERR(-rc);
+    return 0;
+}
+
 static uint64_t sys_ipc_reply(uint64_t args[6])
 {
     uint32_t port_id = (uint32_t)args[0];
@@ -4340,10 +5096,13 @@ static uint64_t sys_net_boot_recv(uint64_t args[6])
     if (rc == 0)
         return 0;
 
-    rc = user_store_bytes(buf_uva, bounce, (size_t)rc);
-    if (rc < 0)
-        return ERR(-rc);
-    return (uint64_t)rc;
+    {
+        int copied = rc;
+        rc = user_store_bytes(buf_uva, bounce, (size_t)copied);
+        if (rc < 0)
+            return ERR(-rc);
+        return (uint64_t)copied;
+    }
 }
 
 /* SYS_NET_BOOT_INFO (164): args[0]=info_uva */
@@ -4412,6 +5171,8 @@ static void sock_sync_fd_flags(fd_object_t *obj)
 
     if (!obj || obj->type != FD_TYPE_SOCK)
         return;
+    if (sock_handle_is_remote_netd(obj->remote_handle))
+        return;
     sk = sock_get((int)obj->remote_handle);
     if (!sk)
         return;
@@ -4419,6 +5180,22 @@ static void sock_sync_fd_flags(fd_object_t *obj)
         sk->flags |= SOCK_FL_NONBLOCK;
     else
         sk->flags &= (uint16_t)~SOCK_FL_NONBLOCK;
+}
+
+static fd_object_t *sock_fd_object(int fd, int *out_err)
+{
+    fd_object_t *obj = fd_get(fd);
+
+    if (!obj) { *out_err = -EBADF; return NULL; }
+    if (obj->type != FD_TYPE_SOCK) { *out_err = -ENOTSOCK; return NULL; }
+    *out_err = 0;
+    return obj;
+}
+
+static int sock_fd_is_remote_netd(const fd_object_t *obj)
+{
+    return obj && obj->type == FD_TYPE_SOCK &&
+           sock_handle_is_remote_netd(obj->remote_handle);
 }
 
 /* Alloca un fd di tipo SOCK e lo collega a un sock_t appena creato. */
@@ -4449,20 +5226,6 @@ static int sock_open_fd(int sock_idx, uint16_t open_flags, uint8_t fd_flags)
     return fd;
 }
 
-/* Estrae il sock_t da un fd di tipo SOCK.
- * Ritorna NULL e setta *out_err se il fd non è valido o non è SOCK. */
-static sock_t *sock_from_fd(int fd, int *out_err)
-{
-    fd_object_t *obj = fd_get(fd);
-
-    if (!obj) { *out_err = -EBADF; return NULL; }
-    if (obj->type != FD_TYPE_SOCK) { *out_err = -ENOTSOCK; return NULL; }
-    sock_t *s = sock_get((int)obj->remote_handle);
-    if (!s) { *out_err = -EBADF; return NULL; }
-    *out_err = 0;
-    return s;
-}
-
 static uint64_t sys_socket(uint64_t args[6])
 {
     int domain   = (int)args[0];
@@ -4491,11 +5254,12 @@ static uint64_t sys_bind(uint64_t args[6])
     int                fd      = (int)args[0];
     uintptr_t          sa_uva  = (uintptr_t)args[1];
     kern_sockaddr_in_t sa;
+    fd_object_t       *obj;
     int                err;
     int                rc;
 
-    sock_from_fd(fd, &err);   /* solo per validare il fd */
-    if (err)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     if (!sa_uva)
@@ -4505,10 +5269,15 @@ static uint64_t sys_bind(uint64_t args[6])
     if (sa.sin_family != AF_INET)
         return ERR(EAFNOSUPPORT);
 
-    fd_object_t *obj = fd_get(fd);
-    rc = sock_do_bind((int)obj->remote_handle,
-                      sock_ntohl(sa.sin_addr),
-                      sock_ntohs(sa.sin_port));
+    if (sock_fd_is_remote_netd(obj)) {
+        rc = netd_proxy_bind(sock_handle_from_remote_netd(obj->remote_handle),
+                             sock_ntohl(sa.sin_addr),
+                             sock_ntohs(sa.sin_port));
+    } else {
+        rc = sock_do_bind((int)obj->remote_handle,
+                          sock_ntohl(sa.sin_addr),
+                          sock_ntohs(sa.sin_port));
+    }
     return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
@@ -4516,13 +5285,15 @@ static uint64_t sys_listen(uint64_t args[6])
 {
     int fd      = (int)args[0];
     int backlog = (int)args[1];
+    fd_object_t *obj;
     int err, rc;
 
-    sock_from_fd(fd, &err);
-    if (err)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
+    if (sock_fd_is_remote_netd(obj))
+        return ERR(EOPNOTSUPP);
 
-    fd_object_t *obj = fd_get(fd);
     rc = sock_do_listen((int)obj->remote_handle, backlog);
     return (rc < 0) ? ERR(-rc) : 0ULL;
 }
@@ -4537,11 +5308,12 @@ static uint64_t sys_accept(uint64_t args[6])
     uint16_t           peer_port = 0U;
     int                new_sock_idx, new_fd;
 
-    sock_from_fd(fd, &err);
-    if (err)
+    fd_object_t *obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
+    if (sock_fd_is_remote_netd(obj))
+        return ERR(EOPNOTSUPP);
 
-    fd_object_t *obj = fd_get(fd);
     new_sock_idx = sock_do_accept((int)obj->remote_handle, &peer_ip, &peer_port);
     if (new_sock_idx < 0)
         return ERR(-new_sock_idx);
@@ -4569,10 +5341,16 @@ static uint64_t sys_connect(uint64_t args[6])
     int                fd     = (int)args[0];
     uintptr_t          sa_uva = (uintptr_t)args[1];
     kern_sockaddr_in_t sa;
+    fd_object_t       *obj;
+    sock_t            *sk = NULL;
+    uint32_t           dst_ip;
+    uint16_t           dst_port;
     int                err, rc;
+    int                nonblock;
+    uint64_t           deadline_ms = 0ULL;
 
-    sock_from_fd(fd, &err);
-    if (err)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     if (!sa_uva)
@@ -4582,10 +5360,74 @@ static uint64_t sys_connect(uint64_t args[6])
     if (sa.sin_family != AF_INET)
         return ERR(EAFNOSUPPORT);
 
-    fd_object_t *obj = fd_get(fd);
-    rc = sock_do_connect((int)obj->remote_handle,
-                         sock_ntohl(sa.sin_addr),
-                         sock_ntohs(sa.sin_port));
+    dst_ip = sock_ntohl(sa.sin_addr);
+    dst_port = sock_ntohs(sa.sin_port);
+    nonblock = ((obj->flags & O_NONBLOCK) != 0U);
+    if (!nonblock)
+        deadline_ms = timer_now_ms() + 5000ULL;
+
+    if (sock_fd_is_remote_netd(obj)) {
+        do {
+            rc = netd_proxy_connect(sock_handle_from_remote_netd(obj->remote_handle),
+                                    dst_ip, dst_port);
+            if (rc != -EINPROGRESS || nonblock)
+                break;
+            if (timer_now_ms() >= deadline_ms) {
+                rc = -ETIMEDOUT;
+                break;
+            }
+            sched_yield();
+        } while (1);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
+    sk = sock_get((int)obj->remote_handle);
+    if (!sk)
+        return ERR(EBADF);
+
+    if (dst_ip == SOCK_LOOPBACK_IP || dst_ip == SOCK_ANY_IP) {
+        rc = sock_do_connect((int)obj->remote_handle, dst_ip, dst_port);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
+    if (sk->type != SOCK_STREAM)
+        return ERR(ENETUNREACH);
+    if (!netd_proxy_available())
+        return ERR(ENETUNREACH);
+
+    {
+        uint32_t remote_handle = 0U;
+        uint32_t bind_ip = sk->local_ip;
+        uint16_t bind_port = sk->local_port;
+
+        rc = netd_proxy_socket(AF_INET, sk->type, 0, &remote_handle);
+        if (rc < 0)
+            return ERR(-rc);
+
+        if (bind_ip != 0U || bind_port != 0U) {
+            rc = netd_proxy_bind(remote_handle, bind_ip, bind_port);
+            if (rc < 0) {
+                (void)netd_proxy_close(remote_handle);
+                return ERR(-rc);
+            }
+        }
+
+        sock_free((int)obj->remote_handle);
+        obj->remote_handle = sock_handle_to_remote_netd(remote_handle);
+    }
+
+    do {
+        rc = netd_proxy_connect(sock_handle_from_remote_netd(obj->remote_handle),
+                                dst_ip, dst_port);
+        if (rc != -EINPROGRESS || nonblock)
+            break;
+        if (timer_now_ms() >= deadline_ms) {
+            rc = -ETIMEDOUT;
+            break;
+        }
+        sched_yield();
+    } while (1);
+
     return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
@@ -4596,11 +5438,13 @@ static uint64_t sys_send(uint64_t args[6])
     size_t    len   = (size_t)args[2];
     int       flags = (int)args[3];
     void     *bounce;
+    fd_object_t *obj;
     int       err;
     ssize_t   rc;
+    int       nonblock;
 
-    sock_t *s = sock_from_fd(fd, &err);
-    if (!s)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     if (!buva || len == 0U)
@@ -4616,9 +5460,19 @@ static uint64_t sys_send(uint64_t args[6])
         return ERR(EFAULT);
     }
 
-    fd_object_t *obj = fd_get(fd);
-    sock_sync_fd_flags(obj);
-    rc = sock_do_send((int)obj->remote_handle, bounce, len, flags);
+    nonblock = ((obj->flags & O_NONBLOCK) != 0U) || ((flags & MSG_DONTWAIT) != 0);
+    if (sock_fd_is_remote_netd(obj)) {
+        do {
+            rc = netd_proxy_send(sock_handle_from_remote_netd(obj->remote_handle),
+                                 bounce, len);
+            if (rc != -EAGAIN || nonblock)
+                break;
+            sched_yield();
+        } while (1);
+    } else {
+        sock_sync_fd_flags(obj);
+        rc = sock_do_send((int)obj->remote_handle, bounce, len, flags);
+    }
     kfree(bounce);
     return (rc < 0) ? ERR((int)-rc) : (uint64_t)rc;
 }
@@ -4630,11 +5484,13 @@ static uint64_t sys_recv(uint64_t args[6])
     size_t    len   = (size_t)args[2];
     int       flags = (int)args[3];
     void     *bounce;
+    fd_object_t *obj;
     int       err;
     ssize_t   rc;
+    int       nonblock;
 
-    sock_t *s = sock_from_fd(fd, &err);
-    if (!s)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     if (!buva || len == 0U)
@@ -4646,9 +5502,19 @@ static uint64_t sys_recv(uint64_t args[6])
     if (!bounce)
         return ERR(ENOMEM);
 
-    fd_object_t *obj = fd_get(fd);
-    sock_sync_fd_flags(obj);
-    rc = sock_do_recv((int)obj->remote_handle, bounce, len, flags);
+    nonblock = ((obj->flags & O_NONBLOCK) != 0U) || ((flags & MSG_DONTWAIT) != 0);
+    if (sock_fd_is_remote_netd(obj)) {
+        do {
+            rc = netd_proxy_recv(sock_handle_from_remote_netd(obj->remote_handle),
+                                 bounce, len);
+            if (rc != -EAGAIN || nonblock)
+                break;
+            sched_yield();
+        } while (1);
+    } else {
+        sock_sync_fd_flags(obj);
+        rc = sock_do_recv((int)obj->remote_handle, bounce, len, flags);
+    }
     if (rc > 0)
         (void)user_store_bytes(buva, bounce, (size_t)rc);
     kfree(bounce);
@@ -4669,9 +5535,11 @@ static uint64_t sys_sendto(uint64_t args[6])
     int                err;
     ssize_t            rc;
 
-    sock_t *s = sock_from_fd(fd, &err);
-    if (!s)
+    fd_object_t *obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
+    if (sock_fd_is_remote_netd(obj))
+        return ERR(EOPNOTSUPP);
 
     if (!buva || len == 0U)
         return 0ULL;
@@ -4693,7 +5561,6 @@ static uint64_t sys_sendto(uint64_t args[6])
         return ERR(EFAULT);
     }
 
-    fd_object_t *obj = fd_get(fd);
     sock_sync_fd_flags(obj);
     rc = sock_do_sendto((int)obj->remote_handle, bounce, len, dst_ip, dst_port, flags);
     kfree(bounce);
@@ -4714,9 +5581,11 @@ static uint64_t sys_recvfrom(uint64_t args[6])
     int                err;
     ssize_t            rc;
 
-    sock_t *s = sock_from_fd(fd, &err);
-    if (!s)
+    fd_object_t *obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
+    if (sock_fd_is_remote_netd(obj))
+        return ERR(EOPNOTSUPP);
 
     if (!buva || len == 0U)
         return 0ULL;
@@ -4727,7 +5596,6 @@ static uint64_t sys_recvfrom(uint64_t args[6])
     if (!bounce)
         return ERR(ENOMEM);
 
-    fd_object_t *obj = fd_get(fd);
     sock_sync_fd_flags(obj);
     rc = sock_do_recvfrom((int)obj->remote_handle, bounce, len,
                           &src_ip, &src_port, flags);
@@ -4757,19 +5625,25 @@ static uint64_t sys_setsockopt(uint64_t args[6])
     int       optname = (int)args[2];
     uintptr_t val_uva = (uintptr_t)args[3];
     socklen_t optlen  = (socklen_t)args[4];
-    sock_t   *s;
+    fd_object_t *obj;
     int       err;
+    int       rc;
     uint32_t  val = 0U;
 
-    s = sock_from_fd(fd, &err);
-    if (!s)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     /* Leggi il valore se presente */
     if (val_uva && optlen >= sizeof(uint32_t))
         (void)user_copy_bytes(val_uva, &val, sizeof(val));
 
-    fd_object_t *obj = fd_get(fd);
+    if (sock_fd_is_remote_netd(obj)) {
+        rc = netd_proxy_setsockopt(sock_handle_from_remote_netd(obj->remote_handle),
+                                   level, optname, &val, sizeof(val));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
     sock_t *sk = sock_get((int)obj->remote_handle);
     if (!sk)
         return ERR(EBADF);
@@ -4799,16 +5673,31 @@ static uint64_t sys_getsockopt(uint64_t args[6])
     int       optname = (int)args[2];
     uintptr_t val_uva = (uintptr_t)args[3];
     uintptr_t len_uva = (uintptr_t)args[4];
-    sock_t   *s;
+    fd_object_t *obj;
     int       err;
+    int       rc;
     uint32_t  val = 0U;
 
-    s = sock_from_fd(fd, &err);
-    if (!s)
+    obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
     (void)level;
-    fd_object_t *obj = fd_get(fd);
+    if (sock_fd_is_remote_netd(obj)) {
+        size_t slen = sizeof(val);
+        rc = netd_proxy_getsockopt(sock_handle_from_remote_netd(obj->remote_handle),
+                                   level, optname, &val, &slen);
+        if (rc < 0)
+            return ERR(-rc);
+        if (val_uva)
+            (void)user_store_bytes(val_uva, &val, slen);
+        if (len_uva) {
+            uint32_t out_len = (uint32_t)slen;
+            (void)user_store_bytes(len_uva, &out_len, sizeof(out_len));
+        }
+        return 0ULL;
+    }
+
     sock_t *sk = sock_get((int)obj->remote_handle);
     if (!sk)
         return ERR(EBADF);
@@ -4839,13 +5728,1064 @@ static uint64_t sys_shutdown(uint64_t args[6])
     int how = (int)args[1];
     int err, rc;
 
-    sock_from_fd(fd, &err);
-    if (err)
+    fd_object_t *obj = sock_fd_object(fd, &err);
+    if (!obj)
         return ERR(-err);
 
-    fd_object_t *obj = fd_get(fd);
-    rc = sock_do_shutdown((int)obj->remote_handle, how);
+    if (sock_fd_is_remote_netd(obj))
+        rc = netd_proxy_shutdown(sock_handle_from_remote_netd(obj->remote_handle), how);
+    else
+        rc = sock_do_shutdown((int)obj->remote_handle, how);
     return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Linux AArch64 compatibility syscall table (M11-05)
+ * ════════════════════════════════════════════════════════════════════ */
+
+static uint64_t sys_linux_passthrough(uint64_t args[6], syscall_handler_fn fn)
+{
+    return fn ? fn(args) : ERR(ENOSYS);
+}
+
+static uint64_t sys_linux_exit(uint64_t args[6])            { return sys_linux_passthrough(args, sys_exit); }
+static uint64_t sys_linux_exit_group(uint64_t args[6])      { return sys_linux_passthrough(args, sys_exit_group); }
+static uint64_t sys_linux_read(uint64_t args[6])            { return sys_linux_passthrough(args, sys_read); }
+static uint64_t sys_linux_write(uint64_t args[6])           { return sys_linux_passthrough(args, sys_write); }
+static uint64_t sys_linux_close(uint64_t args[6])           { return sys_linux_passthrough(args, sys_close); }
+static uint64_t sys_linux_dup(uint64_t args[6])             { return sys_linux_passthrough(args, sys_dup); }
+static uint64_t sys_linux_fcntl(uint64_t args[6])           { return sys_linux_passthrough(args, sys_fcntl); }
+static uint64_t sys_linux_lseek(uint64_t args[6])           { return sys_linux_passthrough(args, sys_lseek); }
+static uint64_t sys_linux_readv(uint64_t args[6])           { return sys_linux_passthrough(args, sys_readv); }
+static uint64_t sys_linux_writev(uint64_t args[6])          { return sys_linux_passthrough(args, sys_writev); }
+static uint64_t sys_linux_ioctl(uint64_t args[6])           { return sys_linux_passthrough(args, sys_ioctl); }
+static uint64_t sys_linux_getcwd(uint64_t args[6])          { return sys_linux_passthrough(args, sys_getcwd); }
+static uint64_t sys_linux_set_tid_address(uint64_t args[6]) { return sys_linux_passthrough(args, sys_set_tid_address); }
+static uint64_t sys_linux_futex(uint64_t args[6])           { return sys_linux_passthrough(args, sys_futex); }
+static uint64_t sys_linux_nanosleep(uint64_t args[6])       { return sys_linux_passthrough(args, sys_nanosleep); }
+static uint64_t sys_linux_clock_gettime(uint64_t args[6])   { return sys_linux_passthrough(args, sys_clock_gettime); }
+static uint64_t sys_linux_uname(uint64_t args[6])           { return sys_linux_passthrough(args, sys_uname); }
+static uint64_t sys_linux_gettimeofday(uint64_t args[6])    { return sys_linux_passthrough(args, sys_gettimeofday); }
+static uint64_t sys_linux_getpid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_getpid); }
+static uint64_t sys_linux_getppid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_getppid); }
+static uint64_t sys_linux_getuid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_getuid); }
+static uint64_t sys_linux_geteuid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_geteuid); }
+static uint64_t sys_linux_getgid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_getgid); }
+static uint64_t sys_linux_getegid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_getegid); }
+static uint64_t sys_linux_gettid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_gettid); }
+static uint64_t sys_linux_tgkill(uint64_t args[6])          { return sys_linux_passthrough(args, sys_tgkill); }
+static uint64_t sys_linux_clone(uint64_t args[6])           { return sys_linux_passthrough(args, sys_clone); }
+static uint64_t sys_linux_execve(uint64_t args[6])          { return sys_linux_passthrough(args, sys_execve); }
+static uint64_t sys_linux_mmap(uint64_t args[6])            { return sys_linux_passthrough(args, sys_mmap); }
+static uint64_t sys_linux_munmap(uint64_t args[6])          { return sys_linux_passthrough(args, sys_munmap); }
+static uint64_t sys_linux_brk(uint64_t args[6])             { return sys_linux_passthrough(args, sys_brk); }
+static uint64_t sys_linux_socket(uint64_t args[6])          { return sys_linux_passthrough(args, sys_socket); }
+static uint64_t sys_linux_bind(uint64_t args[6])            { return sys_linux_passthrough(args, sys_bind); }
+static uint64_t sys_linux_listen(uint64_t args[6])          { return sys_linux_passthrough(args, sys_listen); }
+static uint64_t sys_linux_accept(uint64_t args[6])          { return sys_linux_passthrough(args, sys_accept); }
+static uint64_t sys_linux_connect(uint64_t args[6])         { return sys_linux_passthrough(args, sys_connect); }
+static uint64_t sys_linux_sendto(uint64_t args[6])          { return sys_linux_passthrough(args, sys_sendto); }
+static uint64_t sys_linux_recvfrom(uint64_t args[6])        { return sys_linux_passthrough(args, sys_recvfrom); }
+static uint64_t sys_linux_setsockopt(uint64_t args[6])      { return sys_linux_passthrough(args, sys_setsockopt); }
+static uint64_t sys_linux_getsockopt(uint64_t args[6])      { return sys_linux_passthrough(args, sys_getsockopt); }
+static uint64_t sys_linux_shutdown(uint64_t args[6])        { return sys_linux_passthrough(args, sys_shutdown); }
+
+static uint64_t sys_linux_sched_yield(uint64_t args[6])
+{
+    return sys_yield(args);
+}
+
+static uint64_t sys_linux_dup3(uint64_t args[6])
+{
+    int oldfd = (int)args[0];
+    int newfd = (int)args[1];
+    int flags = (int)args[2];
+    uint64_t native_args[6] = { 0 };
+    uint64_t rc;
+
+    if ((flags & ~(int)LINUX_O_CLOEXEC) != 0)
+        return ERR(EINVAL);
+    if (oldfd == newfd)
+        return ERR(EINVAL);
+
+    native_args[0] = (uint64_t)oldfd;
+    native_args[1] = (uint64_t)newfd;
+    rc = sys_dup2(native_args);
+    if ((int64_t)rc < 0)
+        return rc;
+    if (flags & (int)LINUX_O_CLOEXEC)
+        fd_entry_set_cloexec(fd_entry_get(newfd), 1);
+    return rc;
+}
+
+static uint64_t sys_linux_pipe2(uint64_t args[6])
+{
+    uintptr_t fds_uva = (uintptr_t)args[0];
+    uint32_t  flags   = (uint32_t)args[1];
+    uint64_t  native_args[6] = { 0 };
+    int32_t   fds[2];
+    int       rc;
+
+    if ((flags & ~(LINUX_O_CLOEXEC | LINUX_O_NONBLOCK)) != 0U)
+        return ERR(EINVAL);
+
+    native_args[0] = (uint64_t)fds_uva;
+    if ((int64_t)sys_pipe(native_args) < 0)
+        return sys_pipe(native_args);
+    rc = user_copy_bytes(fds_uva, fds, sizeof(fds));
+    if (rc < 0)
+        return ERR(-rc);
+
+    for (uint32_t i = 0U; i < 2U; i++) {
+        fd_entry_t  *e = fd_entry_get(fds[i]);
+        fd_object_t *obj = e ? e->obj : NULL;
+
+        if (!obj)
+            continue;
+        if (flags & LINUX_O_NONBLOCK)
+            obj->flags |= O_NONBLOCK;
+        if (flags & LINUX_O_CLOEXEC)
+            fd_entry_set_cloexec(e, 1);
+    }
+    return 0;
+}
+
+static int linux_fd_stat_fill(int fd, linux_stat_t *out)
+{
+    fd_object_t *obj = fd_get(fd);
+    stat_t       st;
+    int          rc;
+
+    if (!obj || !out)
+        return -EBADF;
+
+    if (obj->type == FD_TYPE_VFSD)
+        rc = vfsd_proxy_stat(obj->remote_handle, &st);
+    else if (obj->type == FD_TYPE_VFS)
+        rc = vfs_stat(&obj->file, &st);
+    else if (obj->type == FD_TYPE_PIPE) {
+        stat_fill(&st, S_IFIFO | S_IRUSR | S_IWUSR |
+                       S_IRGRP | S_IWGRP |
+                       S_IROTH | S_IWOTH,
+                  0ULL, PIPE_BUF_SIZE);
+        rc = 0;
+    } else if (obj->type == FD_TYPE_SOCK) {
+        stat_fill(&st, S_IFSOCK | S_IRUSR | S_IWUSR, 0ULL, 512U);
+        rc = 0;
+    } else {
+        return -EBADF;
+    }
+
+    if (rc < 0)
+        return rc;
+    linux_stat_from_native(&st, out);
+    return 0;
+}
+
+static uint64_t sys_linux_fstat(uint64_t args[6])
+{
+    linux_stat_t st;
+    int          rc;
+
+    if ((uintptr_t)args[1] == 0U)
+        return ERR(EFAULT);
+    rc = linux_fd_stat_fill((int)args[0], &st);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = user_store_bytes((uintptr_t)args[1], &st, sizeof(st));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_openat(uint64_t args[6])
+{
+    uint64_t native_args[6] = {
+        args[0], args[1], (uint64_t)linux_open_flags_to_native((uint32_t)args[2]),
+        args[3], 0U, 0U
+    };
+    return sys_openat(native_args);
+}
+
+static uint64_t sys_linux_mkdirat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = vfs_mkdir(resolved, (uint32_t)args[2] & 07777U);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_unlinkat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    uint32_t    flags = (uint32_t)args[2];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    stat_t      st;
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+    if ((flags & ~LINUX_AT_REMOVEDIR) != 0U)
+        return ERR(EINVAL);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = linux_path_lstat_fill(resolved, &st);
+    if (rc < 0)
+        return ERR(-rc);
+    if ((flags & LINUX_AT_REMOVEDIR) != 0U) {
+        if ((st.st_mode & S_IFMT) != S_IFDIR)
+            return ERR(ENOTDIR);
+    } else if ((st.st_mode & S_IFMT) == S_IFDIR) {
+        return ERR(EISDIR);
+    }
+    rc = vfs_unlink(resolved);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_symlinkat(uint64_t args[6])
+{
+    uintptr_t   target_uva = (uintptr_t)args[0];
+    int         dirfd = (int)args[1];
+    uintptr_t   link_uva = (uintptr_t)args[2];
+    const char *target = (const char *)(uintptr_t)args[0];
+    const char *linkpath = (const char *)(uintptr_t)args[2];
+    char        target_buf[VFSD_IO_BYTES];
+    char        link_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    int         rc;
+
+    if (!target || !linkpath)
+        return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(target_uva, target_buf, sizeof(target_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        rc = user_copy_cstr(link_uva, link_buf, sizeof(link_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        target = target_buf;
+        linkpath = link_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, linkpath, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = vfs_symlink(target, resolved);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_readlinkat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    uintptr_t   buf_uva = (uintptr_t)args[2];
+    size_t      buflen = (size_t)args[3];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    char        target[VFSD_IO_BYTES];
+    size_t      len = 0U;
+    int         rc;
+
+    if (!path || !buf_uva || buflen == 0U)
+        return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = linux_path_readlink(resolved, target, sizeof(target));
+    if (rc < 0)
+        rc = vfs_readlink(resolved, target, sizeof(target));
+    if (rc < 0)
+        return ERR(-rc);
+
+    while (target[len] != '\0')
+        len++;
+    if (len > buflen)
+        len = buflen;
+    rc = user_store_bytes(buf_uva, target, len);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)len;
+}
+
+static uint64_t sys_linux_newfstatat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    uint32_t    flags = (uint32_t)args[3];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    stat_t      native_st;
+    linux_stat_t st;
+    int         rc;
+
+    if ((uintptr_t)args[2] == 0U)
+        return ERR(EFAULT);
+    if (flags & ~(LINUX_AT_EMPTY_PATH | LINUX_AT_SYMLINK_NOFOLLOW))
+        return ERR(EINVAL);
+
+    if (path) {
+        if (current_task && sched_task_is_user(current_task)) {
+            rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+            if (rc < 0)
+                return ERR(-rc);
+            path = path_buf;
+        }
+    } else {
+        path = "";
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path,
+                                 (flags & LINUX_AT_EMPTY_PATH) != 0U,
+                                 resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = path_stat_fill_native(resolved, (flags & LINUX_AT_SYMLINK_NOFOLLOW) != 0U,
+                               &native_st);
+    if (rc < 0)
+        return ERR(-rc);
+    linux_stat_from_native(&native_st, &st);
+    rc = user_store_bytes((uintptr_t)args[2], &st, sizeof(st));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_getdents64(uint64_t args[6])
+{
+    int          fd = (int)args[0];
+    uintptr_t    buf_uva = (uintptr_t)args[1];
+    uint32_t     count = (uint32_t)args[2];
+    fd_object_t *obj = fd_get(fd);
+    uint32_t     copied = 0U;
+
+    if (!obj)
+        return ERR(EBADF);
+    if (!buf_uva)
+        return ERR(EFAULT);
+    if (count < 24U)
+        return 0ULL;
+
+    while (copied + 24U <= count) {
+        vfs_dirent_t      ent;
+        linux_dirent64_t  out;
+        size_t            namelen = 0U;
+        size_t            reclen;
+        int               rc;
+
+        if (obj->type == FD_TYPE_VFSD)
+            rc = vfsd_proxy_readdir(obj->remote_handle, &ent);
+        else if (obj->type == FD_TYPE_VFS)
+            rc = vfs_readdir(&obj->file, &ent);
+        else
+            return ERR(EBADF);
+
+        if (rc == -ENOENT)
+            break;
+        if (rc < 0)
+            return ERR(-rc);
+
+        memset(&out, 0, sizeof(out));
+        while (namelen + 1U < sizeof(out.d_name) && ent.name[namelen] != '\0') {
+            out.d_name[namelen] = ent.name[namelen];
+            namelen++;
+        }
+        out.d_name[namelen] = '\0';
+        reclen = (19U + namelen + 1U + 7U) & ~7U;
+        if (copied + reclen > count)
+            break;
+
+        out.d_ino = (uint64_t)(obj->file.dir_index + 1U);
+        out.d_off = (int64_t)obj->file.dir_index;
+        out.d_reclen = (uint16_t)reclen;
+        out.d_type = linux_dtype_from_mode(ent.mode);
+
+        rc = user_store_bytes(buf_uva + copied, &out, reclen);
+        if (rc < 0)
+            return ERR(-rc);
+        copied += (uint32_t)reclen;
+    }
+
+    return copied;
+}
+
+static uint64_t sys_linux_wait4(uint64_t args[6])
+{
+    uint64_t native_args[6] = { args[0], args[1], args[2], 0U, 0U, 0U };
+    uint64_t rc = sys_waitpid(native_args);
+
+    if ((int64_t)rc < 0)
+        return rc;
+    if ((uintptr_t)args[3] != 0U) {
+        linux_rusage_t ru;
+        int store_rc;
+
+        linux_fill_rusage(&ru);
+        store_rc = user_store_bytes((uintptr_t)args[3], &ru, sizeof(ru));
+        if (store_rc < 0)
+            return ERR(-store_rc);
+    }
+    return rc;
+}
+
+static uint64_t sys_linux_fsync(uint64_t args[6])
+{
+    fd_object_t *obj = fd_get((int)args[0]);
+    int          rc;
+
+    if (!obj)
+        return ERR(EBADF);
+    if (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD)
+        return ERR(EINVAL);
+    if (obj->file.mount == NULL)
+        return 0ULL;
+    rc = vfs_fsync(&obj->file);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_truncate(uint64_t args[6])
+{
+    uintptr_t   path_uva = (uintptr_t)args[0];
+    const char *path = (const char *)(uintptr_t)args[0];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_user_vfs_path(path, resolved, sizeof(resolved));
+    if (rc < 0)
+        return ERR(-rc);
+    rc = vfs_truncate(resolved, args[1]);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_ftruncate(uint64_t args[6])
+{
+    fd_object_t *obj = fd_get((int)args[0]);
+    int          rc;
+
+    if (!obj)
+        return ERR(EBADF);
+    if ((obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD) ||
+        obj->path[0] == '\0')
+        return ERR(EINVAL);
+    rc = vfs_truncate(obj->path, args[1]);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_faccessat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    stat_t      st;
+    uint32_t    mode = (uint32_t)args[2];
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = path_stat_fill_native(resolved, 0, &st);
+    if (rc < 0)
+        return ERR(-rc);
+    if ((mode & LINUX_W_OK) && (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0U)
+        return ERR(EACCES);
+    if ((mode & LINUX_R_OK) && (st.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)) == 0U)
+        return ERR(EACCES);
+    if ((mode & LINUX_X_OK) && (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0U)
+        return ERR(EACCES);
+    return 0ULL;
+}
+
+static uint64_t sys_linux_flock(uint64_t args[6])
+{
+    return fd_get((int)args[0]) ? 0ULL : ERR(EBADF);
+}
+
+static uint64_t sys_linux_mprotect(uint64_t args[6])
+{
+    uintptr_t   addr = (uintptr_t)args[0];
+    size_t      len = (size_t)args[1];
+    mm_space_t *space;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EINVAL);
+    if (len == 0U)
+        return 0ULL;
+
+    space = sched_task_space(current_task);
+    if (!space)
+        return ERR(EINVAL);
+    if (!mmu_space_resolve_ptr(space, addr & PAGE_MASK, 1U))
+        return ERR(EINVAL);
+    (void)args[2];
+    return 0ULL;
+}
+
+static uint64_t sys_linux_prlimit64(uint64_t args[6])
+{
+    uint32_t          pid = (uint32_t)args[0];
+    uint32_t          resource = (uint32_t)args[1];
+    linux_rlimit64_t  lim;
+    int               rc;
+
+    if (pid != 0U && (!current_task || pid != sched_task_tgid(current_task)))
+        return ERR(ESRCH);
+
+    memset(&lim, 0, sizeof(lim));
+    switch (resource) {
+    case LINUX_RLIMIT_NOFILE:
+        lim.rlim_cur = MAX_FD;
+        lim.rlim_max = MAX_FD;
+        break;
+    case LINUX_RLIMIT_STACK:
+        lim.rlim_cur = MMU_USER_STACK_SIZE;
+        lim.rlim_max = MMU_USER_STACK_SIZE;
+        break;
+    case LINUX_RLIMIT_DATA:
+    case LINUX_RLIMIT_AS:
+        lim.rlim_cur = 256ULL * 1024ULL * 1024ULL;
+        lim.rlim_max = 256ULL * 1024ULL * 1024ULL;
+        break;
+    default:
+        lim.rlim_cur = (uint64_t)-1LL;
+        lim.rlim_max = (uint64_t)-1LL;
+        break;
+    }
+
+    if ((uintptr_t)args[3] != 0U) {
+        rc = user_store_bytes((uintptr_t)args[3], &lim, sizeof(lim));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0ULL;
+}
+
+static uint64_t sys_linux_sysinfo(uint64_t args[6])
+{
+    linux_sysinfo_t info;
+    int             rc;
+
+    if ((uintptr_t)args[0] == 0U)
+        return ERR(EFAULT);
+    linux_fill_sysinfo(&info);
+    rc = user_store_bytes((uintptr_t)args[0], &info, sizeof(info));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_getrandom(uint64_t args[6])
+{
+    uintptr_t buf_uva = (uintptr_t)args[0];
+    size_t    len = (size_t)args[1];
+    void     *bounce;
+    int       rc;
+
+    (void)args[2];
+    if (!buf_uva)
+        return ERR(EFAULT);
+    if (len == 0U)
+        return 0ULL;
+    if (len > 4096U)
+        len = 4096U;
+
+    bounce = kmalloc((uint32_t)len);
+    if (!bounce)
+        return ERR(ENOMEM);
+    linux_random_fill(bounce, len);
+    rc = user_store_bytes(buf_uva, bounce, len);
+    kfree(bounce);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)len;
+}
+
+static uint64_t sys_linux_rseq(uint64_t args[6])
+{
+    (void)args;
+    return ERR(ENOSYS);
+}
+
+static uint16_t fd_poll_ready_mask(fd_object_t *obj)
+{
+    uint16_t mask = 0U;
+
+    if (!obj)
+        return LINUX_POLLNVAL;
+
+    if (fd_is_tty_object(obj)) {
+        if (tty_has_input())
+            mask |= LINUX_POLLIN;
+        mask |= LINUX_POLLOUT;
+        return mask;
+    }
+
+    if (obj->type == FD_TYPE_VFS || obj->type == FD_TYPE_VFSD) {
+        mask |= LINUX_POLLIN | LINUX_POLLOUT;
+        return mask;
+    }
+
+    if (obj->type == FD_TYPE_PIPE) {
+        pipe_t *pipe = (pipe_t *)obj->pipe;
+
+        if (!pipe || !pipe->in_use)
+            return LINUX_POLLNVAL;
+        if (obj->pipe_end == PIPE_END_READ) {
+            if (pipe->size > 0U)
+                mask |= LINUX_POLLIN;
+            if (pipe->writers == 0U)
+                mask |= LINUX_POLLHUP;
+        } else {
+            if (pipe->readers == 0U)
+                mask |= LINUX_POLLERR;
+            else if (pipe->size < PIPE_BUF_SIZE)
+                mask |= LINUX_POLLOUT;
+        }
+        return mask;
+    }
+
+    if (obj->type == FD_TYPE_SOCK) {
+        if (sock_fd_is_remote_netd(obj)) {
+            uint32_t remote_mask = 0U;
+            int      rc = netd_proxy_poll(sock_handle_from_remote_netd(obj->remote_handle),
+                                          &remote_mask);
+
+            if (rc < 0)
+                return LINUX_POLLERR;
+            mask |= (uint16_t)(remote_mask & 0xFFFFU);
+            return mask;
+        }
+        sock_t *sk = sock_get((int)obj->remote_handle);
+
+        if (!sk)
+            return LINUX_POLLNVAL;
+        if (sk->type == SOCK_STREAM) {
+            if (sk->state == SOCK_STATE_LISTENING) {
+                if (sk->accept_head != sk->accept_tail)
+                    mask |= LINUX_POLLIN;
+            } else if (sk->state == SOCK_STATE_CONNECTED || sk->state == SOCK_STATE_CLOSE_WAIT) {
+                if (sk->rx_tail != sk->rx_head)
+                    mask |= LINUX_POLLIN;
+                if ((sk->flags & SOCK_FL_PEER_CLOSE) != 0U)
+                    mask |= LINUX_POLLHUP;
+                if ((sk->flags & SOCK_FL_PEER_CLOSE) == 0U)
+                    mask |= LINUX_POLLOUT;
+            }
+        } else if (sk->type == SOCK_DGRAM) {
+            if (sk->udp_head != sk->udp_tail)
+                mask |= LINUX_POLLIN;
+            mask |= LINUX_POLLOUT;
+        }
+        return mask;
+    }
+
+    return LINUX_POLLNVAL;
+}
+
+static uint16_t fd_poll_revents(fd_object_t *obj, uint16_t requested)
+{
+    uint16_t ready = fd_poll_ready_mask(obj);
+    uint16_t base = (uint16_t)(requested & (LINUX_POLLIN | LINUX_POLLPRI | LINUX_POLLOUT));
+
+    ready &= (uint16_t)(base | LINUX_POLLERR | LINUX_POLLHUP | LINUX_POLLNVAL);
+    if (ready == 0U && (requested == 0U))
+        ready = fd_poll_ready_mask(obj);
+    return ready;
+}
+
+static uint64_t sys_linux_ppoll(uint64_t args[6])
+{
+    uintptr_t       pfds_uva = (uintptr_t)args[0];
+    uint32_t        nfds = (uint32_t)args[1];
+    uintptr_t       tsp_uva = (uintptr_t)args[2];
+    linux_pollfd_t  pfds[MAX_FD];
+    timespec_t      ts;
+    uint64_t        deadline = (uint64_t)-1ULL;
+    int             ready;
+    int             rc;
+
+    (void)args[3];
+
+    if (!pfds_uva && nfds != 0U)
+        return ERR(EFAULT);
+    if (nfds > MAX_FD)
+        return ERR(EINVAL);
+    if (nfds > 0U) {
+        rc = user_copy_bytes(pfds_uva, pfds, (size_t)nfds * sizeof(pfds[0]));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (tsp_uva != 0U) {
+        rc = user_copy_bytes(tsp_uva, &ts, sizeof(ts));
+        if (rc < 0)
+            return ERR(-rc);
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return ERR(EINVAL);
+        deadline = timer_now_ns() + (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+
+    for (;;) {
+        ready = 0;
+        for (uint32_t i = 0U; i < nfds; i++) {
+            fd_object_t *obj = fd_get(pfds[i].fd);
+
+            pfds[i].revents = (int16_t)fd_poll_revents(obj, (uint16_t)pfds[i].events);
+            if (pfds[i].revents != 0)
+                ready++;
+        }
+        if (ready > 0)
+            break;
+        if (signal_has_unblocked_pending(current_task))
+            return ERR(EINTR);
+        if (deadline != (uint64_t)-1ULL && timer_now_ns() >= deadline)
+            break;
+        if (tsp_uva == 0U && nfds == 0U)
+            break;
+        sched_yield();
+    }
+
+    if (nfds > 0U) {
+        rc = user_store_bytes(pfds_uva, pfds, (size_t)nfds * sizeof(pfds[0]));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return (uint64_t)(ready > 0 ? ready : 0);
+}
+
+static uint64_t sys_linux_pselect6(uint64_t args[6])
+{
+    uintptr_t read_uva  = (uintptr_t)args[1];
+    uintptr_t write_uva = (uintptr_t)args[2];
+    uintptr_t except_uva = (uintptr_t)args[3];
+    uintptr_t tsp_uva   = (uintptr_t)args[4];
+    uint32_t  nfds      = (uint32_t)args[0];
+    uint64_t  read_set[16];
+    uint64_t  write_set[16];
+    uint64_t  except_set[16];
+    uint64_t  out_read[16];
+    uint64_t  out_write[16];
+    uint64_t  out_except[16];
+    uint32_t  words;
+    timespec_t ts;
+    uint64_t  deadline = (uint64_t)-1ULL;
+    int       ready = 0;
+    int       rc;
+
+    (void)args[5];
+
+    if (nfds > 1024U)
+        return ERR(EINVAL);
+    words = (nfds + 63U) / 64U;
+    if (words > 16U)
+        words = 16U;
+
+    memset(read_set, 0, sizeof(read_set));
+    memset(write_set, 0, sizeof(write_set));
+    memset(except_set, 0, sizeof(except_set));
+    memset(out_read, 0, sizeof(out_read));
+    memset(out_write, 0, sizeof(out_write));
+    memset(out_except, 0, sizeof(out_except));
+
+    if (read_uva) {
+        rc = user_copy_bytes(read_uva, read_set, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (write_uva) {
+        rc = user_copy_bytes(write_uva, write_set, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (except_uva) {
+        rc = user_copy_bytes(except_uva, except_set, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (tsp_uva != 0U) {
+        rc = user_copy_bytes(tsp_uva, &ts, sizeof(ts));
+        if (rc < 0)
+            return ERR(-rc);
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return ERR(EINVAL);
+        deadline = timer_now_ns() + (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+
+    for (;;) {
+        ready = 0;
+        memset(out_read, 0, sizeof(out_read));
+        memset(out_write, 0, sizeof(out_write));
+        memset(out_except, 0, sizeof(out_except));
+
+        for (uint32_t fd = 0U; fd < nfds && fd < MAX_FD; fd++) {
+            fd_object_t *obj;
+            uint16_t     mask;
+            uint32_t     word = fd / 64U;
+            uint64_t     bit = 1ULL << (fd % 64U);
+
+            if (((read_set[word] | write_set[word] | except_set[word]) & bit) == 0ULL)
+                continue;
+
+            obj = fd_get((int)fd);
+            mask = fd_poll_ready_mask(obj);
+            if ((read_set[word] & bit) && (mask & (LINUX_POLLIN | LINUX_POLLHUP))) {
+                out_read[word] |= bit;
+                ready++;
+            }
+            if ((write_set[word] & bit) && (mask & LINUX_POLLOUT)) {
+                out_write[word] |= bit;
+                ready++;
+            }
+            if ((except_set[word] & bit) && (mask & (LINUX_POLLERR | LINUX_POLLNVAL))) {
+                out_except[word] |= bit;
+                ready++;
+            }
+        }
+
+        if (ready > 0)
+            break;
+        if (signal_has_unblocked_pending(current_task))
+            return ERR(EINTR);
+        if (deadline != (uint64_t)-1ULL && timer_now_ns() >= deadline)
+            break;
+        if (tsp_uva == 0U && nfds == 0U)
+            break;
+        sched_yield();
+    }
+
+    if (read_uva) {
+        rc = user_store_bytes(read_uva, out_read, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (write_uva) {
+        rc = user_store_bytes(write_uva, out_write, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    if (except_uva) {
+        rc = user_store_bytes(except_uva, out_except, (size_t)words * sizeof(uint64_t));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return (uint64_t)ready;
+}
+
+static uint64_t sys_linux_rt_sigaction(uint64_t args[6])
+{
+    int                sig = (int)args[0];
+    uintptr_t          act_uva = (uintptr_t)args[1];
+    uintptr_t          old_uva = (uintptr_t)args[2];
+    uint64_t           sigsetsize = args[3];
+    linux_sigaction_t  lsa;
+    linux_sigaction_t  lold;
+    sigaction_t        act;
+    sigaction_t        old;
+    sigaction_t       *act_ptr = NULL;
+    sigaction_t       *old_ptr = NULL;
+    int                rc;
+
+    if (sigsetsize != sizeof(uint64_t))
+        return ERR(EINVAL);
+
+    if (act_uva != 0U) {
+        rc = user_copy_bytes(act_uva, &lsa, sizeof(lsa));
+        if (rc < 0)
+            return ERR(-rc);
+        act.sa_handler = (sighandler_t)(uintptr_t)lsa.sa_handler;
+        act.sa_flags   = (uint32_t)lsa.sa_flags;
+        act.sa_mask    = lsa.sa_mask;
+        act._pad       = 0U;
+        act_ptr = &act;
+    }
+    if (old_uva != 0U)
+        old_ptr = &old;
+
+    rc = signal_sigaction_current(sig, act_ptr, old_ptr);
+    if (rc < 0)
+        return ERR(-rc);
+    if (old_ptr) {
+        memset(&lold, 0, sizeof(lold));
+        lold.sa_handler = (uintptr_t)old.sa_handler;
+        lold.sa_flags   = old.sa_flags;
+        lold.sa_mask    = old.sa_mask;
+        rc = user_store_bytes(old_uva, &lold, sizeof(lold));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0ULL;
+}
+
+static uint64_t sys_linux_rt_sigprocmask(uint64_t args[6])
+{
+    int        how = (int)args[0];
+    uintptr_t  set_uva = (uintptr_t)args[1];
+    uintptr_t  old_uva = (uintptr_t)args[2];
+    uint64_t   sigsetsize = args[3];
+    uint64_t   set_mask = 0ULL;
+    uint64_t   old_mask = 0ULL;
+    uint64_t  *set_ptr = NULL;
+    uint64_t  *old_ptr = NULL;
+    int        rc;
+
+    if (sigsetsize != sizeof(uint64_t))
+        return ERR(EINVAL);
+    if (set_uva != 0U) {
+        rc = user_copy_bytes(set_uva, &set_mask, sizeof(set_mask));
+        if (rc < 0)
+            return ERR(-rc);
+        set_ptr = &set_mask;
+    }
+    if (old_uva != 0U)
+        old_ptr = &old_mask;
+
+    rc = signal_sigprocmask_current(how, set_ptr, old_ptr);
+    if (rc < 0)
+        return ERR(-rc);
+    if (old_ptr) {
+        rc = user_store_bytes(old_uva, &old_mask, sizeof(old_mask));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0ULL;
+}
+
+static uint64_t sys_linux_rt_sigreturn(uint64_t args[6])
+{
+    return sys_sigreturn(args);
+}
+
+static uint64_t sys_linux_getsockname_common(uint64_t args[6], int peer)
+{
+    int                fd = (int)args[0];
+    uintptr_t          sa_uva = (uintptr_t)args[1];
+    uintptr_t          len_uva = (uintptr_t)args[2];
+    fd_object_t       *obj = fd_get(fd);
+    sock_t            *sk;
+    kern_sockaddr_in_t sa;
+    uint32_t           slen = sizeof(sa);
+    uint32_t           addr_ip = 0U;
+    uint16_t           addr_port = 0U;
+    int                rc;
+
+    if (!obj || obj->type != FD_TYPE_SOCK)
+        return ERR(ENOTSOCK);
+    if (!sa_uva || !len_uva)
+        return ERR(EFAULT);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    if (sock_fd_is_remote_netd(obj)) {
+        rc = netd_proxy_addr(sock_handle_from_remote_netd(obj->remote_handle),
+                             peer, &addr_ip, &addr_port);
+        if (rc < 0)
+            return ERR(-rc);
+    } else {
+        sk = sock_get((int)obj->remote_handle);
+        if (!sk)
+            return ERR(EBADF);
+        addr_ip = peer ? sk->peer_ip : sk->local_ip;
+        addr_port = peer ? sk->peer_port : sk->local_port;
+    }
+    sa.sin_port = sock_ntohs(addr_port);
+    sa.sin_addr = sock_ntohl(addr_ip);
+    if (user_store_bytes(sa_uva, &sa, sizeof(sa)) < 0)
+        return ERR(EFAULT);
+    if (user_store_bytes(len_uva, &slen, sizeof(slen)) < 0)
+        return ERR(EFAULT);
+    return 0ULL;
+}
+
+static uint64_t sys_linux_getsockname(uint64_t args[6])
+{
+    return sys_linux_getsockname_common(args, 0);
+}
+
+static uint64_t sys_linux_getpeername(uint64_t args[6])
+{
+    return sys_linux_getsockname_common(args, 1);
+}
+
+static uint64_t sys_linux_renameat(uint64_t args[6])
+{
+    int         old_dirfd = (int)args[0];
+    int         new_dirfd = (int)args[2];
+    const char *old_path = (const char *)(uintptr_t)args[1];
+    const char *new_path = (const char *)(uintptr_t)args[3];
+    char        old_buf[EXEC_MAX_PATH];
+    char        new_buf[EXEC_MAX_PATH];
+    int         rc;
+
+    if (!old_path || !new_path)
+        return ERR(EFAULT);
+
+    rc = resolve_dirfd_path_meta(old_dirfd, old_path, 0,
+                                 old_buf, sizeof(old_buf), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+    rc = resolve_dirfd_path_meta(new_dirfd, new_path, 0,
+                                 new_buf, sizeof(new_buf), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfs_rename(old_buf, new_buf);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static void linux_syscall_bind(uint32_t nr, syscall_handler_fn handler,
+                               uint32_t flags, const char *name)
+{
+    if (nr >= LINUX_SYSCALL_MAX)
+        return;
+    linux_syscall_table[nr].handler = handler;
+    linux_syscall_table[nr].flags   = flags;
+    linux_syscall_table[nr].name    = name;
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -4880,6 +6820,11 @@ void syscall_init(void)
         syscall_table[i].handler = sys_enosys;
         syscall_table[i].flags   = 0;
         syscall_table[i].name    = "enosys";
+    }
+    for (int i = 0; i < (int)LINUX_SYSCALL_MAX; i++) {
+        linux_syscall_table[i].handler = sys_enosys;
+        linux_syscall_table[i].flags   = 0;
+        linux_syscall_table[i].name    = "enosys";
     }
 
     /* 5. Registra le syscall base + estensioni per la shell user-space */
@@ -5105,6 +7050,9 @@ void syscall_init(void)
     syscall_table[SYS_IPC_REPLY] = (syscall_entry_t){
         sys_ipc_reply, 0, "ipc_reply"
     };
+    syscall_table[SYS_IPC_POLL] = (syscall_entry_t){
+        sys_ipc_poll, 0, "ipc_poll"
+    };
     syscall_table[SYS_VFS_BOOT_OPEN] = (syscall_entry_t){
         sys_vfs_boot_open, 0, "vfs_boot_open"
     };
@@ -5248,7 +7196,102 @@ void syscall_init(void)
     syscall_table[SYS_GETSOCKOPT] = (syscall_entry_t){ sys_getsockopt, 0, "getsockopt" };
     syscall_table[SYS_SHUTDOWN]   = (syscall_entry_t){ sys_shutdown,   0, "shutdown"   };
 
-    uart_puts("[SYSCALL] 121 syscall base/UX/ipc/vfsd/blkd/netd/ns/signal/mreact/ksem/kmon/cap/tty/musl/thread/libdl/fs/kbd/sock registrate\n");
+    /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
+    linux_syscall_bind(LINUX_NR_read, sys_linux_read,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_read");
+    linux_syscall_bind(LINUX_NR_write, sys_linux_write,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_write");
+    linux_syscall_bind(LINUX_NR_close, sys_linux_close,
+                       SYSCALL_FLAG_RT, "linux_close");
+    linux_syscall_bind(LINUX_NR_openat, sys_linux_openat, 0, "linux_openat");
+    linux_syscall_bind(LINUX_NR_newfstatat, sys_linux_newfstatat, 0, "linux_newfstatat");
+    linux_syscall_bind(LINUX_NR_fstat, sys_linux_fstat, 0, "linux_fstat");
+    linux_syscall_bind(LINUX_NR_getdents64, sys_linux_getdents64, 0, "linux_getdents64");
+    linux_syscall_bind(LINUX_NR_lseek, sys_linux_lseek, 0, "linux_lseek");
+    linux_syscall_bind(LINUX_NR_readv, sys_linux_readv, 0, "linux_readv");
+    linux_syscall_bind(LINUX_NR_writev, sys_linux_writev, 0, "linux_writev");
+    linux_syscall_bind(LINUX_NR_ioctl, sys_linux_ioctl, 0, "linux_ioctl");
+    linux_syscall_bind(LINUX_NR_dup, sys_linux_dup, SYSCALL_FLAG_RT, "linux_dup");
+    linux_syscall_bind(LINUX_NR_dup3, sys_linux_dup3, SYSCALL_FLAG_RT, "linux_dup3");
+    linux_syscall_bind(LINUX_NR_pipe2, sys_linux_pipe2, 0, "linux_pipe2");
+    linux_syscall_bind(LINUX_NR_fcntl, sys_linux_fcntl, 0, "linux_fcntl");
+    linux_syscall_bind(LINUX_NR_getcwd, sys_linux_getcwd,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getcwd");
+    linux_syscall_bind(LINUX_NR_futex, sys_linux_futex, 0, "linux_futex");
+    linux_syscall_bind(LINUX_NR_clock_gettime, sys_linux_clock_gettime,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_clock_gettime");
+    linux_syscall_bind(LINUX_NR_nanosleep, sys_linux_nanosleep, 0, "linux_nanosleep");
+    linux_syscall_bind(LINUX_NR_sched_yield, sys_linux_sched_yield,
+                       SYSCALL_FLAG_RT, "linux_sched_yield");
+    linux_syscall_bind(LINUX_NR_getpid, sys_linux_getpid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getpid");
+    linux_syscall_bind(LINUX_NR_getppid, sys_linux_getppid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getppid");
+    linux_syscall_bind(LINUX_NR_getuid, sys_linux_getuid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getuid");
+    linux_syscall_bind(LINUX_NR_geteuid, sys_linux_geteuid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_geteuid");
+    linux_syscall_bind(LINUX_NR_getgid, sys_linux_getgid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getgid");
+    linux_syscall_bind(LINUX_NR_getegid, sys_linux_getegid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getegid");
+    linux_syscall_bind(LINUX_NR_gettid, sys_linux_gettid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_gettid");
+    linux_syscall_bind(LINUX_NR_tgkill, sys_linux_tgkill,
+                       SYSCALL_FLAG_RT, "linux_tgkill");
+    linux_syscall_bind(LINUX_NR_rt_sigaction, sys_linux_rt_sigaction,
+                       SYSCALL_FLAG_RT, "linux_rt_sigaction");
+    linux_syscall_bind(LINUX_NR_rt_sigprocmask, sys_linux_rt_sigprocmask,
+                       SYSCALL_FLAG_RT, "linux_rt_sigprocmask");
+    linux_syscall_bind(LINUX_NR_rt_sigreturn, sys_linux_rt_sigreturn,
+                       SYSCALL_FLAG_RT, "linux_rt_sigreturn");
+    linux_syscall_bind(LINUX_NR_uname, sys_linux_uname,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_uname");
+    linux_syscall_bind(LINUX_NR_gettimeofday, sys_linux_gettimeofday,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_gettimeofday");
+    linux_syscall_bind(LINUX_NR_clone, sys_linux_clone, 0, "linux_clone");
+    linux_syscall_bind(LINUX_NR_execve, sys_linux_execve, 0, "linux_execve");
+    linux_syscall_bind(LINUX_NR_mmap, sys_linux_mmap, 0, "linux_mmap");
+    linux_syscall_bind(LINUX_NR_mprotect, sys_linux_mprotect, 0, "linux_mprotect");
+    linux_syscall_bind(LINUX_NR_munmap, sys_linux_munmap, 0, "linux_munmap");
+    linux_syscall_bind(LINUX_NR_brk, sys_linux_brk,
+                       SYSCALL_FLAG_RT, "linux_brk");
+    linux_syscall_bind(LINUX_NR_wait4, sys_linux_wait4,
+                       SYSCALL_FLAG_RT, "linux_wait4");
+    linux_syscall_bind(LINUX_NR_fsync, sys_linux_fsync, 0, "linux_fsync");
+    linux_syscall_bind(LINUX_NR_truncate, sys_linux_truncate, 0, "linux_truncate");
+    linux_syscall_bind(LINUX_NR_ftruncate, sys_linux_ftruncate, 0, "linux_ftruncate");
+    linux_syscall_bind(LINUX_NR_faccessat, sys_linux_faccessat, 0, "linux_faccessat");
+    linux_syscall_bind(LINUX_NR_unlinkat, sys_linux_unlinkat, 0, "linux_unlinkat");
+    linux_syscall_bind(LINUX_NR_symlinkat, sys_linux_symlinkat, 0, "linux_symlinkat");
+    linux_syscall_bind(LINUX_NR_readlinkat, sys_linux_readlinkat, 0, "linux_readlinkat");
+    linux_syscall_bind(LINUX_NR_mkdirat, sys_linux_mkdirat, 0, "linux_mkdirat");
+    linux_syscall_bind(LINUX_NR_renameat, sys_linux_renameat, 0, "linux_renameat");
+    linux_syscall_bind(LINUX_NR_flock, sys_linux_flock, 0, "linux_flock");
+    linux_syscall_bind(LINUX_NR_prlimit64, sys_linux_prlimit64, 0, "linux_prlimit64");
+    linux_syscall_bind(LINUX_NR_sysinfo, sys_linux_sysinfo,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_sysinfo");
+    linux_syscall_bind(LINUX_NR_getrandom, sys_linux_getrandom, 0, "linux_getrandom");
+    linux_syscall_bind(LINUX_NR_rseq, sys_linux_rseq, 0, "linux_rseq");
+    linux_syscall_bind(LINUX_NR_pselect6, sys_linux_pselect6, 0, "linux_pselect6");
+    linux_syscall_bind(LINUX_NR_ppoll, sys_linux_ppoll, 0, "linux_ppoll");
+    linux_syscall_bind(LINUX_NR_socket, sys_linux_socket, 0, "linux_socket");
+    linux_syscall_bind(LINUX_NR_bind, sys_linux_bind, 0, "linux_bind");
+    linux_syscall_bind(LINUX_NR_listen, sys_linux_listen, 0, "linux_listen");
+    linux_syscall_bind(LINUX_NR_accept, sys_linux_accept, 0, "linux_accept");
+    linux_syscall_bind(LINUX_NR_connect, sys_linux_connect, 0, "linux_connect");
+    linux_syscall_bind(LINUX_NR_getsockname, sys_linux_getsockname, 0, "linux_getsockname");
+    linux_syscall_bind(LINUX_NR_getpeername, sys_linux_getpeername, 0, "linux_getpeername");
+    linux_syscall_bind(LINUX_NR_sendto, sys_linux_sendto, 0, "linux_sendto");
+    linux_syscall_bind(LINUX_NR_recvfrom, sys_linux_recvfrom, 0, "linux_recvfrom");
+    linux_syscall_bind(LINUX_NR_setsockopt, sys_linux_setsockopt, 0, "linux_setsockopt");
+    linux_syscall_bind(LINUX_NR_getsockopt, sys_linux_getsockopt, 0, "linux_getsockopt");
+    linux_syscall_bind(LINUX_NR_shutdown, sys_linux_shutdown, 0, "linux_shutdown");
+    linux_syscall_bind(LINUX_NR_set_tid_address, sys_linux_set_tid_address, 0, "linux_set_tid_address");
+    linux_syscall_bind(LINUX_NR_exit, sys_linux_exit, SYSCALL_FLAG_RT, "linux_exit");
+    linux_syscall_bind(LINUX_NR_exit_group, sys_linux_exit_group, SYSCALL_FLAG_RT, "linux_exit_group");
+
+    uart_puts("[SYSCALL] syscall native + Linux compat ABI registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
     syscall_uart_put_u64((uint64_t)SCHED_MAX_TASKS);
     uart_puts(" proc slot\n");
@@ -5264,8 +7307,15 @@ void syscall_dispatch(exception_frame_t *frame)
 {
     uint64_t nr = frame->x[8];
     uint64_t ret;
+    const syscall_entry_t *table = syscall_table;
+    uint64_t max = SYSCALL_MAX;
 
-    if (nr >= SYSCALL_MAX) {
+    if (current_task && sched_task_abi_mode(current_task) == SCHED_ABI_LINUX) {
+        table = linux_syscall_table;
+        max = LINUX_SYSCALL_MAX;
+    }
+
+    if (nr >= max) {
         frame->x[0] = ERR(ENOSYS);
         return;
     }
@@ -5277,7 +7327,7 @@ void syscall_dispatch(exception_frame_t *frame)
 
     active_syscall_frame = frame;
     active_syscall_replaced = 0U;
-    ret = syscall_table[nr].handler(args);
+    ret = table[nr].handler(args);
 
     if (!active_syscall_replaced)
         frame->x[0] = ret;
