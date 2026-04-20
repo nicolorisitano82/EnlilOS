@@ -37,6 +37,7 @@
 #include "vfs.h"
 #include "vfs_ipc.h"
 #include "vmm.h"
+#include "shutdown.h"
 
 extern void *memcpy(void *dst, const void *src, size_t n);
 extern void *memset(void *dst, int value, size_t n);
@@ -6256,6 +6257,28 @@ static uint64_t sys_prlimit64(uint64_t args[6])
     return 0ULL;
 }
 
+/* SYS_REBOOT (213): cmd = REBOOT_CMD_POWER_OFF / RESTART / HALT */
+static uint64_t sys_reboot(uint64_t args[6])
+{
+    uint32_t cmd = (uint32_t)args[0];
+
+    switch (cmd) {
+    case REBOOT_CMD_POWER_OFF:
+        shutdown_system(SHUTDOWN_POWEROFF);
+        break;
+    case REBOOT_CMD_RESTART:
+        shutdown_system(SHUTDOWN_REBOOT);
+        break;
+    case REBOOT_CMD_HALT:
+        shutdown_system(SHUTDOWN_HALT);
+        break;
+    default:
+        return ERR(EINVAL);
+    }
+    /* shutdown_system() è noreturn, ma il compilatore non lo sa qui */
+    __builtin_unreachable();
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * Linux AArch64 compatibility syscall table (M11-05)
  * ════════════════════════════════════════════════════════════════════ */
@@ -7747,6 +7770,7 @@ void syscall_init(void)
     syscall_table[SYS_GETSOCKOPT] = (syscall_entry_t){ sys_getsockopt, 0, "getsockopt" };
     syscall_table[SYS_SHUTDOWN]   = (syscall_entry_t){ sys_shutdown,   0, "shutdown"   };
     syscall_table[SYS_PRLIMIT64]  = (syscall_entry_t){ sys_prlimit64,  0, "prlimit64"  };
+    syscall_table[SYS_REBOOT]     = (syscall_entry_t){ sys_reboot,     0, "reboot"     };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,

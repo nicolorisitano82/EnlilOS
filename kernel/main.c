@@ -32,6 +32,7 @@
 #include "vfs.h"
 #include "cap.h"
 #include "vmm.h"
+#include "shutdown.h"
 
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
@@ -1707,6 +1708,9 @@ static void bootcli_execute_command(void)
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
+        bootcli_push_line("poweroff  spegne la macchina (PSCI SYSTEM_OFF)");
+        bootcli_push_line("reboot    riavvia la macchina (PSCI SYSTEM_RESET)");
+        bootcli_push_line("halt      halt CPU senza spegnere (WFE loop)");
     } else if (bootcli_streq(bootcli_input, "clear")) {
         bootcli_line_count = 0U;
         bootcli_push_line("Console pulita.");
@@ -2125,6 +2129,19 @@ static void bootcli_execute_command(void)
         bootcli_push_line("Tastiera: input ricevuto correttamente.");
     } else if (bootcli_startswith(bootcli_input, "echo ")) {
         bootcli_push_line(bootcli_input + 5);
+    } else if (bootcli_streq(bootcli_input, "poweroff") ||
+               bootcli_streq(bootcli_input, "shutdown")) {
+        bootcli_push_line("Shutdown in corso...");
+        bootcli_render();
+        shutdown_system(SHUTDOWN_POWEROFF);
+    } else if (bootcli_streq(bootcli_input, "reboot")) {
+        bootcli_push_line("Riavvio in corso...");
+        bootcli_render();
+        shutdown_system(SHUTDOWN_REBOOT);
+    } else if (bootcli_streq(bootcli_input, "halt")) {
+        bootcli_push_line("Halt in corso...");
+        bootcli_render();
+        shutdown_system(SHUTDOWN_HALT);
     } else {
         bootcli_push_line("Comando sconosciuto. Usa 'help'.");
     }

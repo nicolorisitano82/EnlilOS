@@ -148,6 +148,14 @@
 #define SYS_PRLIMIT64       212
 #include "rlimit.h"
 
+/* ── Reboot/poweroff: 213 ───────────────────────────────────────── */
+#define SYS_REBOOT          213
+
+/* cmd valori (compatibili con Linux reboot(2)) */
+#define REBOOT_CMD_RESTART      0x01234567U
+#define REBOOT_CMD_HALT         0xCDEF0123U
+#define REBOOT_CMD_POWER_OFF    0x4321FEDCU
+
 /* ── BSD Socket API (M10-03): 200–211 ──────────────────────────── */
 #define SYS_SOCKET          200
 #define SYS_BIND            201

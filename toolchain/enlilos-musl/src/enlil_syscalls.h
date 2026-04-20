@@ -74,6 +74,9 @@
 /* Resource limits (prlimit64) */
 #define SYS_PRLIMIT64       212
 
+/* Reboot/poweroff */
+#define SYS_REBOOT          213
+
 /* BSD socket API (M10-03) */
 #define SYS_SOCKET          200
 #define SYS_BIND            201

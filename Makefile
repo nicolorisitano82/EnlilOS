@@ -75,6 +75,8 @@ C_SRCS   = kernel/main.c \
            kernel/vfs.c \
            kernel/sock.c \
            kernel/syscall.c \
+           kernel/psci.c \
+           kernel/shutdown.c \
            kernel/ane_syscall.c \
            kernel/gpu_syscall.c \
            kernel/utf8.c \
@@ -154,6 +156,7 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/unistd.h \
                         $(MUSL_ROOT)/include/sys/ioctl.h \
                         $(MUSL_ROOT)/include/sys/resource.h \
+                        $(MUSL_ROOT)/include/sys/reboot.h \
                         $(MUSL_ROOT)/include/sys/mman.h \
                         $(MUSL_ROOT)/include/sys/stat.h \
                         $(MUSL_ROOT)/include/sys/time.h \
@@ -182,7 +185,8 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c \
                         $(MUSL_ROOT)/src/socket.c \
-                        $(MUSL_ROOT)/src/resource.c
+                        $(MUSL_ROOT)/src/resource.c \
+                        $(MUSL_ROOT)/src/reboot.c
 MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
 MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a
@@ -201,7 +205,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/loadkeys.c \
                         toolchain/smoke/kbdlayout.c \
                         toolchain/smoke/socket_demo.c \
-                        toolchain/smoke/net_outbound.c
+                        toolchain/smoke/net_outbound.c \
+                        toolchain/smoke/poweroff.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -446,6 +451,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		dir:usr/lib \
 		dir:usr/lib/arksh \
 		dir:usr/lib/arksh/plugins \
+		dir:sbin \
 		INIT.ELF=$(ARKSH_BOOT_ELF) \
 		DEMO.ELF=user/demo.elf \
 		EXEC1.ELF=user/execve_demo.elf \
@@ -482,6 +488,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
 		SOCKDEMO.ELF=toolchain/smoke/socket_demo.elf \
 		NETOUT.ELF=toolchain/smoke/net_outbound.elf \
+		POWEROFF.ELF=toolchain/smoke/poweroff.elf \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
@@ -489,6 +496,9 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		$(ARKSH_REAL_INITRD) \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
+		sbin/poweroff=toolchain/smoke/poweroff.elf \
+		sbin/reboot=toolchain/smoke/poweroff.elf \
+		sbin/halt=toolchain/smoke/poweroff.elf \
 		sysroot/usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		sysroot/usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
 		usr/share/kbd/keymaps/us.map=initrd/us.map \

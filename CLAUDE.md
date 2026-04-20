@@ -580,6 +580,22 @@ SUMMARY total=49 pass=49 fail=0
 - Toolchain musl: `resource.c` wrappa `user_svc4(SYS_PRLIMIT64, ...)`. `prlimit/getrlimit/setrlimit` convertono tra `rlimit` (32-bit `rlim_t`) e `rlimit64`.
 - Selftest non aggiunto (nessun test case esplicito per `prlimit64`); suite 49/49 passa invariata.
 
+### Knowledge operativa — shutdown/poweroff (SYS_REBOOT = 213)
+
+**File**: [include/psci.h](include/psci.h), [kernel/psci.c](kernel/psci.c),
+[include/shutdown.h](include/shutdown.h), [kernel/shutdown.c](kernel/shutdown.c),
+[toolchain/enlilos-musl/include/sys/reboot.h](toolchain/enlilos-musl/include/sys/reboot.h),
+[toolchain/enlilos-musl/src/reboot.c](toolchain/enlilos-musl/src/reboot.c),
+[toolchain/smoke/poweroff.c](toolchain/smoke/poweroff.c)
+
+- **PSCI** (`kernel/psci.c`): `psci_system_off()` / `psci_system_reset()` via `smc #0` con function ID `0x84000008` / `0x84000009`. Su QEMU virt, PSCI è esposto via smc per default. Se SMC non ritorna (non dovrebbe), fallback `wfe` loop.
+- **Sequenza graceful** (`kernel/shutdown.c`): SIGTERM tutti task user-space → wait 2s → SIGKILL superstiti → `vfs_sync()` → `blk_flush_sync()` → `gic_disable_irqs()` → PSCI/halt.
+- **SYS_REBOOT = 213**: `cmd = REBOOT_CMD_POWER_OFF (0x4321FEDC)`, `REBOOT_CMD_RESTART (0x01234567)`, `REBOOT_CMD_HALT (0xCDEF0123)`. Dispatcher chiama `shutdown_system()` che è `noreturn`.
+- **Bootcli**: comandi `poweroff` (= `shutdown`), `reboot`, `halt` chiamano `shutdown_system()` direttamente da kernel, dopo aver fatto `bootcli_render()` per mostrare messaggio finale.
+- **musl**: `reboot(cmd)` via `user_svc1(SYS_REBOOT, cmd)`. Header `<sys/reboot.h>` con `RB_POWER_OFF`, `RB_AUTOBOOT`, `RB_HALT_SYSTEM`.
+- **`/sbin/poweroff`**: ELF musl bootstrap installato anche come `/sbin/reboot` e `/sbin/halt`. `poweroff -r` → reboot, `poweroff -h` → halt.
+- **Gotcha**: `gic_disable_irqs()` disabilita solo IRQ AArch64 (`msr daifset, #2`), non il timer. La sequenza shutdown non deve fare `sched_yield()` dopo `gic_disable_irqs()` altrimenti il timer non arriva e si rimane bloccati.
+
 ### Knowledge operativa arksh runtime (M8-08f/g)
 
 - `sys_mmap` ha limite pagine per singola chiamata alzato a **1024 pagine (4MB)** (era 256 = 1MB). Motivo: `sizeof(ArkshAst) ≈ 1.88MB = 460 pagine`; vecchio limite faceva fallire ogni `calloc(1, sizeof(*ast))` → "unable to allocate parser state".
