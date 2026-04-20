@@ -10,6 +10,7 @@
  */
 
 #include "sched.h"
+#include "syscall.h"
 #include "elf_loader.h"
 #include "futex.h"
 #include "kmon.h"
@@ -74,6 +75,7 @@ typedef struct {
     uint8_t     group_exiting;
     uint8_t     abi_mode;
     char        exec_path[SCHED_EXEC_PATH_MAX];
+    rlimit64_t  rlimits[RLIMIT_NLIMITS];
 } sched_proc_ctx_t;
 
 static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
@@ -305,6 +307,37 @@ static uint64_t sched_alloc_kernel_stack(void)
     return phys_alloc_pages(TASK_STACK_ORDER);
 }
 
+static void proc_rlimit_defaults(sched_proc_ctx_t *proc)
+{
+    for (uint32_t i = 0U; i < RLIMIT_NLIMITS; i++) {
+        proc->rlimits[i].rlim_cur = RLIM64_INFINITY;
+        proc->rlimits[i].rlim_max = RLIM64_INFINITY;
+    }
+    /* Stack: 8 MB soft, unlimited hard (Linux default) */
+    proc->rlimits[RLIMIT_STACK].rlim_cur = 8U * 1024U * 1024U;
+    proc->rlimits[RLIMIT_STACK].rlim_max = RLIM64_INFINITY;
+    /* Core: no core dumps */
+    proc->rlimits[RLIMIT_CORE].rlim_cur  = 0U;
+    proc->rlimits[RLIMIT_CORE].rlim_max  = 0U;
+    /* NOFILE: kernel FD limit */
+    proc->rlimits[RLIMIT_NOFILE].rlim_cur = (uint64_t)MAX_FD;
+    proc->rlimits[RLIMIT_NOFILE].rlim_max = (uint64_t)MAX_FD;
+    /* NPROC: bounded by task pool */
+    proc->rlimits[RLIMIT_NPROC].rlim_cur = (uint64_t)SCHED_MAX_TASKS;
+    proc->rlimits[RLIMIT_NPROC].rlim_max = (uint64_t)SCHED_MAX_TASKS;
+    /* MEMLOCK: 64 KB */
+    proc->rlimits[RLIMIT_MEMLOCK].rlim_cur = 64U * 1024U;
+    proc->rlimits[RLIMIT_MEMLOCK].rlim_max = 64U * 1024U;
+    /* NICE / RTPRIO: 0 (non-RT) */
+    proc->rlimits[RLIMIT_NICE].rlim_cur   = 0U;
+    proc->rlimits[RLIMIT_NICE].rlim_max   = 0U;
+    proc->rlimits[RLIMIT_RTPRIO].rlim_cur = 0U;
+    proc->rlimits[RLIMIT_RTPRIO].rlim_max = 0U;
+    /* MSGQUEUE: Linux default 819200 */
+    proc->rlimits[RLIMIT_MSGQUEUE].rlim_cur = 819200U;
+    proc->rlimits[RLIMIT_MSGQUEUE].rlim_max = 819200U;
+}
+
 static int proc_alloc(mm_space_t *mm, uint32_t tgid, uint32_t parent_pid,
                       uint32_t pgid, uint32_t sid)
 {
@@ -327,6 +360,7 @@ static int proc_alloc(mm_space_t *mm, uint32_t tgid, uint32_t parent_pid,
         proc->waitable  = 0U;
         proc->group_exiting = 0U;
         proc->abi_mode  = SCHED_ABI_ENLILOS;
+        proc_rlimit_defaults(proc);
         return (int)i;
     }
 
@@ -775,6 +809,14 @@ sched_tcb_t *sched_task_fork_user(const char *name, mm_space_t *mm,
                               (current_task && sid_of(current_task) != 0U) ? sid_of(current_task) : t->pid) < 0) {
         uart_puts("[SCHED] PANIC: proc slot fork esauriti\n");
         while (1) __asm__ volatile("wfe");
+    }
+    /* Eredita rlimits dal processo parent (POSIX: fork non azzera i limiti). */
+    if (current_task) {
+        sched_proc_ctx_t *parent_proc = proc_of(current_task);
+        sched_proc_ctx_t *child_proc  = proc_of(t);
+        if (parent_proc && child_proc)
+            memcpy(child_proc->rlimits, parent_proc->rlimits,
+                   sizeof(parent_proc->rlimits));
     }
     ctx->start_frame       = *frame;
     ctx->start_frame.x[0]  = 0ULL;
@@ -1601,4 +1643,34 @@ void sched_stats(void)
         uart_puts("\n");
     }
     uart_puts("[SCHED] ─────────────────────────────────────────────\n");
+}
+
+/* ── Resource limits API ──────────────────────────────────────────── */
+
+int sched_proc_get_rlimit(const sched_tcb_t *t, uint32_t resource,
+                          rlimit64_t *out)
+{
+    const sched_proc_ctx_t *proc;
+
+    if (!t || !out || resource >= RLIMIT_NLIMITS)
+        return -1;
+    proc = proc_of(t);
+    if (!proc)
+        return -1;
+    *out = proc->rlimits[resource];
+    return 0;
+}
+
+int sched_proc_set_rlimit(sched_tcb_t *t, uint32_t resource,
+                          const rlimit64_t *in)
+{
+    sched_proc_ctx_t *proc;
+
+    if (!t || !in || resource >= RLIMIT_NLIMITS)
+        return -1;
+    proc = proc_of(t);
+    if (!proc)
+        return -1;
+    proc->rlimits[resource] = *in;
+    return 0;
 }

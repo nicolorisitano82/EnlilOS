@@ -45,8 +45,6 @@ extern void *memset(void *dst, int value, size_t n);
  * File descriptor table
  * ════════════════════════════════════════════════════════════════════ */
 
-#define MAX_FD          64
-
 #define FD_TYPE_FREE    0
 #define FD_TYPE_VFS     1
 #define FD_TYPE_VFSD    2
@@ -6209,6 +6207,56 @@ static uint64_t sys_shutdown(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * SYS_PRLIMIT64 (212) — resource limits nativi
+ * args: pid, resource, new_limit_uva, old_limit_uva
+ * ════════════════════════════════════════════════════════════════════ */
+
+static uint64_t sys_prlimit64(uint64_t args[6])
+{
+    uint32_t     pid          = (uint32_t)args[0];
+    uint32_t     resource     = (uint32_t)args[1];
+    uintptr_t    new_uva      = (uintptr_t)args[2];
+    uintptr_t    old_uva      = (uintptr_t)args[3];
+    sched_tcb_t *target;
+    rlimit64_t   lim;
+    int          rc;
+
+    if (resource >= RLIMIT_NLIMITS)
+        return ERR(EINVAL);
+
+    /* pid==0 → processo corrente; altrimenti cerca per tgid */
+    if (pid == 0U || (current_task && pid == sched_task_tgid(current_task))) {
+        target = current_task;
+    } else {
+        target = sched_task_find(pid);
+        if (!target)
+            return ERR(ESRCH);
+    }
+
+    /* Ritorna vecchio limite se richiesto */
+    if (old_uva != 0U) {
+        if (sched_proc_get_rlimit(target, resource, &lim) < 0)
+            return ERR(EINVAL);
+        rc = user_store_bytes(old_uva, &lim, sizeof(lim));
+        if (rc < 0)
+            return ERR(EFAULT);
+    }
+
+    /* Imposta nuovo limite se fornito */
+    if (new_uva != 0U) {
+        if (user_copy_bytes(new_uva, &lim, sizeof(lim)) < 0)
+            return ERR(EFAULT);
+        /* soft non può superare hard */
+        if (lim.rlim_cur > lim.rlim_max && lim.rlim_max != RLIM64_INFINITY)
+            return ERR(EINVAL);
+        if (sched_proc_set_rlimit(target, resource, &lim) < 0)
+            return ERR(EINVAL);
+    }
+
+    return 0ULL;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Linux AArch64 compatibility syscall table (M11-05)
  * ════════════════════════════════════════════════════════════════════ */
 
@@ -6810,41 +6858,8 @@ static uint64_t sys_linux_mprotect(uint64_t args[6])
 
 static uint64_t sys_linux_prlimit64(uint64_t args[6])
 {
-    uint32_t          pid = (uint32_t)args[0];
-    uint32_t          resource = (uint32_t)args[1];
-    linux_rlimit64_t  lim;
-    int               rc;
-
-    if (pid != 0U && (!current_task || pid != sched_task_tgid(current_task)))
-        return ERR(ESRCH);
-
-    memset(&lim, 0, sizeof(lim));
-    switch (resource) {
-    case LINUX_RLIMIT_NOFILE:
-        lim.rlim_cur = MAX_FD;
-        lim.rlim_max = MAX_FD;
-        break;
-    case LINUX_RLIMIT_STACK:
-        lim.rlim_cur = MMU_USER_STACK_SIZE;
-        lim.rlim_max = MMU_USER_STACK_SIZE;
-        break;
-    case LINUX_RLIMIT_DATA:
-    case LINUX_RLIMIT_AS:
-        lim.rlim_cur = 256ULL * 1024ULL * 1024ULL;
-        lim.rlim_max = 256ULL * 1024ULL * 1024ULL;
-        break;
-    default:
-        lim.rlim_cur = (uint64_t)-1LL;
-        lim.rlim_max = (uint64_t)-1LL;
-        break;
-    }
-
-    if ((uintptr_t)args[3] != 0U) {
-        rc = user_store_bytes((uintptr_t)args[3], &lim, sizeof(lim));
-        if (rc < 0)
-            return ERR(-rc);
-    }
-    return 0ULL;
+    /* Delega alla syscall nativa (stesso ABI: pid, resource, new, old) */
+    return sys_prlimit64(args);
 }
 
 static uint64_t sys_linux_sysinfo(uint64_t args[6])
@@ -7731,6 +7746,7 @@ void syscall_init(void)
     syscall_table[SYS_SETSOCKOPT] = (syscall_entry_t){ sys_setsockopt, 0, "setsockopt" };
     syscall_table[SYS_GETSOCKOPT] = (syscall_entry_t){ sys_getsockopt, 0, "getsockopt" };
     syscall_table[SYS_SHUTDOWN]   = (syscall_entry_t){ sys_shutdown,   0, "shutdown"   };
+    syscall_table[SYS_PRLIMIT64]  = (syscall_entry_t){ sys_prlimit64,  0, "prlimit64"  };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,

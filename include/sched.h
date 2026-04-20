@@ -44,6 +44,7 @@
 
 #include "exception.h"
 #include "types.h"
+#include "rlimit.h"
 
 /* ── Costanti ───────────────────────────────────────────────────── */
 
@@ -237,6 +238,10 @@ int         sched_task_begin_exit_group(int32_t code);
 uint64_t    sched_task_get_tpidr(const sched_tcb_t *t);
 sched_tcb_t *sched_task_at(uint32_t index);
 uint32_t    sched_task_count_total(void);
+int         sched_proc_get_rlimit(const sched_tcb_t *t, uint32_t resource,
+                                  rlimit64_t *out);
+int         sched_proc_set_rlimit(sched_tcb_t *t, uint32_t resource,
+                                  const rlimit64_t *in);
 
 /* Helper del trampoline assembly */
 void sched_task_bootstrap(uint64_t entry_reg);

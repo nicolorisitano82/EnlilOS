@@ -71,6 +71,9 @@
 #define SYS_KSEM_ANON       94
 #define SYS_KILL            134
 
+/* Resource limits (prlimit64) */
+#define SYS_PRLIMIT64       212
+
 /* BSD socket API (M10-03) */
 #define SYS_SOCKET          200
 #define SYS_BIND            201

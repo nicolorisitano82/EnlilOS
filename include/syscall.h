@@ -144,6 +144,10 @@
 #define SYS_NET_BOOT_RECV      163
 #define SYS_NET_BOOT_INFO      164
 
+/* ── Resource limits (prlimit64): 212 ──────────────────────────── */
+#define SYS_PRLIMIT64       212
+#include "rlimit.h"
+
 /* ── BSD Socket API (M10-03): 200–211 ──────────────────────────── */
 #define SYS_SOCKET          200
 #define SYS_BIND            201
@@ -286,6 +290,7 @@
 #define AT_SYMLINK_NOFOLLOW  0x0100
 #define AT_EMPTY_PATH        0x1000
 
+#define MAX_FD              64
 #define FD_CLOEXEC          1
 
 #define F_DUPFD             0

@@ -181,7 +181,8 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/time.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c \
-                        $(MUSL_ROOT)/src/socket.c
+                        $(MUSL_ROOT)/src/socket.c \
+                        $(MUSL_ROOT)/src/resource.c
 MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
 MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a

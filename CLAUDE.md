@@ -511,9 +511,10 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-14)
+## Milestone completate (stato 2026-04-20)
 
 Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
+Aggiunti: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212).
 Run di riferimento:
 
 ```text
@@ -554,6 +555,30 @@ SUMMARY total=49 pass=49 fail=0
 - `termios` è v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`, `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
 - `VMIN/VTIME` non hanno ancora semantica POSIX completa e termios state non è per-open-file o per-pty. OK per bootstrap shell/REPL, non ancora per compat piena.
 - `POSIXDEMO.ELF` e selftest `posix-ux` sono riferimento runtime per validare insieme: env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
+
+### Knowledge operativa — kbd ring buffer OOB (62° char freeze)
+
+**File**: [drivers/keyboard.c](drivers/keyboard.c)
+
+- `kbd_event_buf[KBD_EVENT_BUF_SIZE]` con `KBD_EVENT_BUF_SIZE = 64`. Indici `kbd_event_head`/`kbd_event_tail` erano `uint8_t` incrementati con `++` nudo → wrap naturale a 256, non a 64.
+- Al 64° evento, `kbd_event_head` saliva a 64 e scriveva fuori dal buffer. Layout BSS (analizzato con `nm`): offset 0x5d8 dopo il buffer è `kbd_backend`. Il field `unicode` (offset 8 nell'evento) atterrava su `kbd_backend`, sovrascrivendo `KBD_BACKEND_VIRTIO = 1` con il valore Unicode del tasto premuto (≥ 32). `keyboard_getc()` cadeva nel fallback UART → ritornava -1 per sempre.
+- **Fix**: aggiunto `% KBD_EVENT_BUF_SIZE` in `kbd_event_full`, `kbd_event_push` e `kbd_event_pop`.
+- Il fix display-side (`BOOTCLI_INPUT_MAX` + right-scroll) era corretto ma secondario; il freeze era esclusivamente OOB.
+
+### Knowledge operativa — prlimit64 (SYS_PRLIMIT64 = 212)
+
+**File**: [include/rlimit.h](include/rlimit.h), [include/sched.h](include/sched.h),
+[kernel/sched.c](kernel/sched.c), [kernel/syscall.c](kernel/syscall.c),
+[toolchain/enlilos-musl/src/resource.c](toolchain/enlilos-musl/src/resource.c),
+[toolchain/enlilos-musl/include/sys/resource.h](toolchain/enlilos-musl/include/sys/resource.h)
+
+- `rlimit64_t` e costanti `RLIMIT_*` / `RLIM64_INFINITY` in `include/rlimit.h` standalone. Motivo: `sched.h` non può includere `syscall.h` (dipendenze circolari); `syscall.h` fa `#include "rlimit.h"` per evitare ridefinizioni.
+- `MAX_FD = 64` spostato da `kernel/syscall.c` (locale) a `include/syscall.h` (pubblico): `sched.c` ne ha bisogno per `RLIMIT_NOFILE` default.
+- `sched_proc_ctx_t` contiene `rlimit64_t rlimits[RLIMIT_NLIMITS]`. Defaults impostati in `proc_rlimit_defaults()`, ereditati via `memcpy` in `sched_task_fork_user()`.
+- Default notevoli: `RLIMIT_STACK = 8MB cur / ∞ max`, `RLIMIT_CORE = 0/0`, `RLIMIT_NOFILE = MAX_FD/MAX_FD`, `RLIMIT_NPROC = SCHED_MAX_TASKS`.
+- `sys_prlimit64()`: `pid=0` → processo corrente; ricerca per `tgid` con `sched_task_find()`; `old_uva != 0` → copia limit out; `new_uva != 0` → valida (`cur ≤ max` salvo `max = ∞`) poi aggiorna.
+- Toolchain musl: `resource.c` wrappa `user_svc4(SYS_PRLIMIT64, ...)`. `prlimit/getrlimit/setrlimit` convertono tra `rlimit` (32-bit `rlim_t`) e `rlimit64`.
+- Selftest non aggiunto (nessun test case esplicito per `prlimit64`); suite 49/49 passa invariata.
 
 ### Knowledge operativa arksh runtime (M8-08f/g)
 
