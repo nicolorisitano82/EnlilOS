@@ -511,7 +511,7 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-20)
+## Milestone completate (stato 2026-04-21)
 
 Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
@@ -644,13 +644,14 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
 [toolchain/enlilos-musl/src/reboot.c](toolchain/enlilos-musl/src/reboot.c),
 [toolchain/smoke/poweroff.c](toolchain/smoke/poweroff.c)
 
-- **PSCI** (`kernel/psci.c`): `psci_system_off()` / `psci_system_reset()` via `smc #0` con function ID `0x84000008` / `0x84000009`. Su QEMU virt, PSCI è esposto via smc per default. Se SMC non ritorna (non dovrebbe), fallback `wfe` loop.
-- **Sequenza graceful** (`kernel/shutdown.c`): SIGTERM tutti task user-space → wait 2s → SIGKILL superstiti → `vfs_sync()` → `blk_flush_sync()` → `gic_disable_irqs()` → PSCI/halt.
+- **PSCI** (`kernel/psci.c`): `psci_system_off()` / `psci_system_reset()` via **`hvc #0`** con function ID `0x84000008` / `0x84000009`. QEMU virt senza `-machine virt,secure=on` non ha EL3: PSCI esposto via HVC (EL2), non SMC. Usare `smc #0` causa EC=0x00 (Unknown) trapped a EL1 → crash. Fallback `wfe` loop se HVC non ritorna.
+- **Sequenza graceful** (`kernel/shutdown.c`): `vfs_sync()` → `blk_flush_sync()` → SIGTERM tutti task user-space → wait 2s → SIGKILL superstiti → `gic_disable_irqs()` → PSCI/halt. CRITICO: `vfs_sync` PRIMA di SIGTERM/sched_yield, altrimenti i task user-space (vfsd/blkd/nsd) corrompono mount ops durante il drain → PC alignment fault in `vfs_sync`.
 - **SYS_REBOOT = 213**: `cmd = REBOOT_CMD_POWER_OFF (0x4321FEDC)`, `REBOOT_CMD_RESTART (0x01234567)`, `REBOOT_CMD_HALT (0xCDEF0123)`. Dispatcher chiama `shutdown_system()` che è `noreturn`.
 - **Bootcli**: comandi `poweroff` (= `shutdown`), `reboot`, `halt` chiamano `shutdown_system()` direttamente da kernel, dopo aver fatto `bootcli_render()` per mostrare messaggio finale.
 - **musl**: `reboot(cmd)` via `user_svc1(SYS_REBOOT, cmd)`. Header `<sys/reboot.h>` con `RB_POWER_OFF`, `RB_AUTOBOOT`, `RB_HALT_SYSTEM`.
 - **`/sbin/poweroff`**: ELF musl bootstrap installato anche come `/sbin/reboot` e `/sbin/halt`. `poweroff -r` → reboot, `poweroff -h` → halt.
-- **Gotcha**: `gic_disable_irqs()` disabilita solo IRQ AArch64 (`msr daifset, #2`), non il timer. La sequenza shutdown non deve fare `sched_yield()` dopo `gic_disable_irqs()` altrimenti il timer non arriva e si rimane bloccati.
+- **Gotcha vfs_sync**: `vfs_ptr_sane()` in `vfs_sync()` skippa mount con `ops` o `ops->sync` fuori range kernel (`0x40000000–0xC0000000`) o non allineati → guard difensivo contro corruzione futura.
+- **Gotcha IRQ**: `gic_disable_irqs()` disabilita solo IRQ AArch64 (`msr daifset, #2`), non il timer. Non fare `sched_yield()` dopo `gic_disable_irqs()` altrimenti il timer non scatta e si rimane bloccati.
 
 ### Knowledge operativa arksh runtime (M8-08f/g)
 
