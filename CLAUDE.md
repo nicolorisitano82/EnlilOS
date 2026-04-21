@@ -586,20 +586,11 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
 #### Già fatto / fix applicati
 - `wait4` (260): binding già presente; fix critico `linux_rusage_t`: timeval fields cambiati da `int32_t` a `int64_t` (AArch64 `long` = 64-bit); struct ora 144 byte corretti invece di 128 errati.
 - Stub banali implementati: `fchmod(52)`, `fchmodat(53)`, `fchownat(54)`, `sched_getaffinity(123)`, `sched_get_priority_max(143)`, `sched_get_priority_min(144)`, `getrusage(165)`, `umask(166)`, `madvise(233)`, `faccessat2(439)`.
+- Passthrough implementati: `chdir(49)`, `kill(129)`, `tkill(130)`, `setpgid(154)`, `getpgrp(155)`, `setsid(158)`, `getrlimit(163)`, `setrlimit(164)`.
+  - Nota `tkill`: non è diretto passthrough — lookup task per TID, estrae tgid, chiama `sys_tgkill(tgid, tid, sig)`.
+  - Nota `getrlimit`/`setrlimit`: RLIMIT_* IDs identici a Linux; `rlimit64_t` = `struct rlimit` su AArch64 (rlim_t = uint64_t). No conversione.
 
 #### Manca da implementare (M11-05a — TODO)
-
-**Passthrough — ~30min**
-| Nr | Nome | Target |
-|---|---|---|
-| 49 | `chdir` | `sys_chdir` |
-| 129 | `kill` | `sys_kill` |
-| 130 | `tkill` | `sys_tgkill` |
-| 154 | `setpgid` | `sys_setpgid` |
-| 155 | `getpgrp` | `sys_getpgid(0)` |
-| 158 | `setsid` | `sys_setsid` |
-| 163 | `getrlimit` | `sys_prlimit64(0,res,NULL,old)` |
-| 164 | `setrlimit` | `sys_prlimit64(0,res,new,NULL)` |
 
 **Medio — blocco principale**
 | Nr | Nome | Note |

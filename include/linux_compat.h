@@ -24,6 +24,7 @@
 #define LINUX_NR_symlinkat         36
 #define LINUX_NR_readlinkat        78
 #define LINUX_NR_renameat          38
+#define LINUX_NR_chdir             49
 #define LINUX_NR_fchmod            52
 #define LINUX_NR_fchmodat          53
 #define LINUX_NR_fchownat          54
@@ -57,9 +58,16 @@
 #define LINUX_NR_sched_yield       124
 #define LINUX_NR_sched_get_priority_max 143
 #define LINUX_NR_sched_get_priority_min 144
+#define LINUX_NR_kill              129
+#define LINUX_NR_tkill             130
 #define LINUX_NR_tgkill            131
 #define LINUX_NR_getrusage         165
 #define LINUX_NR_umask             166
+#define LINUX_NR_setrlimit         164
+#define LINUX_NR_getrlimit         163
+#define LINUX_NR_setpgid           154
+#define LINUX_NR_getpgrp           155
+#define LINUX_NR_setsid            158
 #define LINUX_NR_rt_sigaction      134
 #define LINUX_NR_rt_sigprocmask    135
 #define LINUX_NR_rt_sigreturn      139

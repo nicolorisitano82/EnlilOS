@@ -6314,6 +6314,51 @@ static uint64_t sys_linux_getgid(uint64_t args[6])          { return sys_linux_p
 static uint64_t sys_linux_getegid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_getegid); }
 static uint64_t sys_linux_gettid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_gettid); }
 static uint64_t sys_linux_tgkill(uint64_t args[6])          { return sys_linux_passthrough(args, sys_tgkill); }
+static uint64_t sys_linux_chdir(uint64_t args[6])           { return sys_linux_passthrough(args, sys_chdir); }
+static uint64_t sys_linux_kill(uint64_t args[6])            { return sys_linux_passthrough(args, sys_kill); }
+static uint64_t sys_linux_setpgid(uint64_t args[6])        { return sys_linux_passthrough(args, sys_setpgid); }
+static uint64_t sys_linux_setsid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_setsid); }
+
+/* tkill(tid, sig): Linux NR=130 — resolve tgid from tid, then tgkill */
+static uint64_t sys_linux_tkill(uint64_t args[6])
+{
+    uint32_t     tid  = (uint32_t)args[0];
+    int          sig  = (int)args[1];
+    sched_tcb_t *target;
+    uint64_t     fwd[6];
+
+    target = sched_task_find(tid);
+    if (!target || !sched_task_is_user(target) || target->state == TCB_STATE_ZOMBIE)
+        return ERR(ESRCH);
+
+    fwd[0] = (uint64_t)sched_task_tgid(target);
+    fwd[1] = (uint64_t)tid;
+    fwd[2] = (uint64_t)sig;
+    fwd[3] = 0U; fwd[4] = 0U; fwd[5] = 0U;
+    return sys_tgkill(fwd);
+}
+
+/* getpgrp(): Linux NR=155 — returns current process group */
+static uint64_t sys_linux_getpgrp(uint64_t args[6])
+{
+    uint64_t zero_args[6] = { 0U, 0U, 0U, 0U, 0U, 0U };
+    (void)args;
+    return sys_getpgid(zero_args);
+}
+
+/* getrlimit(resource, *rlim): Linux NR=163 → prlimit64(0, res, NULL, old) */
+static uint64_t sys_linux_getrlimit(uint64_t args[6])
+{
+    uint64_t fwd[6] = { 0U, args[0], 0U, args[1], 0U, 0U };
+    return sys_prlimit64(fwd);
+}
+
+/* setrlimit(resource, *rlim): Linux NR=164 → prlimit64(0, res, new, NULL) */
+static uint64_t sys_linux_setrlimit(uint64_t args[6])
+{
+    uint64_t fwd[6] = { 0U, args[0], args[1], 0U, 0U, 0U };
+    return sys_prlimit64(fwd);
+}
 static uint64_t sys_linux_clone(uint64_t args[6])           { return sys_linux_passthrough(args, sys_clone); }
 static uint64_t sys_linux_execve(uint64_t args[6])          { return sys_linux_passthrough(args, sys_execve); }
 static uint64_t sys_linux_mmap(uint64_t args[6])            { return sys_linux_passthrough(args, sys_mmap); }
@@ -7954,6 +7999,21 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_readlinkat, sys_linux_readlinkat, 0, "linux_readlinkat");
     linux_syscall_bind(LINUX_NR_mkdirat, sys_linux_mkdirat, 0, "linux_mkdirat");
     linux_syscall_bind(LINUX_NR_renameat, sys_linux_renameat, 0, "linux_renameat");
+    linux_syscall_bind(LINUX_NR_chdir, sys_linux_chdir, 0, "linux_chdir");
+    linux_syscall_bind(LINUX_NR_kill, sys_linux_kill,
+                       SYSCALL_FLAG_RT, "linux_kill");
+    linux_syscall_bind(LINUX_NR_tkill, sys_linux_tkill,
+                       SYSCALL_FLAG_RT, "linux_tkill");
+    linux_syscall_bind(LINUX_NR_setpgid, sys_linux_setpgid,
+                       SYSCALL_FLAG_RT, "linux_setpgid");
+    linux_syscall_bind(LINUX_NR_getpgrp, sys_linux_getpgrp,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getpgrp");
+    linux_syscall_bind(LINUX_NR_setsid, sys_linux_setsid,
+                       SYSCALL_FLAG_RT, "linux_setsid");
+    linux_syscall_bind(LINUX_NR_getrlimit, sys_linux_getrlimit,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getrlimit");
+    linux_syscall_bind(LINUX_NR_setrlimit, sys_linux_setrlimit,
+                       SYSCALL_FLAG_RT, "linux_setrlimit");
     linux_syscall_bind(LINUX_NR_flock, sys_linux_flock, 0, "linux_flock");
     linux_syscall_bind(LINUX_NR_prlimit64, sys_linux_prlimit64, 0, "linux_prlimit64");
     linux_syscall_bind(LINUX_NR_sysinfo, sys_linux_sysinfo,
