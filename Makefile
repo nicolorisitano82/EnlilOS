@@ -198,6 +198,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/musl_pipe_termios.c \
                         toolchain/smoke/musl_glob_fnmatch.c \
                         toolchain/smoke/musl_dlfcn.c \
+                        toolchain/smoke/ls_gnu.c \
                         toolchain/smoke/arksh_boot.c \
                         toolchain/smoke/musl_pthread.c \
                         toolchain/smoke/musl_semaphore.c \
@@ -481,6 +482,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		MUSLPIPE.ELF=toolchain/smoke/musl_pipe_termios.elf \
 		MUSLGLOB.ELF=toolchain/smoke/musl_glob_fnmatch.elf \
 		MUSLDL.ELF=toolchain/smoke/musl_dlfcn.elf \
+		LS.ELF=toolchain/smoke/ls_gnu.elf \
 		LOADKEYS.ELF=toolchain/smoke/loadkeys.elf \
 		KBDLAYOUT.ELF=toolchain/smoke/kbdlayout.elf \
 		PTHREADDEMO.ELF=toolchain/smoke/musl_pthread.elf \
@@ -493,6 +495,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
 		bin/nsh=user/nsh.elf \
+		bin/ls=toolchain/smoke/ls_gnu.elf \
 		$(ARKSH_REAL_INITRD) \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \

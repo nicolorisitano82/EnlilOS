@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai>
+Date: Wed, 22 Apr 2026 00:35:00 +0200
+Subject: [PATCH] Fix stopped job registration without allocated job array
+
+When a foreground external command stops, arksh stores it in shell->jobs.
+The background path already grows the heap array before writing into it,
+but the stopped-job paths wrote directly into shell->jobs[shell->job_count].
+On EnlilOS this could leave shell->jobs == NULL and crash in memset().
+
+Add a helper that performs refresh/prune/grow once and reuse it for all
+stopped-job registration sites.
+---
+ include/arksh/shell.h |  7 +++++++
+ src/executor.c        | 42 +++++++++++++-----------------------------
+ src/shell.c           | 33 +++++++++++++++++++++++++++++++++
+ 3 files changed, 53 insertions(+), 29 deletions(-)
+
+diff --git a/include/arksh/shell.h b/include/arksh/shell.h
+index 0000000..1111111 100644
+--- a/include/arksh/shell.h
++++ b/include/arksh/shell.h
+@@
+ void arksh_shell_refresh_jobs(ArkshShell *shell);
+ int arksh_shell_start_background_job(ArkshShell *shell, const char *command_text, char *out, size_t out_size);
++int arksh_shell_record_stopped_job(
++  ArkshShell *shell,
++  const ArkshPlatformAsyncProcess *process,
++  const char *command_text,
++  char *out,
++  size_t out_size
++);
+ int arksh_shell_prepare_process_substitution(
+   ArkshShell *shell,
+   ArkshProcessSubstitutionKind kind,
+diff --git a/src/shell.c b/src/shell.c
+index 2222222..3333333 100644
+--- a/src/shell.c
++++ b/src/shell.c
+@@
+ int arksh_shell_start_background_job(ArkshShell *shell, const char *command_text, char *out, size_t out_size) {
+@@
+   shell->job_count++;
+   return 0;
+ }
++
++int arksh_shell_record_stopped_job(
++  ArkshShell *shell,
++  const ArkshPlatformAsyncProcess *process,
++  const char *command_text,
++  char *out,
++  size_t out_size
++) {
++  if (shell == NULL || process == NULL || command_text == NULL || out == NULL || out_size == 0) {
++    return 1;
++  }
++
++  arksh_shell_refresh_jobs(shell);
++  if (shell->job_count >= ARKSH_MAX_JOBS) {
++    prune_completed_jobs(shell);
++  }
++
++  if (shell->job_count >= ARKSH_MAX_JOBS) {
++    snprintf(out, out_size, "too many stopped jobs");
++    return 1;
++  }
++
++  if (grow_heap_array((void **) &shell->jobs, &shell->job_capacity,
++                      shell->job_count + 1, sizeof(shell->jobs[0]),
++                      ARKSH_MAX_JOBS) != 0) {
++    snprintf(out, out_size, "too many stopped jobs");
++    return 1;
++  }
++
++  memset(&shell->jobs[shell->job_count], 0, sizeof(shell->jobs[shell->job_count]));
++  shell->jobs[shell->job_count].id = shell->next_job_id++;
++  shell->jobs[shell->job_count].state = ARKSH_JOB_STOPPED;
++  shell->jobs[shell->job_count].exit_code = 0;
++  shell->jobs[shell->job_count].process = *process;
++  copy_string(shell->jobs[shell->job_count].command,
++              sizeof(shell->jobs[shell->job_count].command),
++              command_text);
++  shell->job_count++;
++  out[0] = '\0';
++  return 0;
++}
+diff --git a/src/executor.c b/src/executor.c
+index 4444444..5555555 100644
+--- a/src/executor.c
++++ b/src/executor.c
+@@
+-  if (stopped_process.pgid != 0 && shell->job_count < ARKSH_MAX_JOBS) {
+-    memset(&shell->jobs[shell->job_count], 0, sizeof(shell->jobs[0]));
+-    shell->jobs[shell->job_count].id      = shell->next_job_id++;
+-    shell->jobs[shell->job_count].state   = ARKSH_JOB_STOPPED;
+-    shell->jobs[shell->job_count].process = stopped_process;
+-    copy_string(shell->jobs[shell->job_count].command, sizeof(shell->jobs[0].command), argv[0]);
+-    shell->job_count++;
+-    out[0] = '\0';
+-    return 1;
++  if (stopped_process.pgid != 0) {
++    if (arksh_shell_record_stopped_job(shell, &stopped_process, argv[0], out, out_size) != 0) {
++      return 1;
++    }
++    return 1;
+   }
+@@
+-    if (stopped_process.pgid != 0 && shell->job_count < ARKSH_MAX_JOBS) {
+-      memset(&shell->jobs[shell->job_count], 0, sizeof(shell->jobs[0]));
+-      shell->jobs[shell->job_count].id      = shell->next_job_id++;
+-      shell->jobs[shell->job_count].state   = ARKSH_JOB_STOPPED;
+-      shell->jobs[shell->job_count].process = stopped_process;
+-      copy_string(shell->jobs[shell->job_count].command, sizeof(shell->jobs[0].command), specs[0].argv[0]);
+-      shell->job_count++;
+-      out[0] = '\0';
+-      return 1;
++    if (stopped_process.pgid != 0) {
++      if (arksh_shell_record_stopped_job(shell, &stopped_process, specs[0].argv[0], out, out_size) != 0) {
++        return 1;
++      }
++      return 1;
+     }
+@@
+-        if (stopped_process.pgid != 0 && shell->job_count < ARKSH_MAX_JOBS) {
+-          memset(&shell->jobs[shell->job_count], 0, sizeof(shell->jobs[0]));
+-          shell->jobs[shell->job_count].id      = shell->next_job_id++;
+-          shell->jobs[shell->job_count].state   = ARKSH_JOB_STOPPED;
+-          shell->jobs[shell->job_count].process = stopped_process;
+-          copy_string(shell->jobs[shell->job_count].command, sizeof(shell->jobs[0].command), specs[0].argv[0]);
+-          shell->job_count++;
+-          out[0] = '\0';
+-          return 1;
++        if (stopped_process.pgid != 0) {
++          if (arksh_shell_record_stopped_job(shell, &stopped_process, specs[0].argv[0], out, out_size) != 0) {
++            return 1;
++          }
++          return 1;
+         }
+@@
+-  if (stopped_process.pgid != 0 && shell->job_count < ARKSH_MAX_JOBS) {
+-    memset(&shell->jobs[shell->job_count], 0, sizeof(shell->jobs[0]));
+-    shell->jobs[shell->job_count].id      = shell->next_job_id++;
+-    shell->jobs[shell->job_count].state   = ARKSH_JOB_STOPPED;
+-    shell->jobs[shell->job_count].process = stopped_process;
+-    copy_string(shell->jobs[shell->job_count].command, sizeof(shell->jobs[0].command), specs[0].argv[0]);
+-    shell->job_count++;
+-    out[0] = '\0';
+-    return 1;
++  if (stopped_process.pgid != 0) {
++    if (arksh_shell_record_stopped_job(shell, &stopped_process, specs[0].argv[0], out, out_size) != 0) {
++      return 1;
++    }
++    return 1;
+   }
+-- 
+2.49.0

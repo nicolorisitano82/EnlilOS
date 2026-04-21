@@ -2472,6 +2472,13 @@ static int selftest_case_musl_dlfcn(void)
                                "[EL0] dynamic ELF avviato correttamente\n", 1);
 }
 
+static int selftest_case_gnu_ls(void)
+{
+    static const char case_name[] = "gnu-ls";
+
+    return st_run_user_path(case_name, "/LS.ELF", 3000ULL);
+}
+
 static int selftest_case_kbd_layout(void)
 {
     return (keyboard_selftest_run() == 0) ? 0 : -1;
@@ -2675,6 +2682,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-pipe",   selftest_case_musl_pipe },
     { "musl-glob",   selftest_case_musl_glob },
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
+    { "gnu-ls",      selftest_case_gnu_ls },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
     { "mmu-user-va", selftest_case_mmu_user_va },
