@@ -24,7 +24,11 @@
 #define LINUX_NR_symlinkat         36
 #define LINUX_NR_readlinkat        78
 #define LINUX_NR_renameat          38
+#define LINUX_NR_fchmod            52
+#define LINUX_NR_fchmodat          53
+#define LINUX_NR_fchownat          54
 #define LINUX_NR_faccessat         48
+#define LINUX_NR_faccessat2        439
 #define LINUX_NR_openat            56
 #define LINUX_NR_close             57
 #define LINUX_NR_pipe2             59
@@ -49,8 +53,13 @@
 #define LINUX_NR_futex             98
 #define LINUX_NR_nanosleep         101
 #define LINUX_NR_clock_gettime     113
+#define LINUX_NR_sched_getaffinity 123
 #define LINUX_NR_sched_yield       124
+#define LINUX_NR_sched_get_priority_max 143
+#define LINUX_NR_sched_get_priority_min 144
 #define LINUX_NR_tgkill            131
+#define LINUX_NR_getrusage         165
+#define LINUX_NR_umask             166
 #define LINUX_NR_rt_sigaction      134
 #define LINUX_NR_rt_sigprocmask    135
 #define LINUX_NR_rt_sigreturn      139
@@ -83,6 +92,7 @@
 #define LINUX_NR_munmap            215
 #define LINUX_NR_brk               214
 #define LINUX_NR_prlimit64         261
+#define LINUX_NR_madvise           233
 #define LINUX_NR_getrandom         278
 #define LINUX_NR_rseq              293
 

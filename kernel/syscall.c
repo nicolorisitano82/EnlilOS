@@ -6787,6 +6787,98 @@ static uint64_t sys_linux_faccessat(uint64_t args[6])
     return 0ULL;
 }
 
+/* ── fchmod(fd, mode): no permission model, return 0 ──────────────── */
+static uint64_t sys_linux_fchmod(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+/* ── fchmodat(dirfd, path, mode, flags): no permission model, return 0 */
+static uint64_t sys_linux_fchmodat(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+/* ── fchownat(dirfd, path, uid, gid, flags): no ownership model, return 0 */
+static uint64_t sys_linux_fchownat(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+/* ── sched_getaffinity(pid, cpusetsize, mask): stub, 1 CPU ────────── */
+static uint64_t sys_linux_sched_getaffinity(uint64_t args[6])
+{
+    uintptr_t  mask_uva  = (uintptr_t)args[2];
+    uint64_t   setsize   = args[1];
+    uint8_t    buf[128];
+    uint64_t   write_sz;
+    int        rc;
+
+    if (setsize == 0U)
+        return ERR(EINVAL);
+    write_sz = (setsize < sizeof(buf)) ? setsize : sizeof(buf);
+    memset(buf, 0, (size_t)write_sz);
+    buf[0] = 0x01U;  /* CPU 0 only */
+    if (mask_uva != 0U) {
+        rc = user_store_bytes(mask_uva, buf, (uint32_t)write_sz);
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return 0ULL;
+}
+
+/* ── sched_get_priority_max/min: stub (SCHED_OTHER → 0) ──────────── */
+static uint64_t sys_linux_sched_get_priority_max(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+static uint64_t sys_linux_sched_get_priority_min(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+/* ── getrusage(who, *rusage): zeroed struct ───────────────────────── */
+static uint64_t sys_linux_getrusage(uint64_t args[6])
+{
+    uintptr_t      ru_uva = (uintptr_t)args[1];
+    linux_rusage_t ru;
+    int            rc;
+
+    if (ru_uva == 0U)
+        return ERR(EFAULT);
+    linux_fill_rusage(&ru);
+    rc = user_store_bytes(ru_uva, &ru, sizeof(ru));
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+/* ── umask(mask): stub, return 022, no tracking ───────────────────── */
+static uint64_t sys_linux_umask(uint64_t args[6])
+{
+    (void)args;
+    return 022ULL;
+}
+
+/* ── madvise(addr, length, advice): hint only, return 0 ──────────── */
+static uint64_t sys_linux_madvise(uint64_t args[6])
+{
+    (void)args;
+    return 0ULL;
+}
+
+/* ── faccessat2(dirfd, path, mode, flags): delegate to faccessat ─── */
+static uint64_t sys_linux_faccessat2(uint64_t args[6])
+{
+    /* args[3] = flags (AT_EACCESS etc.) — ignore for v1 */
+    uint64_t fwd[6] = { args[0], args[1], args[2], 0U, 0U, 0U };
+    return sys_linux_faccessat(fwd);
+}
+
 static uint64_t sys_linux_flock(uint64_t args[6])
 {
     fd_object_t *obj = fd_get((int)args[0]);
@@ -7838,6 +7930,25 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_truncate, sys_linux_truncate, 0, "linux_truncate");
     linux_syscall_bind(LINUX_NR_ftruncate, sys_linux_ftruncate, 0, "linux_ftruncate");
     linux_syscall_bind(LINUX_NR_faccessat, sys_linux_faccessat, 0, "linux_faccessat");
+    linux_syscall_bind(LINUX_NR_faccessat2, sys_linux_faccessat2, 0, "linux_faccessat2");
+    linux_syscall_bind(LINUX_NR_fchmod, sys_linux_fchmod,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_fchmod");
+    linux_syscall_bind(LINUX_NR_fchmodat, sys_linux_fchmodat,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_fchmodat");
+    linux_syscall_bind(LINUX_NR_fchownat, sys_linux_fchownat,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_fchownat");
+    linux_syscall_bind(LINUX_NR_sched_getaffinity, sys_linux_sched_getaffinity,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_sched_getaffinity");
+    linux_syscall_bind(LINUX_NR_sched_get_priority_max, sys_linux_sched_get_priority_max,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_sched_get_priority_max");
+    linux_syscall_bind(LINUX_NR_sched_get_priority_min, sys_linux_sched_get_priority_min,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_sched_get_priority_min");
+    linux_syscall_bind(LINUX_NR_getrusage, sys_linux_getrusage,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getrusage");
+    linux_syscall_bind(LINUX_NR_umask, sys_linux_umask,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_umask");
+    linux_syscall_bind(LINUX_NR_madvise, sys_linux_madvise,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_madvise");
     linux_syscall_bind(LINUX_NR_unlinkat, sys_linux_unlinkat, 0, "linux_unlinkat");
     linux_syscall_bind(LINUX_NR_symlinkat, sys_linux_symlinkat, 0, "linux_symlinkat");
     linux_syscall_bind(LINUX_NR_readlinkat, sys_linux_readlinkat, 0, "linux_readlinkat");
