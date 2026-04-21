@@ -597,11 +597,11 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
   - `mmu_region_is_free()`: helper statico in mmu.c, cammina PTEs per verificare range libero.
 - `setitimer(103)` / `getitimer(102)` implementati. `linux_itimerval_t` in `linux_compat.h`. Handler usa `sched_proc_set/get_itimer()` (ITIMER_REAL only). Timer check in `sched_tick()` invia `SIGALRM` via `signal_send_pid()`, reload periodico o disarm one-shot. `mmu_read_user`/`mmu_write_user` per accesso struct user-space. Suite 50/50.
 
-#### Manca da implementare (M11-05a — TODO)
+- `/proc/self/exe` e `/proc/self/fd/` corretti per processi user-space Linux ABI. Bug fondamentale: `fd_open_path_current` instradava `/proc/self/...` via vfsd → kernel-side procfs girava con `current_task=vfsd`, non con il processo richiedente. Fix: `is_proc_self_path()` in `fd_open_path_current` bypassa vfsd, usa kernel VFS locale (current_task resta bash). Per `/proc/self/fd/<N>`: segue symlink via `vfs_readlink` → fd punta al file reale (e.g. `/dev/tty`) non al nodo procfs (che sarebbe EROFS in scrittura). Exportata `syscall_open_proc_path()` per testabilità. Suite 50/50.
 
-**Requisiti filesystem**
-- `/proc/self/exe` — bash usa per autopercorso → prerequisito `M11-04`
-- `/proc/self/fd/` — bash usa per info fd aperto → prerequisito `M11-04`
+#### M11-05a completata — nessuna syscall mancante
+
+Tutte le syscall del gap bash-linux sono implementate. Requisiti filesystem risolti.
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
