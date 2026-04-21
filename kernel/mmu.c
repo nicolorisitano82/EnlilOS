@@ -900,6 +900,72 @@ int mmu_unmap_user_region(mm_space_t *space, uintptr_t start, size_t size)
     return 0;
 }
 
+/* ── mmu_copy_user_pages ──────────────────────────────────────────────
+ * Copia 'size' byte da (src_space, src_va) a (dst_space, dst_va).
+ *
+ * Funziona tra mm_space diversi (cross-space): risolve la PA backing di
+ * ogni pagina in entrambi gli spazi e fa memcpy PA→PA tramite la vista
+ * kernel identity-mapped (PA = KVA su EnlilOS: RAM [0x40000000, 0x80000000)).
+ *
+ * src_va/dst_va non devono essere page-aligned; la copia gestisce offset
+ * interni alla prima e ultima pagina (byte-granulare).
+ *
+ * Pagine sorgente non mappate vengono saltate (dst corrispondente non
+ * viene toccato). Ritorna 0 se tutto ok, -EFAULT se dst ha pagine non
+ * mappate che avrebbero dovuto ricevere dati.
+ * ─────────────────────────────────────────────────────────────────── */
+int mmu_copy_user_pages(mm_space_t *src_space, uintptr_t src_va,
+                        mm_space_t *dst_space, uintptr_t dst_va,
+                        size_t size)
+{
+    size_t remaining = size;
+    int    had_fault = 0;
+
+    while (remaining > 0U) {
+        uint64_t *src_pte, *dst_pte;
+        uintptr_t src_page = src_va & PAGE_MASK;
+        uintptr_t dst_page = dst_va & PAGE_MASK;
+        size_t    src_off  = src_va - src_page;
+        size_t    dst_off  = dst_va - dst_page;
+        size_t    chunk    = PAGE_SIZE - (src_off > dst_off ? src_off : dst_off);
+
+        if (chunk > remaining)
+            chunk = remaining;
+
+        /* Risolve PA sorgente */
+        if (mmu_lookup_pte(src_space, src_page, &src_pte, NULL) < 0 ||
+            (*src_pte & PTE_VALID) == 0U) {
+            /* pagina src non mappata: salta */
+            src_va    += chunk;
+            dst_va    += chunk;
+            remaining -= chunk;
+            continue;
+        }
+
+        /* Risolve PA destinazione */
+        if (mmu_lookup_pte(dst_space, dst_page, &dst_pte, NULL) < 0 ||
+            (*dst_pte & PTE_VALID) == 0U) {
+            had_fault  = 1;
+            src_va    += chunk;
+            dst_va    += chunk;
+            remaining -= chunk;
+            continue;
+        }
+
+        {
+            uint8_t *src_kva = (uint8_t *)(uintptr_t)((*src_pte & PTE_ADDR_MASK) + src_off);
+            uint8_t *dst_kva = (uint8_t *)(uintptr_t)((*dst_pte & PTE_ADDR_MASK) + dst_off);
+            memcpy(dst_kva, src_kva, chunk);
+        }
+
+        src_va    += chunk;
+        dst_va    += chunk;
+        remaining -= chunk;
+    }
+
+    return had_fault ? -EFAULT : 0;
+}
+
 /* ── mmu_remap_user_region ────────────────────────────────────────────
  * Implementa la semantica base di mremap(2) per mapping anonimi.
  *
@@ -1010,23 +1076,8 @@ int mmu_remap_user_region(mm_space_t *space,
                     return -ENOMEM;
             }
 
-            /* Copia dati pagina per pagina via PA (= KVA su EnlilOS) */
-            for (size_t i = 0U; i < copy_pgs; i++) {
-                uint64_t *old_pte, *new_pte;
-                uintptr_t old_va_page = old_addr + (uintptr_t)(i * PAGE_SIZE);
-                uintptr_t new_va_page = new_va   + (uintptr_t)(i * PAGE_SIZE);
-
-                if (mmu_lookup_pte(space, old_va_page, &old_pte, NULL) < 0)
-                    continue;
-                if ((*old_pte & PTE_VALID) == 0U)
-                    continue;
-                if (mmu_lookup_pte(space, new_va_page, &new_pte, NULL) < 0)
-                    continue;
-
-                memcpy((void *)(uintptr_t)(*new_pte & PTE_ADDR_MASK),
-                       (void *)(uintptr_t)(*old_pte & PTE_ADDR_MASK),
-                       PAGE_SIZE);
-            }
+            mmu_copy_user_pages(space, old_addr,
+                                space, new_va, old_aligned);
 
             mmu_unmap_user_region(space, old_addr, old_aligned);
             *new_addr_out = new_va;

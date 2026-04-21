@@ -218,6 +218,9 @@ int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
 int         mmu_unmap_user_region(mm_space_t *space, uintptr_t start,
                                   size_t size);
+int         mmu_copy_user_pages(mm_space_t *src_space, uintptr_t src_va,
+                                mm_space_t *dst_space, uintptr_t dst_va,
+                                size_t size);
 int         mmu_remap_user_region(mm_space_t *space,
                                   uintptr_t old_addr, size_t old_size,
                                   size_t new_size, uint32_t flags,
