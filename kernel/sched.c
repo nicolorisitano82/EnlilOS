@@ -76,6 +76,9 @@ typedef struct {
     uint8_t     abi_mode;
     char        exec_path[SCHED_EXEC_PATH_MAX];
     rlimit64_t  rlimits[RLIMIT_NLIMITS];
+    /* ITIMER_REAL (SIGALRM): valori in ms, 0 = disarmato */
+    uint64_t    itimer_expires_ms;   /* scadenza assoluta */
+    uint64_t    itimer_interval_ms;  /* ricarica periodica (0 = one-shot) */
 } sched_proc_ctx_t;
 
 static sched_task_ctx_t task_ctx[SCHED_MAX_TASKS];
@@ -1075,8 +1078,25 @@ void sched_tick(uint64_t jiffies)
     if (current_task->deadline_ms > 0 &&
         jiffies > current_task->deadline_ms &&
         !(current_task->flags & TCB_FLAG_IDLE)) {
-        /* Non stampiamo nell'IRQ handler: troppo lento.
-         * Settiamo solo un flag — il logging avviene in sched_stats(). */
+        need_resched = 1;
+    }
+
+    /* ── ITIMER_REAL: controlla tutti i proc armati ─────────────── */
+    for (uint32_t i = 0U; i < SCHED_MAX_TASKS; i++) {
+        sched_proc_ctx_t *proc = &proc_ctx[i];
+
+        if (!proc->in_use || proc->itimer_expires_ms == 0U)
+            continue;
+        if (jiffies < proc->itimer_expires_ms)
+            continue;
+
+        /* Scaduto: invia SIGALRM e ricarica o disarma */
+        if (proc->itimer_interval_ms != 0U)
+            proc->itimer_expires_ms = jiffies + proc->itimer_interval_ms;
+        else
+            proc->itimer_expires_ms = 0U;
+
+        (void)signal_send_pid(proc->tgid, SIGALRM);
         need_resched = 1;
     }
 }
@@ -1673,4 +1693,48 @@ int sched_proc_set_rlimit(sched_tcb_t *t, uint32_t resource,
         return -1;
     proc->rlimits[resource] = *in;
     return 0;
+}
+
+/* ── ITIMER_REAL API ────────────────────────────────────────────────
+ * sched_proc_set_itimer: arma o disarma ITIMER_REAL per il proc di t.
+ *   value_ms    > 0 → scade a timer_now_ms() + value_ms
+ *   value_ms   == 0 → disarma
+ *   interval_ms > 0 → ricarica periodica; 0 = one-shot
+ *
+ * sched_proc_get_itimer: legge remaining + interval.
+ *   remaining = max(0, expires_ms - now_ms), 0 se disarmato
+ * ─────────────────────────────────────────────────────────────────── */
+void sched_proc_set_itimer(sched_tcb_t *t,
+                            uint64_t value_ms, uint64_t interval_ms)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+
+    if (!proc)
+        return;
+    if (value_ms == 0U) {
+        proc->itimer_expires_ms  = 0U;
+        proc->itimer_interval_ms = 0U;
+    } else {
+        proc->itimer_expires_ms  = timer_now_ms() + value_ms;
+        proc->itimer_interval_ms = interval_ms;
+    }
+}
+
+void sched_proc_get_itimer(const sched_tcb_t *t,
+                            uint64_t *value_ms_out,
+                            uint64_t *interval_ms_out)
+{
+    const sched_proc_ctx_t *proc = proc_of(t);
+    uint64_t now = timer_now_ms();
+
+    if (!proc || !value_ms_out || !interval_ms_out) {
+        if (value_ms_out)    *value_ms_out    = 0U;
+        if (interval_ms_out) *interval_ms_out = 0U;
+        return;
+    }
+    if (proc->itimer_expires_ms == 0U || now >= proc->itimer_expires_ms)
+        *value_ms_out = 0U;
+    else
+        *value_ms_out = proc->itimer_expires_ms - now;
+    *interval_ms_out = proc->itimer_interval_ms;
 }

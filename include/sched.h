@@ -242,6 +242,11 @@ int         sched_proc_get_rlimit(const sched_tcb_t *t, uint32_t resource,
                                   rlimit64_t *out);
 int         sched_proc_set_rlimit(sched_tcb_t *t, uint32_t resource,
                                   const rlimit64_t *in);
+void        sched_proc_set_itimer(sched_tcb_t *t,
+                                  uint64_t value_ms, uint64_t interval_ms);
+void        sched_proc_get_itimer(const sched_tcb_t *t,
+                                  uint64_t *value_ms_out,
+                                  uint64_t *interval_ms_out);
 
 /* Helper del trampoline assembly */
 void sched_task_bootstrap(uint64_t entry_reg);
