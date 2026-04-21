@@ -218,6 +218,10 @@ int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
 int         mmu_unmap_user_region(mm_space_t *space, uintptr_t start,
                                   size_t size);
+/* Flags per mmu_remap_user_region (= mremap Linux flags) */
+#define MMU_REMAP_MAYMOVE   1U
+#define MMU_REMAP_FIXED     2U
+
 int         mmu_read_user(mm_space_t *space, uintptr_t uva,
                          void *kbuf, size_t size);
 int         mmu_write_user(mm_space_t *space, uintptr_t uva,

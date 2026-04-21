@@ -1051,9 +1051,6 @@ int mmu_copy_user_pages(mm_space_t *src_space, uintptr_t src_va,
  *  5. MREMAP_FIXED → unmap range new_addr..new_addr+new_size, poi come
  *     caso 4 ma target fisso (richiede MREMAP_MAYMOVE)
  * ─────────────────────────────────────────────────────────────────── */
-#define MREMAP_MAYMOVE  1U
-#define MREMAP_FIXED    2U
-
 /* Ritorna 1 se nessuna pagina in [start, start+size) è mappata. */
 static int mmu_region_is_free(mm_space_t *space, uintptr_t start, size_t size)
 {
@@ -1118,13 +1115,13 @@ int mmu_remap_user_region(mm_space_t *space,
         }
 
         /* ── 4/5. Spostamento (MREMAP_MAYMOVE obbligatorio) ─────── */
-        if (!(flags & MREMAP_MAYMOVE))
+        if (!(flags & MMU_REMAP_MAYMOVE))
             return -ENOMEM;
 
         {
             uintptr_t new_va    = 0U;
             size_t    copy_pgs  = old_aligned / PAGE_SIZE;
-            int       fixed     = (flags & MREMAP_FIXED) != 0U;
+            int       fixed     = (flags & MMU_REMAP_FIXED) != 0U;
 
             if (fixed) {
                 /* MREMAP_FIXED: unmap target, poi usa quell'indirizzo */

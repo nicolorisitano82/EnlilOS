@@ -20,6 +20,7 @@
 #include "ksem.h"
 #include "microkernel.h"
 #include "mmu.h"
+#include "pmm.h"
 #include "keyboard.h"
 #include "net.h"
 #include "sched.h"
@@ -2462,6 +2463,133 @@ static int selftest_case_socket_api(void)
     return st_expect_text_file(case_name, "/data/SOCKDEMO.TXT", expected, 1);
 }
 
+/* ── mmu-user-va: test kernel-side mmu_read_user / mmu_write_user /
+ *                mmu_remap_user_region ──────────────────────────────
+ *
+ * Crea uno spazio indirizzi sintetico (non agganciato a nessun task EL0),
+ * vi mappa pagine, e verifica tutte e tre le primitive senza bisogno di
+ * un ELF user-space. Copre:
+ *   1. mmu_write_user + mmu_read_user  — stessa pagina
+ *   2. cross-page boundary write/read
+ *   3. mmu_remap shrink              — dati prima della coda preservati
+ *   4. mmu_remap grow in-place       — pagina freed torna disponibile
+ *   5. mmu_remap MAYMOVE move        — dati copiati al nuovo VA
+ * ─────────────────────────────────────────────────────────────────── */
+static int selftest_case_mmu_user_va(void)
+{
+    static const char case_name[] = "mmu-user-va";
+
+    mm_space_t *space      = NULL;
+    uintptr_t   base       = MMU_USER_BASE;
+    uint8_t     wbuf[64];
+    uint8_t     rbuf[64];
+    int         rc;
+    uint32_t    i;
+
+    /* --- crea spazio sintetico --- */
+    space = mmu_space_create();
+    ST_CHECK(case_name, space != NULL, "mmu_space_create");
+
+    /* Mappa 3 pagine contigue */
+    rc = mmu_map_user_region(space, base, 3U * PAGE_SIZE,
+                             MMU_PROT_USER_R | MMU_PROT_USER_W);
+    ST_CHECK(case_name, rc == 0, "map 3 pagine");
+
+    /* 1. write + read stessa pagina */
+    for (i = 0U; i < 64U; i++)
+        wbuf[i] = (uint8_t)(0xA0U + i);
+    rc = mmu_write_user(space, base, wbuf, 64U);
+    ST_CHECK(case_name, rc == 0, "write_user 64B");
+
+    for (i = 0U; i < 64U; i++) rbuf[i] = 0U;
+    rc = mmu_read_user(space, base, rbuf, 64U);
+    ST_CHECK(case_name, rc == 0, "read_user 64B");
+    for (i = 0U; i < 64U; i++)
+        ST_CHECK(case_name, rbuf[i] == wbuf[i], "read_user contenuto errato");
+
+    /* 2. cross-page boundary (fine pag.1 → inizio pag.2): 32B */
+    {
+        uintptr_t cross = base + PAGE_SIZE - 16U;
+        for (i = 0U; i < 32U; i++) wbuf[i] = (uint8_t)(0xB0U + i);
+        rc = mmu_write_user(space, cross, wbuf, 32U);
+        ST_CHECK(case_name, rc == 0, "write_user cross-page");
+
+        for (i = 0U; i < 32U; i++) rbuf[i] = 0U;
+        rc = mmu_read_user(space, cross, rbuf, 32U);
+        ST_CHECK(case_name, rc == 0, "read_user cross-page");
+        for (i = 0U; i < 32U; i++)
+            ST_CHECK(case_name, rbuf[i] == wbuf[i], "cross-page dati errati");
+    }
+
+    /* Scrivi pattern noto prima del shrink */
+    for (i = 0U; i < 64U; i++) wbuf[i] = (uint8_t)(0xC0U + i);
+    rc = mmu_write_user(space, base, wbuf, 64U);
+    ST_CHECK(case_name, rc == 0, "write pre-shrink");
+
+    /* 3. shrink: 3 pagine → 1 pagina */
+    {
+        uintptr_t nva = 0U;
+        rc = mmu_remap_user_region(space, base, 3U * PAGE_SIZE,
+                                   PAGE_SIZE, 0U, 0U, &nva);
+        ST_CHECK(case_name, rc == 0,  "remap shrink");
+        ST_CHECK(case_name, nva == base, "remap shrink: new_va != base");
+
+        for (i = 0U; i < 64U; i++) rbuf[i] = 0U;
+        rc = mmu_read_user(space, base, rbuf, 64U);
+        ST_CHECK(case_name, rc == 0, "read dopo shrink");
+        for (i = 0U; i < 64U; i++)
+            ST_CHECK(case_name, rbuf[i] == wbuf[i], "shrink: dati errati");
+    }
+
+    /* 4. grow in-place: 1 → 2 pagine (pag.2 è stata liberata dal shrink) */
+    {
+        uintptr_t nva = 0U;
+        rc = mmu_remap_user_region(space, base, PAGE_SIZE,
+                                   2U * PAGE_SIZE, 0U, 0U, &nva);
+        ST_CHECK(case_name, rc == 0,   "remap grow in-place");
+        ST_CHECK(case_name, nva == base, "remap grow: new_va != base");
+
+        /* prima pagina ancora intatta */
+        for (i = 0U; i < 64U; i++) rbuf[i] = 0U;
+        rc = mmu_read_user(space, base, rbuf, 64U);
+        ST_CHECK(case_name, rc == 0, "read dopo grow");
+        for (i = 0U; i < 64U; i++)
+            ST_CHECK(case_name, rbuf[i] == wbuf[i], "grow: dati prima pag. errati");
+    }
+
+    /* 5. move: occupa pag.3 per bloccare in-place, poi MAYMOVE */
+    {
+        uintptr_t blocker = base + 2U * PAGE_SIZE;
+        uintptr_t nva     = 0U;
+
+        rc = mmu_map_user_region(space, blocker, PAGE_SIZE,
+                                 MMU_PROT_USER_R | MMU_PROT_USER_W);
+        ST_CHECK(case_name, rc == 0, "map pagina blocco");
+
+        /* Scrivi pattern da verificare dopo il move */
+        for (i = 0U; i < 64U; i++) wbuf[i] = (uint8_t)(0xD0U + i);
+        rc = mmu_write_user(space, base, wbuf, 64U);
+        ST_CHECK(case_name, rc == 0, "write pre-move");
+
+        /* Cresci a 3 pagine: in-place bloccato → move */
+        rc = mmu_remap_user_region(space, base, 2U * PAGE_SIZE,
+                                   3U * PAGE_SIZE,
+                                   MMU_REMAP_MAYMOVE, 0U, &nva);
+        ST_CHECK(case_name, rc == 0,    "remap MAYMOVE");
+        ST_CHECK(case_name, nva != base, "remap MAYMOVE: non si è spostato");
+
+        /* Dati preservati al nuovo VA */
+        for (i = 0U; i < 64U; i++) rbuf[i] = 0U;
+        rc = mmu_read_user(space, nva, rbuf, 64U);
+        ST_CHECK(case_name, rc == 0, "read dopo move");
+        for (i = 0U; i < 64U; i++)
+            ST_CHECK(case_name, rbuf[i] == wbuf[i], "move: dati non preservati");
+    }
+
+    mmu_space_destroy(space);
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -2512,6 +2640,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
+    { "mmu-user-va", selftest_case_mmu_user_va },
 };
 
 int selftest_run_named(const char *name)
