@@ -6363,6 +6363,32 @@ static uint64_t sys_linux_clone(uint64_t args[6])           { return sys_linux_p
 static uint64_t sys_linux_execve(uint64_t args[6])          { return sys_linux_passthrough(args, sys_execve); }
 static uint64_t sys_linux_mmap(uint64_t args[6])            { return sys_linux_passthrough(args, sys_mmap); }
 static uint64_t sys_linux_munmap(uint64_t args[6])          { return sys_linux_passthrough(args, sys_munmap); }
+
+/* ── mremap(old_addr, old_size, new_size, flags, [new_addr]) ─────── */
+static uint64_t sys_linux_mremap(uint64_t args[6])
+{
+    uintptr_t   old_addr  = (uintptr_t)args[0];
+    size_t      old_size  = (size_t)args[1];
+    size_t      new_size  = (size_t)args[2];
+    uint32_t    flags     = (uint32_t)args[3];
+    uintptr_t   fixed_addr = (uintptr_t)args[4];
+    mm_space_t *space;
+    uintptr_t   new_va = 0U;
+    int         rc;
+
+    if (!current_task || !sched_task_is_user(current_task))
+        return MAP_FAILED_VA;
+    if (new_size == 0U)
+        return MAP_FAILED_VA;
+
+    space = sched_task_space(current_task);
+    if (!space)
+        return MAP_FAILED_VA;
+
+    rc = mmu_remap_user_region(space, old_addr, old_size, new_size,
+                               flags, fixed_addr, &new_va);
+    return (rc < 0) ? MAP_FAILED_VA : (uint64_t)new_va;
+}
 static uint64_t sys_linux_brk(uint64_t args[6])             { return sys_linux_passthrough(args, sys_brk); }
 static uint64_t sys_linux_socket(uint64_t args[6])          { return sys_linux_passthrough(args, sys_socket); }
 static uint64_t sys_linux_bind(uint64_t args[6])            { return sys_linux_passthrough(args, sys_bind); }
@@ -7965,6 +7991,7 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_clone, sys_linux_clone, 0, "linux_clone");
     linux_syscall_bind(LINUX_NR_execve, sys_linux_execve, 0, "linux_execve");
     linux_syscall_bind(LINUX_NR_mmap, sys_linux_mmap, 0, "linux_mmap");
+    linux_syscall_bind(LINUX_NR_mremap, sys_linux_mremap, 0, "linux_mremap");
     linux_syscall_bind(LINUX_NR_mprotect, sys_linux_mprotect, 0, "linux_mprotect");
     linux_syscall_bind(LINUX_NR_munmap, sys_linux_munmap, 0, "linux_munmap");
     linux_syscall_bind(LINUX_NR_brk, sys_linux_brk,

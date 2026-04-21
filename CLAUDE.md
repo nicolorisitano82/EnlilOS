@@ -589,13 +589,18 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
 - Passthrough implementati: `chdir(49)`, `kill(129)`, `tkill(130)`, `setpgid(154)`, `getpgrp(155)`, `setsid(158)`, `getrlimit(163)`, `setrlimit(164)`.
   - Nota `tkill`: non è diretto passthrough — lookup task per TID, estrae tgid, chiama `sys_tgkill(tgid, tid, sig)`.
   - Nota `getrlimit`/`setrlimit`: RLIMIT_* IDs identici a Linux; `rlimit64_t` = `struct rlimit` su AArch64 (rlim_t = uint64_t). No conversione.
+- `mremap(216)` implementato. Nuova API kernel: `mmu_remap_user_region()` in `kernel/mmu.c` + `include/mmu.h`.
+  - Shrink: unmap coda, ritorna `old_addr`.
+  - Grow in-place: controlla range `[old_end, old_end+delta)` libero (page walk), alloca nuove pagine lì.
+  - Move (`MREMAP_MAYMOVE`): alloca nuovo range, copia dati pagina-per-pagina via PA (PA=KVA su EnlilOS), unmap vecchio.
+  - `MREMAP_FIXED`: unmap target se occupato, poi map a indirizzo fisso + copia.
+  - `mmu_region_is_free()`: helper statico in mmu.c, cammina PTEs per verificare range libero.
 
 #### Manca da implementare (M11-05a — TODO)
 
-**Medio — blocco principale**
+**Medio — in sospeso**
 | Nr | Nome | Note |
 |---|---|---|
-| 216 | `mremap` | **CRITICO**: bash-linux crasha subito senza di esso (glibc malloc usa mremap). Serve `mmu_remap_user_region()` kernel-side. ~4h |
 | 103 | `setitimer` | `SIGALRM` per `read -t`. Serve timer per-task + delivery. ~3h |
 
 **Requisiti filesystem**

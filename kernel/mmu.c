@@ -900,6 +900,141 @@ int mmu_unmap_user_region(mm_space_t *space, uintptr_t start, size_t size)
     return 0;
 }
 
+/* ── mmu_remap_user_region ────────────────────────────────────────────
+ * Implementa la semantica base di mremap(2) per mapping anonimi.
+ *
+ * flags: MREMAP_MAYMOVE=1, MREMAP_FIXED=2.
+ * Prot: il nuovo range usa MMU_PROT_USER_R|W (come mmap anonimo).
+ *
+ * Casi gestiti:
+ *  1. new_size == old_size → no-op, ritorna old_addr
+ *  2. new_size < old_size  → unmap coda, ritorna old_addr
+ *  3. new_size > old_size  → prova estensione in-place; se il range
+ *     immediatamente successivo è libero aggiunge pagine e ritorna old_addr
+ *  4. estensione fallita + MREMAP_MAYMOVE → alloca nuovo range, copia
+ *     dati pagina per pagina (PA = KVA su EnlilOS), unmap vecchio,
+ *     ritorna nuovo VA
+ *  5. MREMAP_FIXED → unmap range new_addr..new_addr+new_size, poi come
+ *     caso 4 ma target fisso (richiede MREMAP_MAYMOVE)
+ * ─────────────────────────────────────────────────────────────────── */
+#define MREMAP_MAYMOVE  1U
+#define MREMAP_FIXED    2U
+
+/* Ritorna 1 se nessuna pagina in [start, start+size) è mappata. */
+static int mmu_region_is_free(mm_space_t *space, uintptr_t start, size_t size)
+{
+    uintptr_t cur = start;
+    uintptr_t end = start + size;
+
+    while (cur < end) {
+        uint64_t *pte;
+        if (mmu_lookup_pte(space, cur, &pte, NULL) == 0 &&
+            (*pte & PTE_VALID) != 0U)
+            return 0;
+        cur += PAGE_SIZE;
+    }
+    return 1;
+}
+
+int mmu_remap_user_region(mm_space_t *space,
+                           uintptr_t old_addr, size_t old_size,
+                           size_t new_size, uint32_t flags,
+                           uintptr_t fixed_addr,
+                           uintptr_t *new_addr_out)
+{
+    const uint32_t prot = MMU_PROT_USER_R | MMU_PROT_USER_W;
+    size_t old_aligned, new_aligned;
+
+    if (!space || !space->in_use || !new_addr_out || new_size == 0U)
+        return -EINVAL;
+    if ((old_addr & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return -EINVAL;
+    if (old_addr < MMU_USER_BASE || old_addr >= MMU_USER_LIMIT)
+        return -EINVAL;
+
+    old_aligned = (old_size + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    new_aligned = (new_size + PAGE_SIZE - 1ULL) & PAGE_MASK;
+
+    /* ── 1. Stessa dimensione ─────────────────────────────────────── */
+    if (new_aligned == old_aligned) {
+        *new_addr_out = old_addr;
+        return 0;
+    }
+
+    /* ── 2. Shrink ────────────────────────────────────────────────── */
+    if (new_aligned < old_aligned) {
+        mmu_unmap_user_region(space, old_addr + new_aligned,
+                              old_aligned - new_aligned);
+        *new_addr_out = old_addr;
+        return 0;
+    }
+
+    /* new_aligned > old_aligned: grow */
+    {
+        size_t    extend      = new_aligned - old_aligned;
+        uintptr_t ext_start   = old_addr + old_aligned;
+
+        /* ── 3. Crescita in-place ─────────────────────────────────── */
+        if (ext_start + extend <= MMU_USER_SIGTRAMP_VA &&
+            mmu_region_is_free(space, ext_start, extend)) {
+            if (mmu_map_user_region(space, ext_start, extend, prot) < 0)
+                return -ENOMEM;
+            *new_addr_out = old_addr;
+            return 0;
+        }
+
+        /* ── 4/5. Spostamento (MREMAP_MAYMOVE obbligatorio) ─────── */
+        if (!(flags & MREMAP_MAYMOVE))
+            return -ENOMEM;
+
+        {
+            uintptr_t new_va    = 0U;
+            size_t    copy_pgs  = old_aligned / PAGE_SIZE;
+            int       fixed     = (flags & MREMAP_FIXED) != 0U;
+
+            if (fixed) {
+                /* MREMAP_FIXED: unmap target, poi usa quell'indirizzo */
+                if ((fixed_addr & (PAGE_SIZE - 1ULL)) != 0ULL)
+                    return -EINVAL;
+                if (fixed_addr < MMU_USER_BASE ||
+                    fixed_addr + new_aligned > MMU_USER_LIMIT)
+                    return -EINVAL;
+                /* Unmap target se già occupato */
+                if (!mmu_region_is_free(space, fixed_addr, new_aligned))
+                    mmu_unmap_user_region(space, fixed_addr, new_aligned);
+                if (mmu_map_user_region(space, fixed_addr, new_aligned, prot) < 0)
+                    return -ENOMEM;
+                new_va = fixed_addr;
+            } else {
+                if (mmu_map_user_anywhere(space, new_aligned, prot, &new_va) < 0)
+                    return -ENOMEM;
+            }
+
+            /* Copia dati pagina per pagina via PA (= KVA su EnlilOS) */
+            for (size_t i = 0U; i < copy_pgs; i++) {
+                uint64_t *old_pte, *new_pte;
+                uintptr_t old_va_page = old_addr + (uintptr_t)(i * PAGE_SIZE);
+                uintptr_t new_va_page = new_va   + (uintptr_t)(i * PAGE_SIZE);
+
+                if (mmu_lookup_pte(space, old_va_page, &old_pte, NULL) < 0)
+                    continue;
+                if ((*old_pte & PTE_VALID) == 0U)
+                    continue;
+                if (mmu_lookup_pte(space, new_va_page, &new_pte, NULL) < 0)
+                    continue;
+
+                memcpy((void *)(uintptr_t)(*new_pte & PTE_ADDR_MASK),
+                       (void *)(uintptr_t)(*old_pte & PTE_ADDR_MASK),
+                       PAGE_SIZE);
+            }
+
+            mmu_unmap_user_region(space, old_addr, old_aligned);
+            *new_addr_out = new_va;
+            return 0;
+        }
+    }
+}
+
 void *mmu_space_resolve_ptr(mm_space_t *space, uintptr_t va, size_t size)
 {
     uintptr_t end = va + size;

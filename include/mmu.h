@@ -218,6 +218,11 @@ int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
 int         mmu_unmap_user_region(mm_space_t *space, uintptr_t start,
                                   size_t size);
+int         mmu_remap_user_region(mm_space_t *space,
+                                  uintptr_t old_addr, size_t old_size,
+                                  size_t new_size, uint32_t flags,
+                                  uintptr_t fixed_addr,
+                                  uintptr_t *new_addr_out);
 
 /*
  * Traduce un VA user di 'space' in un puntatore kernel valido (identity-mapped

@@ -100,7 +100,12 @@
 #define LINUX_NR_munmap            215
 #define LINUX_NR_brk               214
 #define LINUX_NR_prlimit64         261
+#define LINUX_NR_mremap            216
 #define LINUX_NR_madvise           233
+
+/* mremap flags */
+#define LINUX_MREMAP_MAYMOVE       1U
+#define LINUX_MREMAP_FIXED         2U
 #define LINUX_NR_getrandom         278
 #define LINUX_NR_rseq              293
 
