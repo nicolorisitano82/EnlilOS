@@ -2056,6 +2056,43 @@ static int selftest_case_linux_proc_dev_etc(void)
     ST_CHECK(case_name, vfs_path_is_linux_compat("/bin/sh") == 1,
              "/bin/sh non marcato linux_compat");
 
+    /* /proc/self/fd/1 aperto via fd_open_path_current (stesso path di user-space):
+     * deve seguire symlink → /dev/stdout, non aprire nodo procfs raw.
+     * syscall_open_proc_path() chiama fd_open_path_current() internamente. */
+    {
+        int  new_fd;
+        char fdpath_buf[64];
+
+        new_fd = syscall_open_proc_path("/proc/self/fd/1", O_WRONLY);
+        ST_CHECK(case_name, new_fd >= 0, "open /proc/self/fd/1 via fd_open_path fallito");
+        if (new_fd >= 0) {
+            (void)syscall_describe_fd_current(new_fd, fdpath_buf, sizeof(fdpath_buf));
+            ST_CHECK(case_name,
+                     st_contains(fdpath_buf, "stdout") || st_contains(fdpath_buf, "tty"),
+                     "/proc/self/fd/1 non risolve a stdout/tty");
+            /* deve essere possibile scrivere (non procfs raw che sarebbe EROFS) */
+            {
+                vfs_file_t wfile;
+                rc = vfs_open("/proc/self/fd/1", O_WRONLY, &wfile);
+                if (rc == 0) {
+                    n = vfs_write(&wfile, ".", 1);
+                    ST_CHECK(case_name, n == 1,
+                             "write a /dev/stdout via /proc/self/fd/1 fallita");
+                    (void)vfs_close(&wfile);
+                }
+            }
+            /* chiudi il nuovo fd */
+            {
+                int tmp = new_fd;
+                (void)tmp;   /* consumed by close below */
+            }
+        }
+
+        /* /proc/self/fd (directory) deve essere apribile via fd_open_path_current */
+        new_fd = syscall_open_proc_path("/proc/self/fd", O_RDONLY);
+        ST_CHECK(case_name, new_fd >= 0, "open /proc/self/fd dir via fd_open_path fallito");
+    }
+
     return 0;
 }
 

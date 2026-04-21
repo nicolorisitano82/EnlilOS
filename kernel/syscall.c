@@ -780,6 +780,14 @@ int syscall_describe_fd_current(int fd, char *out, size_t cap)
     }
 }
 
+/* forward declaration — implementazione più avanti nel file */
+static int fd_open_path_current(const char *path, uint16_t file_flags, uint8_t fd_flags);
+
+int syscall_open_proc_path(const char *path, int flags)
+{
+    return fd_open_path_current(path, (uint16_t)flags, 0U);
+}
+
 static fd_object_t *fd_object_alloc(void)
 {
     for (uint32_t i = 0U; i < FD_OBJECT_MAX; i++) {
@@ -1911,6 +1919,35 @@ static void fd_split_open_flags(uint16_t in_flags, uint16_t *file_flags,
         *fd_flags = ((in_flags & O_CLOEXEC) != 0U) ? FD_ENTRY_CLOEXEC : 0U;
 }
 
+/*
+ * is_proc_self_path — true se path è /proc/self o /proc/self/...
+ * Queste path DEVONO essere aperte in contesto del chiamante (non vfsd)
+ * affinché procfs usi current_task corretto per self_pid e fd table.
+ */
+static int is_proc_self_path(const char *p)
+{
+    return p &&
+           p[0]=='/' && p[1]=='p' && p[2]=='r' && p[3]=='o' && p[4]=='c' &&
+           p[5]=='/' && p[6]=='s' && p[7]=='e' && p[8]=='l' && p[9]=='f' &&
+           (p[10]=='/' || p[10]=='\0');
+}
+
+/*
+ * is_proc_self_fd_link — true se path è /proc/self/fd/<number>
+ * (symlink a un fd, non la directory /proc/self/fd).
+ */
+static int is_proc_self_fd_link(const char *p)
+{
+    if (!is_proc_self_path(p)) return 0;
+    /* dopo /proc/self/ serve "fd/<digit>" */
+    const char *rest = p + 11; /* punta dopo /proc/self/ */
+    if (rest[0]!='f' || rest[1]!='d' || rest[2]!='/') return 0;
+    const char *num = rest + 3;
+    if (*num < '0' || *num > '9') return 0;  /* almeno una cifra */
+    while (*num >= '0' && *num <= '9') num++;
+    return *num == '\0';  /* solo cifre, poi fine stringa */
+}
+
 static int fd_open_path_current(const char *path, uint16_t file_flags,
                                 uint8_t fd_flags)
 {
@@ -1927,7 +1964,12 @@ static int fd_open_path_current(const char *path, uint16_t file_flags,
     if (fd < 0)
         return -ENFILE;
 
-    if (vfsd_proxy_available()) {
+    /*
+     * /proc/self/... deve essere aperto via kernel-local VFS (non vfsd),
+     * così current_task rimane il task chiamante e procfs restituisce
+     * i dati corretti (exec_path, fd table, ecc.).
+     */
+    if (vfsd_proxy_available() && !is_proc_self_path(path)) {
         rc = vfsd_proxy_open(path, file_flags, &remote_handle);
         if (rc < 0)
             return rc;
@@ -1943,7 +1985,25 @@ static int fd_open_path_current(const char *path, uint16_t file_flags,
             }
         }
     } else {
-        rc = fd_bind_path(&fd_tables[idx][fd], path, file_flags);
+        /*
+         * /proc/self/fd/<N>: segui il symlink → apri il file reale.
+         * Se vfs_readlink fallisce o il target è un path /proc/ stesso,
+         * apri il nodo procfs (utile per O_RDONLY su symlink o directory).
+         */
+        if (is_proc_self_fd_link(path)) {
+            char target[VFSD_IO_BYTES];
+            rc = vfs_readlink(path, target, sizeof(target));
+            if (rc == 0 && target[0] == '/' &&
+                !(target[1]=='p' && target[2]=='r' && target[3]=='o' &&
+                  target[4]=='c' && target[5]=='/')) {
+                /* target è un path reale fuori da /proc: apri direttamente */
+                rc = fd_bind_path(&fd_tables[idx][fd], target, file_flags);
+            } else {
+                rc = fd_bind_path(&fd_tables[idx][fd], path, file_flags);
+            }
+        } else {
+            rc = fd_bind_path(&fd_tables[idx][fd], path, file_flags);
+        }
     }
 
     if (rc < 0)

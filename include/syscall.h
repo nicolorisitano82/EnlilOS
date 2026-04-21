@@ -443,6 +443,12 @@ typedef struct {
 void syscall_init(void);
 void syscall_dispatch(exception_frame_t *frame);
 int  syscall_describe_fd_current(int fd, char *out, size_t cap);
+/*
+ * syscall_open_proc_path — apre un path via fd_open_path_current (stesso
+ * percorso usato da user-space). Usato dal selftest per testare /proc/self/.
+ * Ritorna fd ≥ 0 o -errno.
+ */
+int  syscall_open_proc_path(const char *path, int flags);
 
 extern syscall_entry_t syscall_table[SYSCALL_MAX];
 
