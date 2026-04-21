@@ -160,10 +160,10 @@ typedef struct {
 } linux_utsname_t;
 
 typedef struct {
-    int32_t  ru_utime_sec;
-    int32_t  ru_utime_usec;
-    int32_t  ru_stime_sec;
-    int32_t  ru_stime_usec;
+    int64_t  ru_utime_sec;   /* Linux AArch64: long = 64-bit */
+    int64_t  ru_utime_usec;
+    int64_t  ru_stime_sec;
+    int64_t  ru_stime_usec;
     int64_t  ru_maxrss;
     int64_t  ru_ixrss;
     int64_t  ru_idrss;

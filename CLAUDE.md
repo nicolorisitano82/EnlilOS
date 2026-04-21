@@ -583,6 +583,47 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
 - Debug comportamento bash (prompt, job control, SIGCHLD): ~4-6h
 - **Totale: ~16-20h**. Blocco principale: `mremap` (senza di esso malloc non riesce a espandere → bash crasha subito).
 
+#### Già fatto / fix applicati
+- `wait4` (260): binding già presente; fix critico `linux_rusage_t`: timeval fields cambiati da `int32_t` a `int64_t` (AArch64 `long` = 64-bit); struct ora 144 byte corretti invece di 128 errati.
+
+#### Manca da implementare (M11-05a — TODO)
+
+**Stub banali — ~2h**
+| Nr | Nome | Impl |
+|---|---|---|
+| 52 | `fchmod` | return 0 |
+| 53 | `fchmodat` | return 0 |
+| 54 | `fchownat` | return 0 |
+| 123 | `sched_getaffinity` | scrive CPU mask a 1 CPU, return 0 |
+| 143 | `sched_get_priority_max` | return 0 |
+| 145 | `sched_get_priority_min` | return 0 |
+| 165 | `getrusage` | memset struct a 0 (layout `linux_rusage_t`) |
+| 166 | `umask` | return 022, no tracking |
+| 233 | `madvise` | return 0 |
+| 439 | `faccessat2` | delega a `sys_linux_faccessat` ignorando flags extra |
+
+**Passthrough — ~30min**
+| Nr | Nome | Target |
+|---|---|---|
+| 49 | `chdir` | `sys_chdir` |
+| 129 | `kill` | `sys_kill` |
+| 130 | `tkill` | `sys_tgkill` |
+| 154 | `setpgid` | `sys_setpgid` |
+| 155 | `getpgrp` | `sys_getpgid(0)` |
+| 158 | `setsid` | `sys_setsid` |
+| 163 | `getrlimit` | `sys_prlimit64(0,res,NULL,old)` |
+| 164 | `setrlimit` | `sys_prlimit64(0,res,new,NULL)` |
+
+**Medio — blocco principale**
+| Nr | Nome | Note |
+|---|---|---|
+| 216 | `mremap` | **CRITICO**: bash-linux crasha subito senza di esso (glibc malloc usa mremap). Serve `mmu_remap_user_region()` kernel-side. ~4h |
+| 103 | `setitimer` | `SIGALRM` per `read -t`. Serve timer per-task + delivery. ~3h |
+
+**Requisiti filesystem**
+- `/proc/self/exe` — bash usa per autopercorso → prerequisito `M11-04`
+- `/proc/self/fd/` — bash usa per info fd aperto → prerequisito `M11-04`
+
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
 - Modello fd non più "valore per slot": ogni `fd_table[task][fd]` punta a `fd_object_t` condivisibile. `dup()`, `dup2()` e `fork()` devono condividere stesso oggetto con `refcount`, altrimenti `close()` rompe pipe/redirection.
