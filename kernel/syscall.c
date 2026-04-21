@@ -6347,6 +6347,80 @@ static uint64_t sys_linux_setrlimit(uint64_t args[6])
     uint64_t fwd[6] = { 0U, args[0], args[1], 0U, 0U, 0U };
     return sys_prlimit64(fwd);
 }
+/* setitimer(which, *new_val, *old_val): Linux NR=103
+ * Only ITIMER_REAL (0) supported; other which values → EINVAL. */
+static uint64_t sys_linux_setitimer(uint64_t args[6])
+{
+    int      which       = (int)args[0];
+    uintptr_t new_uva    = (uintptr_t)args[1];
+    uintptr_t old_uva    = (uintptr_t)args[2];
+    linux_itimerval_t old_kv, new_kv;
+    uint64_t old_value_ms, old_interval_ms;
+
+    if (which != 0 /* ITIMER_REAL */)
+        return ERR(EINVAL);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+
+    /* Snapshot current state for old_val output */
+    sched_proc_get_itimer(current_task, &old_value_ms, &old_interval_ms);
+
+    /* Write old_val if requested */
+    if (old_uva != 0U) {
+        old_kv.it_interval.tv_sec  = (int64_t)(old_interval_ms / 1000ULL);
+        old_kv.it_interval.tv_usec = (int64_t)((old_interval_ms % 1000ULL) * 1000ULL);
+        old_kv.it_value.tv_sec     = (int64_t)(old_value_ms / 1000ULL);
+        old_kv.it_value.tv_usec    = (int64_t)((old_value_ms % 1000ULL) * 1000ULL);
+        if (mmu_write_user(sched_task_space(current_task), old_uva,
+                           &old_kv, sizeof(old_kv)) != 0)
+            return ERR(EFAULT);
+    }
+
+    /* Apply new_val if provided */
+    if (new_uva != 0U) {
+        uint64_t value_ms, interval_ms;
+        if (mmu_read_user(sched_task_space(current_task), new_uva,
+                          &new_kv, sizeof(new_kv)) != 0)
+            return ERR(EFAULT);
+        /* Negative tv_usec or tv_usec >= 1000000 are invalid */
+        if (new_kv.it_value.tv_usec < 0 || new_kv.it_value.tv_usec >= 1000000LL ||
+            new_kv.it_interval.tv_usec < 0 || new_kv.it_interval.tv_usec >= 1000000LL)
+            return ERR(EINVAL);
+        value_ms    = (uint64_t)(new_kv.it_value.tv_sec * 1000LL
+                                 + new_kv.it_value.tv_usec / 1000LL);
+        interval_ms = (uint64_t)(new_kv.it_interval.tv_sec * 1000LL
+                                 + new_kv.it_interval.tv_usec / 1000LL);
+        sched_proc_set_itimer(current_task, value_ms, interval_ms);
+    }
+    return 0U;
+}
+
+/* getitimer(which, *curr_val): Linux NR=102 */
+static uint64_t sys_linux_getitimer(uint64_t args[6])
+{
+    int       which     = (int)args[0];
+    uintptr_t curr_uva  = (uintptr_t)args[1];
+    linux_itimerval_t kv;
+    uint64_t value_ms, interval_ms;
+
+    if (which != 0 /* ITIMER_REAL */)
+        return ERR(EINVAL);
+    if (curr_uva == 0U)
+        return ERR(EFAULT);
+    if (!current_task || !sched_task_is_user(current_task))
+        return ERR(EPERM);
+
+    sched_proc_get_itimer(current_task, &value_ms, &interval_ms);
+    kv.it_interval.tv_sec  = (int64_t)(interval_ms / 1000ULL);
+    kv.it_interval.tv_usec = (int64_t)((interval_ms % 1000ULL) * 1000ULL);
+    kv.it_value.tv_sec     = (int64_t)(value_ms / 1000ULL);
+    kv.it_value.tv_usec    = (int64_t)((value_ms % 1000ULL) * 1000ULL);
+    if (mmu_write_user(sched_task_space(current_task), curr_uva,
+                       &kv, sizeof(kv)) != 0)
+        return ERR(EFAULT);
+    return 0U;
+}
+
 static uint64_t sys_linux_clone(uint64_t args[6])           { return sys_linux_passthrough(args, sys_clone); }
 static uint64_t sys_linux_execve(uint64_t args[6])          { return sys_linux_passthrough(args, sys_execve); }
 static uint64_t sys_linux_mmap(uint64_t args[6])            { return sys_linux_passthrough(args, sys_mmap); }
@@ -7948,6 +8022,8 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_clock_gettime, sys_linux_clock_gettime,
                        SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_clock_gettime");
     linux_syscall_bind(LINUX_NR_nanosleep, sys_linux_nanosleep, 0, "linux_nanosleep");
+    linux_syscall_bind(LINUX_NR_getitimer, sys_linux_getitimer, 0, "linux_getitimer");
+    linux_syscall_bind(LINUX_NR_setitimer, sys_linux_setitimer, 0, "linux_setitimer");
     linux_syscall_bind(LINUX_NR_sched_yield, sys_linux_sched_yield,
                        SYSCALL_FLAG_RT, "linux_sched_yield");
     linux_syscall_bind(LINUX_NR_getpid, sys_linux_getpid,

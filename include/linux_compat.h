@@ -53,6 +53,8 @@
 #define LINUX_NR_set_tid_address   96
 #define LINUX_NR_futex             98
 #define LINUX_NR_nanosleep         101
+#define LINUX_NR_getitimer         102
+#define LINUX_NR_setitimer         103
 #define LINUX_NR_clock_gettime     113
 #define LINUX_NR_sched_getaffinity 123
 #define LINUX_NR_sched_yield       124
@@ -216,6 +218,16 @@ typedef struct {
     int16_t  events;
     int16_t  revents;
 } linux_pollfd_t;
+
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} linux_timeval_t;
+
+typedef struct {
+    linux_timeval_t it_interval;  /* reload value (0 = one-shot) */
+    linux_timeval_t it_value;     /* time until next expiry (0 = disarmed) */
+} linux_itimerval_t;
 
 typedef struct {
     int64_t  uptime;
