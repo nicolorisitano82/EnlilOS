@@ -595,13 +595,9 @@ Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat lay
   - Move (`MREMAP_MAYMOVE`): alloca nuovo range, copia dati pagina-per-pagina via PA (PA=KVA su EnlilOS), unmap vecchio.
   - `MREMAP_FIXED`: unmap target se occupato, poi map a indirizzo fisso + copia.
   - `mmu_region_is_free()`: helper statico in mmu.c, cammina PTEs per verificare range libero.
+- `setitimer(103)` / `getitimer(102)` implementati. `linux_itimerval_t` in `linux_compat.h`. Handler usa `sched_proc_set/get_itimer()` (ITIMER_REAL only). Timer check in `sched_tick()` invia `SIGALRM` via `signal_send_pid()`, reload periodico o disarm one-shot. `mmu_read_user`/`mmu_write_user` per accesso struct user-space. Suite 50/50.
 
 #### Manca da implementare (M11-05a — TODO)
-
-**Medio — in sospeso**
-| Nr | Nome | Note |
-|---|---|---|
-| 103 | `setitimer` | `SIGALRM` per `read -t`. Serve timer per-task + delivery. ~3h |
 
 **Requisiti filesystem**
 - `/proc/self/exe` — bash usa per autopercorso → prerequisito `M11-04`
