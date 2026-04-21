@@ -900,6 +900,74 @@ int mmu_unmap_user_region(mm_space_t *space, uintptr_t start, size_t size)
     return 0;
 }
 
+/* ── mmu_read_user / mmu_write_user ──────────────────────────────────
+ * copy_from_user / copy_to_user per EnlilOS.
+ *
+ * Cammina le PTE del solo lato user page-per-page; usa il VA kernel
+ * direttamente sull'altro lato (non tocca le page table kernel).
+ * Funziona su pagine fisicamente non-contigue — a differenza di
+ * mmu_space_resolve_ptr che richiede contiguo fisico.
+ * ─────────────────────────────────────────────────────────────────── */
+int mmu_read_user(mm_space_t *space, uintptr_t uva, void *kbuf, size_t size)
+{
+    uint8_t *out = (uint8_t *)kbuf;
+    size_t   rem = size;
+
+    if (!space || !kbuf)
+        return -EFAULT;
+
+    while (rem > 0U) {
+        uint64_t *pte;
+        uintptr_t page    = uva & PAGE_MASK;
+        size_t    off     = (size_t)(uva - page);
+        size_t    chunk   = PAGE_SIZE - off;
+        if (chunk > rem)
+            chunk = rem;
+
+        if (mmu_lookup_pte(space, page, &pte, NULL) < 0 ||
+            (*pte & PTE_VALID) == 0U)
+            return -EFAULT;
+
+        memcpy(out, (uint8_t *)(uintptr_t)((*pte & PTE_ADDR_MASK) + off), chunk);
+        out += chunk;
+        uva += chunk;
+        rem -= chunk;
+    }
+    return 0;
+}
+
+int mmu_write_user(mm_space_t *space, uintptr_t uva, const void *kbuf, size_t size)
+{
+    const uint8_t *in  = (const uint8_t *)kbuf;
+    size_t         rem = size;
+
+    if (!space || !kbuf)
+        return -EFAULT;
+
+    while (rem > 0U) {
+        uint64_t *pte;
+        uintptr_t page  = uva & PAGE_MASK;
+        size_t    off   = (size_t)(uva - page);
+        size_t    chunk = PAGE_SIZE - off;
+        if (chunk > rem)
+            chunk = rem;
+
+        /* CoW break se necessario */
+        if (mmu_space_prepare_write(space, uva, chunk) < 0)
+            return -EFAULT;
+
+        if (mmu_lookup_pte(space, page, &pte, NULL) < 0 ||
+            (*pte & PTE_VALID) == 0U)
+            return -EFAULT;
+
+        memcpy((uint8_t *)(uintptr_t)((*pte & PTE_ADDR_MASK) + off), in, chunk);
+        in  += chunk;
+        uva += chunk;
+        rem -= chunk;
+    }
+    return 0;
+}
+
 /* ── mmu_copy_user_pages ──────────────────────────────────────────────
  * Copia 'size' byte da (src_space, src_va) a (dst_space, dst_va).
  *

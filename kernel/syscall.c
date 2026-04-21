@@ -2081,42 +2081,49 @@ static void syscall_copy_fixed_string(char *dst, size_t cap, const char *src)
 static int user_copy_bytes(uintptr_t uva, void *dst, size_t size)
 {
     mm_space_t *space;
-    uint8_t    *out = (uint8_t *)dst;
-    size_t      copied = 0U;
 
     if (size == 0U) return 0;
     if (!current_task || !sched_task_is_user(current_task))
         return -EFAULT;
 
     space = sched_task_space(current_task);
-    while (copied < size) {
-        uintptr_t cur = uva + copied;
-        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
-        size_t    chunk = PAGE_SIZE - page_off;
-        void     *src;
-
-        if (chunk > size - copied)
-            chunk = size - copied;
-
-        src = mmu_space_resolve_ptr(space, cur, chunk);
-        if (!src) return -EFAULT;
-        memcpy(out + copied, src, chunk);
-        copied += chunk;
-    }
-
-    return 0;
+    return mmu_read_user(space, uva, dst, size);
 }
 
 static int user_copy_cstr(uintptr_t uva, char *dst, size_t cap)
 {
+    mm_space_t *space;
+    size_t      done = 0U;
+
     if (!uva || !dst || cap == 0U)
         return -EFAULT;
+    if (!current_task || !sched_task_is_user(current_task))
+        return -EFAULT;
 
-    for (size_t i = 0U; i < cap; i++) {
-        int rc = user_copy_bytes(uva + i, &dst[i], 1U);
-        if (rc < 0) return rc;
-        if (dst[i] == '\0')
-            return 0;
+    space = sched_task_space(current_task);
+
+    /* Copia un chunk per pagina, fermandosi al primo NUL. */
+    while (done < cap) {
+        uintptr_t cur      = uva + done;
+        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
+        size_t    chunk    = PAGE_SIZE - page_off;
+        size_t    remain   = cap - done;
+        char     *p;
+        size_t    i;
+
+        if (chunk > remain)
+            chunk = remain;
+
+        if (mmu_read_user(space, cur, dst + done, chunk) < 0)
+            return -EFAULT;
+
+        /* Scansiona il chunk appena copiato per NUL. */
+        p = dst + done;
+        for (i = 0U; i < chunk; i++) {
+            if (p[i] == '\0')
+                return 0;
+        }
+        done += chunk;
     }
 
     dst[cap - 1U] = '\0';
@@ -2125,33 +2132,14 @@ static int user_copy_cstr(uintptr_t uva, char *dst, size_t cap)
 
 static int user_store_bytes(uintptr_t uva, const void *src, size_t size)
 {
-    mm_space_t    *space;
-    const uint8_t *in = (const uint8_t *)src;
-    size_t         copied = 0U;
+    mm_space_t *space;
 
     if (size == 0U) return 0;
     if (!current_task || !sched_task_is_user(current_task))
         return -EFAULT;
 
     space = sched_task_space(current_task);
-    while (copied < size) {
-        uintptr_t cur = uva + copied;
-        size_t    page_off = (size_t)(cur & (PAGE_SIZE - 1ULL));
-        size_t    chunk = PAGE_SIZE - page_off;
-        void     *dst;
-
-        if (chunk > size - copied)
-            chunk = size - copied;
-
-        if (mmu_space_prepare_write(space, cur, chunk) < 0)
-            return -EFAULT;
-        dst = mmu_space_resolve_ptr(space, cur, chunk);
-        if (!dst) return -EFAULT;
-        memcpy(dst, in + copied, chunk);
-        copied += chunk;
-    }
-
-    return 0;
+    return mmu_write_user(space, uva, src, size);
 }
 
 static int user_probe_write(uintptr_t uva, size_t size)
