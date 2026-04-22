@@ -298,7 +298,9 @@ static int signal_install_user_frame(signal_state_t *st, exception_frame_t *fram
     frame->x[0] = (uint64_t)(uint32_t)sig;
     frame->x[1] = 0ULL;
     frame->x[2] = 0ULL;
-    frame->x[30] = MMU_USER_SIGTRAMP_VA;
+    frame->x[30] = (sched_task_abi_mode(current_task) == SCHED_ABI_LINUX)
+                   ? MMU_USER_LINUX_SIGTRAMP_VA
+                   : MMU_USER_SIGTRAMP_VA;
     return 0;
 }
 

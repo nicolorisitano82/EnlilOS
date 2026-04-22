@@ -613,9 +613,14 @@ static int map_user_pages_raw(mm_space_t *space, uintptr_t va, uint64_t pa,
 int mmu_space_map_signal_trampoline(mm_space_t *space)
 {
     static const uint32_t sigtramp_code[] = {
-        0xD2800268U, /* movz x8, #SYS_SIGRETURN */
-        0xD4000001U, /* svc #0 */
-        0xD4200000U, /* brk #0 */
+        /* EnlilOS trampoline at offset 0 (SYS_SIGRETURN = 19) */
+        0xD2800268U, /* movz x8, #19  */
+        0xD4000001U, /* svc  #0       */
+        0xD4200000U, /* brk  #0       */
+        /* Linux trampoline at offset 12 (LINUX_NR_rt_sigreturn = 139) */
+        0xD2801168U, /* movz x8, #139 */
+        0xD4000001U, /* svc  #0       */
+        0xD4200000U, /* brk  #0       */
     };
     uintptr_t page_va;
     int       first_map = 0;

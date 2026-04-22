@@ -131,7 +131,9 @@
 #define MMU_USER_LIMIT       0x0000008000000000ULL
 #define MMU_USER_STACK_TOP   0x0000007FFF000000ULL
 #define MMU_USER_STACK_SIZE  (8ULL * 1024ULL * 1024ULL)
-#define MMU_USER_SIGTRAMP_VA (MMU_USER_LIMIT - 0x1000ULL)
+#define MMU_USER_SIGTRAMP_VA       (MMU_USER_LIMIT - 0x1000ULL)
+/* Linux rt_sigreturn trampoline lives 12 bytes after EnlilOS trampoline */
+#define MMU_USER_LINUX_SIGTRAMP_VA (MMU_USER_SIGTRAMP_VA + 12ULL)
 
 #define MMU_PROT_USER_R      (1U << 0)
 #define MMU_PROT_USER_W      (1U << 1)
