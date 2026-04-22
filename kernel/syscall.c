@@ -4585,13 +4585,55 @@ static uint64_t sys_getsid(uint64_t args[6])
 
 static uint64_t sys_tcsetpgrp(uint64_t args[6])
 {
-    int rc = tty_tcsetpgrp_current((uint32_t)args[0]);
-    return (rc < 0) ? ERR(-rc) : 0;
+    int         fd      = (int)args[0];
+    uint32_t    pgid    = (uint32_t)args[1];
+    fd_object_t *obj    = NULL;
+    int         rc;
+
+    /*
+     * ABI moderno: tcsetpgrp(fd, pgid)
+     * ABI legacy/raw: tcsetpgrp(pgid) su fd 0
+     *
+     * Scegliamo l'interpretazione moderna solo se il fd e' un TTY valido e
+     * il pgid richiesto e' plausibile per la sessione corrente. Altrimenti
+     * facciamo fallback al vecchio one-arg ABI su stdin.
+     */
+    obj = fd_get(fd);
+    if (obj && fd_is_tty_object(obj) &&
+        current_task && sched_task_is_user(current_task) &&
+        sched_task_has_pgrp(sched_task_sid(current_task), pgid)) {
+        rc = tty_tcsetpgrp_current(pgid);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
+    pgid = (uint32_t)args[0];
+    obj = fd_get(0);
+    if (!obj)
+        return ERR(EBADF);
+    if (!fd_is_tty_object(obj))
+        return ERR(ENOTTY);
+
+    rc = tty_tcsetpgrp_current(pgid);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
 static uint64_t sys_tcgetpgrp(uint64_t args[6])
 {
-    (void)args;
+    int         fd = (int)args[0];
+    fd_object_t *obj = fd_get(fd);
+
+    /*
+     * ABI moderno: tcgetpgrp(fd)
+     * ABI legacy/raw: tcgetpgrp() su fd 0
+     */
+    if (!obj || !fd_is_tty_object(obj)) {
+        fd = 0;
+        obj = fd_get(fd);
+    }
+    if (!obj)
+        return ERR(EBADF);
+    if (!fd_is_tty_object(obj))
+        return ERR(ENOTTY);
     return (uint64_t)tty_tcgetpgrp();
 }
 
@@ -6414,8 +6456,20 @@ static uint64_t sys_linux_gettid(uint64_t args[6])          { return sys_linux_p
 static uint64_t sys_linux_tgkill(uint64_t args[6])          { return sys_linux_passthrough(args, sys_tgkill); }
 static uint64_t sys_linux_chdir(uint64_t args[6])           { return sys_linux_passthrough(args, sys_chdir); }
 static uint64_t sys_linux_kill(uint64_t args[6])            { return sys_linux_passthrough(args, sys_kill); }
-static uint64_t sys_linux_setpgid(uint64_t args[6])        { return sys_linux_passthrough(args, sys_setpgid); }
-static uint64_t sys_linux_setsid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_setsid); }
+static uint64_t sys_linux_setpgid(uint64_t args[6])
+{
+    return sys_linux_passthrough(args, sys_setpgid);
+}
+
+static uint64_t sys_linux_setsid(uint64_t args[6])
+{
+    return sys_linux_passthrough(args, sys_setsid);
+}
+
+static uint64_t sys_linux_getsid(uint64_t args[6])
+{
+    return sys_linux_passthrough(args, sys_getsid);
+}
 
 /* tkill(tid, sig): Linux NR=130 — resolve tgid from tid, then tgkill */
 static uint64_t sys_linux_tkill(uint64_t args[6])
@@ -6436,12 +6490,10 @@ static uint64_t sys_linux_tkill(uint64_t args[6])
     return sys_tgkill(fwd);
 }
 
-/* getpgrp(): Linux NR=155 — returns current process group */
-static uint64_t sys_linux_getpgrp(uint64_t args[6])
+/* getpgid(pid): Linux NR=155 — libc getpgrp() maps to getpgid(0) */
+static uint64_t sys_linux_getpgid(uint64_t args[6])
 {
-    uint64_t zero_args[6] = { 0U, 0U, 0U, 0U, 0U, 0U };
-    (void)args;
-    return sys_getpgid(zero_args);
+    return sys_linux_passthrough(args, sys_getpgid);
 }
 
 /* getrlimit(resource, *rlim): Linux NR=163 → prlimit64(0, res, NULL, old) */
@@ -8263,8 +8315,10 @@ void syscall_init(void)
                        SYSCALL_FLAG_RT, "linux_tkill");
     linux_syscall_bind(LINUX_NR_setpgid, sys_linux_setpgid,
                        SYSCALL_FLAG_RT, "linux_setpgid");
-    linux_syscall_bind(LINUX_NR_getpgrp, sys_linux_getpgrp,
-                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getpgrp");
+    linux_syscall_bind(LINUX_NR_getpgid, sys_linux_getpgid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getpgid");
+    linux_syscall_bind(LINUX_NR_getsid, sys_linux_getsid,
+                       SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_getsid");
     linux_syscall_bind(LINUX_NR_setsid, sys_linux_setsid,
                        SYSCALL_FLAG_RT, "linux_setsid");
     linux_syscall_bind(LINUX_NR_getrlimit, sys_linux_getrlimit,

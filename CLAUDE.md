@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=49 pass=49 fail=0`
+- Stato validato: `SUMMARY total=51 pass=51 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -518,90 +518,40 @@ Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64
 Run di riferimento:
 
 ```text
-SUMMARY total=49 pass=49 fail=0
+SUMMARY total=51 pass=51 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
-1. **M11-05a** — Linux compat: 20 syscall mancanti per bash-linux (vedi analisi sotto) → bash statico AArch64 funzionante
-2. **M11-04** — `/proc` esteso: `/proc/<pid>/maps`, `/proc/<pid>/fd`, `/proc/<pid>/exe`, `/proc/<pid>/status` completo
-3. **M11-06** — `select()`/`poll()` non-bloccante generalizzato (oggi solo pipe + FIONBIO su socket)
-4. **M8-08h** — i18n / localizzazione stringhe (gettext minimale per arksh)
+1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
+2. **M8-08h** — i18n / localizzazione stringhe
+3. **M11-05b/c/d/e/f/g** — hardening Linux compat (epoll, SysV IPC, glibc shims, PTY, fs Linux-like)
+4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
-6. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
-7. **M8-08i** — Plugin system arksh (dynamic loading via libdl)
+6. **M13-02** — SMP bootstrap
+7. **M13-03** — scheduler multicore
+### Stato operativo M11-05a / bash-linux
 
-### Analisi gap bash-linux (M11-05a)
-
-**Binario**: `bash-linux/bash-linux-aarch64` — ELF64 AArch64 statically linked, 2.3MB, con debug info.
-Installato in `disk.img:/bin/bash-linux` (mode 0755).
-
-Bash usa **72 syscall Linux AArch64 distinte**. Già implementate nel compat layer: **52**. Mancanti: **20**.
-
-#### Stub banali (return 0 / valore fisso) — ~2h totali
-| Nr | Nome | Uso in bash |
-|---|---|---|
-| 52 | `fchmod` | chmod su fd aperti |
-| 53 | `fchmodat` | chmod con dirfd |
-| 54 | `fchownat` | chown (no modello permessi) → return 0 |
-| 123 | `sched_getaffinity` | legge CPU mask → stub 1 CPU |
-| 143 | `sched_get_priority_max` | → return 0 |
-| 145 | `sched_get_priority_min` | → return 0 |
-| 165 | `getrusage` | statistiche CPU → struct zeroed |
-| 166 | `umask` | → return 022, non tracciare |
-| 233 | `madvise` | hint memoria → return 0 |
-| 439 | `faccessat2` | = faccessat + flags extra → delega |
-
-#### Passthrough a syscall EnlilOS esistenti — ~30min
-| Nr | Nome | EnlilOS equiv |
-|---|---|---|
-| 49 | `chdir` | `sys_chdir` |
-| 129 | `kill` | `sys_kill` |
-| 130 | `tkill` | `sys_tgkill` |
-| 154 | `setpgid` | `sys_setpgid` |
-| 155 | `getpgrp` | `sys_getpgid(0)` |
-| 158 | `setsid` | `sys_setsid` |
-| 163 | `getrlimit` | `sys_prlimit64(0,res,NULL,old)` |
-| 164 | `setrlimit` | `sys_prlimit64(0,res,new,NULL)` |
-
-#### Medio — ~4-6h
-| Nr | Nome | Note |
-|---|---|---|
-| 103 | `setitimer` | `SIGALRM` per `read -t`; serve timer kernel per-task |
-| 216 | `mremap` | **critico**: glibc-malloc statico usa mremap per espandere heap; senza, malloc crasha presto |
-
-#### Oltre le syscall — requisiti aggiuntivi
-- **`/proc/self/exe`**: bash la usa per sapere dove sta → `M11-04` prerequisito
-- **`/proc/self/fd/`**: bash usa per info fd → `M11-04`
-- **`/dev/null`**, **`/dev/tty`**: devfs probabilmente ok
-- ELF loader → `SCHED_ABI_LINUX`: già presente
-
-#### Stima effort totale
-- Syscall stub + passthrough: ~3h
-- `mremap`: ~4h (nuova API `mmu_remap_user_region`)
-- `setitimer`: ~3h (timer per-task + SIGALRM delivery)
-- `/proc/self/exe` + `/proc/self/fd/`: ~2h (parte di M11-04)
-- Debug comportamento bash (prompt, job control, SIGCHLD): ~4-6h
-- **Totale: ~16-20h**. Blocco principale: `mremap` (senza di esso malloc non riesce a espandere → bash crasha subito).
-
-#### Già fatto / fix applicati
-- `wait4` (260): binding già presente; fix critico `linux_rusage_t`: timeval fields cambiati da `int32_t` a `int64_t` (AArch64 `long` = 64-bit); struct ora 144 byte corretti invece di 128 errati.
-- Stub banali implementati: `fchmod(52)`, `fchmodat(53)`, `fchownat(54)`, `sched_getaffinity(123)`, `sched_get_priority_max(143)`, `sched_get_priority_min(144)`, `getrusage(165)`, `umask(166)`, `madvise(233)`, `faccessat2(439)`.
-- Passthrough implementati: `chdir(49)`, `kill(129)`, `tkill(130)`, `setpgid(154)`, `getpgrp(155)`, `setsid(158)`, `getrlimit(163)`, `setrlimit(164)`.
-  - Nota `tkill`: non è diretto passthrough — lookup task per TID, estrae tgid, chiama `sys_tgkill(tgid, tid, sig)`.
-  - Nota `getrlimit`/`setrlimit`: RLIMIT_* IDs identici a Linux; `rlimit64_t` = `struct rlimit` su AArch64 (rlim_t = uint64_t). No conversione.
-- `mremap(216)` implementato. Nuova API kernel: `mmu_remap_user_region()` in `kernel/mmu.c` + `include/mmu.h`.
-  - Shrink: unmap coda, ritorna `old_addr`.
-  - Grow in-place: controlla range `[old_end, old_end+delta)` libero (page walk), alloca nuove pagine lì.
-  - Move (`MREMAP_MAYMOVE`): alloca nuovo range, copia dati pagina-per-pagina via PA (PA=KVA su EnlilOS), unmap vecchio.
-  - `MREMAP_FIXED`: unmap target se occupato, poi map a indirizzo fisso + copia.
-  - `mmu_region_is_free()`: helper statico in mmu.c, cammina PTEs per verificare range libero.
-- `setitimer(103)` / `getitimer(102)` implementati. `linux_itimerval_t` in `linux_compat.h`. Handler usa `sched_proc_set/get_itimer()` (ITIMER_REAL only). Timer check in `sched_tick()` invia `SIGALRM` via `signal_send_pid()`, reload periodico o disarm one-shot. `mmu_read_user`/`mmu_write_user` per accesso struct user-space. Suite 50/50.
-
-- `/proc/self/exe` e `/proc/self/fd/` corretti per processi user-space Linux ABI. Bug fondamentale: `fd_open_path_current` instradava `/proc/self/...` via vfsd → kernel-side procfs girava con `current_task=vfsd`, non con il processo richiedente. Fix: `is_proc_self_path()` in `fd_open_path_current` bypassa vfsd, usa kernel VFS locale (current_task resta bash). Per `/proc/self/fd/<N>`: segue symlink via `vfs_readlink` → fd punta al file reale (e.g. `/dev/tty`) non al nodo procfs (che sarebbe EROFS in scrittura). Exportata `syscall_open_proc_path()` per testabilità. Suite 50/50.
-
-#### M11-05a completata — nessuna syscall mancante
-
-Tutte le syscall del gap bash-linux sono implementate. Requisiti filesystem risolti.
+- `M11-05a` e' chiusa in `v1`: `bash-linux` statico funziona davvero.
+- Smoke reale validato:
+  ```sh
+  /data/bash-linux -c 'echo ok'
+  ```
+  output:
+  ```text
+  ok
+  ```
+- Supporto critico aggiunto per arrivarci:
+  - ABI Linux per-task scelta dal loader anche fuori dai mount `linux_compat`
+  - `ET_EXEC` low-VA Linux caricato high e rialiasato low nel window user
+  - `brk()` reale con backing high-VA + alias low-VA per heap glibc/malloc
+  - `/proc/self/exe` e `/proc/self/fd/*` corretti lato procfs/VFS
+  - `symlinkat`, `readlinkat`, `AT_REMOVEDIR`, `AT_SYMLINK_NOFOLLOW`
+  - `flock v1` con coda FIFO dedicata e deadlock detection best-effort
+- Hardening ancora aperto ma non piu' bloccante per shell/tool Linux statici:
+  - `utimensat`
+  - `mprotect` MMU completa
+  - `prlimit64` write-side piu' ricca
+  - alcuni stub Linux coerenti (`ptrace`, `setuid`, `sched_*affinity`, ecc.)
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 

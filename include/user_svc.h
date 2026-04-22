@@ -3,11 +3,11 @@
 
 static inline long user_svc0(long nr)
 {
-    register long x0 asm("x0");
+    register long x0 asm("x0") = 0;
     register long x8 asm("x8") = nr;
 
     asm volatile("svc #0"
-                 : "=r"(x0)
+                 : "+r"(x0)
                  : "r"(x8)
                  : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
                    "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
@@ -18,12 +18,13 @@ static inline long user_svc0(long nr)
 static inline long user_svc1(long nr, long a0)
 {
     register long x0 asm("x0") = a0;
+    register long x1 asm("x1") = 0;
     register long x8 asm("x8") = nr;
 
     asm volatile("svc #0"
-                 : "+r"(x0)
+                 : "+r"(x0), "+r"(x1)
                  : "r"(x8)
-                 : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                 : "x2", "x3", "x4", "x5", "x6", "x7",
                    "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
                    "memory", "cc");
     return x0;

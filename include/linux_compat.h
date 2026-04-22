@@ -69,8 +69,10 @@
 #define LINUX_NR_setrlimit         164
 #define LINUX_NR_getrlimit         163
 #define LINUX_NR_setpgid           154
-#define LINUX_NR_getpgrp           155
-#define LINUX_NR_setsid            158
+#define LINUX_NR_getpgid           155
+#define LINUX_NR_getpgrp           LINUX_NR_getpgid /* libc getpgrp() -> getpgid(0) */
+#define LINUX_NR_getsid            156
+#define LINUX_NR_setsid            157
 #define LINUX_NR_rt_sigaction      134
 #define LINUX_NR_rt_sigprocmask    135
 #define LINUX_NR_rt_sigreturn      139

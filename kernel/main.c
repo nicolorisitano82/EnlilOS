@@ -2546,9 +2546,8 @@ void kernel_main(void)
 
         uart_puts("[SELFTEST] Kernel autorun completato: ");
         uart_puts((rc == 0) ? "PASS\n" : "FAIL\n");
-        uart_puts("[SELFTEST] Sistema fermo in attesa di reset/QEMU stop\n");
-        while (1)
-            __asm__ volatile("wfe");
+        uart_puts("[SELFTEST] Arresto automatico della macchina di test\n");
+        shutdown_system(SHUTDOWN_POWEROFF);
     }
 #endif
 
