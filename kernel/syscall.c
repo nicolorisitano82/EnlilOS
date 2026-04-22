@@ -2591,6 +2591,17 @@ static void linux_fill_rusage(linux_rusage_t *ru)
     memset(ru, 0, sizeof(*ru));
 }
 
+static int linux_timespec_valid(const timespec_t *ts)
+{
+    if (!ts)
+        return 0;
+    if (ts->tv_nsec == LINUX_UTIME_NOW || ts->tv_nsec == LINUX_UTIME_OMIT)
+        return 1;
+    if (ts->tv_sec < 0LL || ts->tv_nsec < 0LL || ts->tv_nsec >= 1000000000LL)
+        return 0;
+    return 1;
+}
+
 static void linux_fill_sysinfo(linux_sysinfo_t *info)
 {
     if (!info)
@@ -6984,6 +6995,58 @@ static uint64_t sys_linux_ftruncate(uint64_t args[6])
     return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
+static uint64_t sys_linux_utimensat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    uintptr_t   times_uva = (uintptr_t)args[2];
+    uint32_t    flags = (uint32_t)args[3];
+    const char *path = (const char *)(uintptr_t)args[1];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    timespec_t  local_times[2];
+    timespec_t *times = NULL;
+    uint32_t    vfs_flags = 0U;
+    int         rc;
+
+    if (!path)
+        return ERR(EFAULT);
+    if (flags & ~(LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH))
+        return ERR(EINVAL);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+        if (times_uva != 0U) {
+            rc = user_copy_bytes(times_uva, local_times, sizeof(local_times));
+            if (rc < 0)
+                return ERR(-rc);
+            times = local_times;
+        }
+    } else if (times_uva != 0U) {
+        memcpy(local_times, (const void *)(uintptr_t)times_uva, sizeof(local_times));
+        times = local_times;
+    }
+
+    if (times) {
+        if (!linux_timespec_valid(&times[0]) || !linux_timespec_valid(&times[1]))
+            return ERR(EINVAL);
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path,
+                                 (flags & LINUX_AT_EMPTY_PATH) != 0U,
+                                 resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+
+    if (flags & LINUX_AT_SYMLINK_NOFOLLOW)
+        vfs_flags |= VFS_UTIMENS_NOFOLLOW;
+    rc = vfs_utimens(resolved, times, vfs_flags);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
 static uint64_t sys_linux_faccessat(uint64_t args[6])
 {
     int         dirfd = (int)args[0];
@@ -8167,6 +8230,7 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_fsync, sys_linux_fsync, 0, "linux_fsync");
     linux_syscall_bind(LINUX_NR_truncate, sys_linux_truncate, 0, "linux_truncate");
     linux_syscall_bind(LINUX_NR_ftruncate, sys_linux_ftruncate, 0, "linux_ftruncate");
+    linux_syscall_bind(LINUX_NR_utimensat, sys_linux_utimensat, 0, "linux_utimensat");
     linux_syscall_bind(LINUX_NR_faccessat, sys_linux_faccessat, 0, "linux_faccessat");
     linux_syscall_bind(LINUX_NR_faccessat2, sys_linux_faccessat2, 0, "linux_faccessat2");
     linux_syscall_bind(LINUX_NR_fchmod, sys_linux_fchmod,

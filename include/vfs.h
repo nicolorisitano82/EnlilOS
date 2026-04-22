@@ -14,6 +14,10 @@
 
 #define VFS_MAX_MOUNTS   16U
 #define VFS_NAME_MAX     32U
+#define VFS_UTIMENS_NOFOLLOW 0x0001U
+
+#define VFS_UTIME_NOW    1073741823LL
+#define VFS_UTIME_OMIT   1073741822LL
 
 typedef struct {
     char     name[VFS_NAME_MAX];
@@ -54,6 +58,8 @@ typedef struct {
     int     (*fsync)(vfs_file_t *file);
     int     (*truncate)(const struct vfs_mount *mount, const char *relpath,
                         uint64_t size);
+    int     (*utimens)(const struct vfs_mount *mount, const char *relpath,
+                       const timespec_t *times, uint32_t flags);
     int     (*sync)(const struct vfs_mount *mount);
 } vfs_ops_t;
 
@@ -85,6 +91,7 @@ int     vfs_lstat(const char *path, stat_t *out);
 int     vfs_rename(const char *old_path, const char *new_path);
 int     vfs_fsync(vfs_file_t *file);
 int     vfs_truncate(const char *path, uint64_t size);
+int     vfs_utimens(const char *path, const timespec_t *times, uint32_t flags);
 int     vfs_sync(void);
 int     vfs_path_is_linux_compat(const char *path);
 

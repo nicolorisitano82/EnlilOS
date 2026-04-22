@@ -45,6 +45,7 @@
 #define LINUX_NR_newfstatat        79
 #define LINUX_NR_fstat             80
 #define LINUX_NR_fsync             82
+#define LINUX_NR_utimensat         88
 #define LINUX_NR_truncate          45
 #define LINUX_NR_ftruncate         46
 #define LINUX_NR_exit              93
@@ -130,6 +131,9 @@
 #define LINUX_AT_SYMLINK_NOFOLLOW  0x0100
 #define LINUX_AT_REMOVEDIR         0x0200
 #define LINUX_AT_EMPTY_PATH        0x1000
+
+#define LINUX_UTIME_NOW            1073741823L
+#define LINUX_UTIME_OMIT           1073741822L
 
 /* Linux RLIMIT ids */
 #define LINUX_RLIMIT_CPU           0

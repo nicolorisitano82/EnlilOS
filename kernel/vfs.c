@@ -56,6 +56,7 @@ static const char *relpath_from_mount(const vfs_mount_t *mount, const char *path
 static int vfs_open_raw(const char *path, uint32_t flags, vfs_file_t *out);
 static int vfs_readlink_raw(const char *path, char *out, size_t cap);
 static int vfs_lstat_raw(const char *path, stat_t *out);
+static int vfs_utimens_raw(const char *path, const timespec_t *times, uint32_t flags);
 
 static size_t vfs_strlen(const char *s)
 {
@@ -598,6 +599,27 @@ static int vfs_readlink_shadowed(const char *path, const vfs_mount_t *exclude,
     return mount->ops->readlink(mount, relpath_from_mount(mount, path), out, cap);
 }
 
+static int vfs_utimens_shadowed(const char *path, const vfs_mount_t *exclude,
+                                const timespec_t *times, uint32_t flags)
+{
+    const vfs_mount_t *mount;
+
+    if (!path)
+        return -EFAULT;
+    if (path[0] != '/')
+        return -ENOENT;
+
+    mount = find_mount_excluding(path, exclude);
+    if (!mount)
+        return -ENOENT;
+    if (mount->readonly)
+        return -EROFS;
+    if (!mount->ops || !mount->ops->utimens)
+        return mount && mount->readonly ? -EROFS : -ENOSYS;
+
+    return mount->ops->utimens(mount, relpath_from_mount(mount, path), times, flags);
+}
+
 /* ── devfs ───────────────────────────────────────────────────────── */
 
 static int devfs_open(const vfs_mount_t *mount, const char *relpath,
@@ -1003,6 +1025,23 @@ static int bindfs_truncate(const vfs_mount_t *mount, const char *relpath,
     return vfs_truncate(backend, size);
 }
 
+static int bindfs_utimens(const vfs_mount_t *mount, const char *relpath,
+                          const timespec_t *times, uint32_t flags)
+{
+    char backend[128];
+    char fallback[128];
+    int  rc = bindfs_resolve_backend(mount, relpath, backend, sizeof(backend));
+
+    if (rc < 0)
+        return rc;
+    rc = vfs_utimens(backend, times, flags);
+    if ((rc == -ENOENT || rc == -ENOTDIR) &&
+        vfs_path_join(mount->path, relpath, fallback, sizeof(fallback)) == 0) {
+        rc = vfs_utimens_shadowed(fallback, mount, times, flags);
+    }
+    return rc;
+}
+
 static int bindfs_sync(const vfs_mount_t *mount)
 {
     (void)mount;
@@ -1024,6 +1063,7 @@ static const vfs_ops_t bindfs_ops = {
     .rename   = bindfs_rename,
     .fsync    = bindfs_fsync,
     .truncate = bindfs_truncate,
+    .utimens  = bindfs_utimens,
     .sync     = bindfs_sync,
 };
 
@@ -1421,6 +1461,43 @@ int vfs_truncate(const char *path, uint64_t size)
         return mount && mount->readonly ? -EROFS : -ENOSYS;
 
     return mount->ops->truncate(mount, relpath_from_mount(mount, resolved), size);
+}
+
+static int vfs_utimens_raw(const char *path, const timespec_t *times, uint32_t flags)
+{
+    const vfs_mount_t *mount;
+
+    if (!path)
+        return -EFAULT;
+    if (path[0] != '/')
+        return -ENOENT;
+
+    mount = find_mount(path);
+    if (!mount)
+        return -ENOENT;
+    if (mount->readonly)
+        return -EROFS;
+    if (!mount->ops || !mount->ops->utimens)
+        return mount && mount->readonly ? -EROFS : -ENOSYS;
+
+    return mount->ops->utimens(mount, relpath_from_mount(mount, path), times, flags);
+}
+
+int vfs_utimens(const char *path, const timespec_t *times, uint32_t flags)
+{
+    char resolved[VFS_PATH_MAX];
+    int  rc;
+
+    if (!path)
+        return -EFAULT;
+    if (flags & ~VFS_UTIMENS_NOFOLLOW)
+        return -EINVAL;
+
+    rc = vfs_resolve_path_flags(path, (flags & VFS_UTIMENS_NOFOLLOW) == 0U,
+                                false, resolved, sizeof(resolved));
+    if (rc < 0)
+        return rc;
+    return vfs_utimens_raw(resolved, times, flags);
 }
 
 /* Indirizzo minimo valido per un puntatore kernel (testo/dati kernel) */

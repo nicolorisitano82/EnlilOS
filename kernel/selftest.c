@@ -18,6 +18,7 @@
 #include "kdebug.h"
 #include "kmon.h"
 #include "ksem.h"
+#include "linux_compat.h"
 #include "microkernel.h"
 #include "mmu.h"
 #include "pmm.h"
@@ -29,6 +30,8 @@
 #include "timer.h"
 #include "uart.h"
 #include "vfs.h"
+
+extern void *memset(void *dst, int value, size_t n);
 
 extern int gpu_selftest_run(void);
 
@@ -73,6 +76,30 @@ static int st_contains(const char *haystack, const char *needle)
             return 1;
     }
     return 0;
+}
+
+static uint64_t st_linux_syscall4(uint64_t nr, uint64_t a0, uint64_t a1,
+                                  uint64_t a2, uint64_t a3)
+{
+    exception_frame_t frame;
+    uint32_t          old_abi = SCHED_ABI_ENLILOS;
+
+    memset(&frame, 0, sizeof(frame));
+    if (current_task)
+        old_abi = sched_task_abi_mode(current_task);
+    if (current_task)
+        (void)sched_task_set_abi_mode(current_task, SCHED_ABI_LINUX);
+
+    frame.x[0] = a0;
+    frame.x[1] = a1;
+    frame.x[2] = a2;
+    frame.x[3] = a3;
+    frame.x[8] = nr;
+    syscall_dispatch(&frame);
+
+    if (current_task)
+        (void)sched_task_set_abi_mode(current_task, old_abi);
+    return frame.x[0];
 }
 
 static void st_put_u32(uint32_t v)
@@ -2101,14 +2128,17 @@ static int selftest_case_linux_at_paths(void)
     static const char case_name[] = "linux-at-paths";
     static const char target_name[] = "TARGET.TXT";
     static const char dir_target_name[] = "SUBDIR";
+    static const char dangle_target_name[] = "MISSING.TXT";
     static const char payload[] = "linux-at-ok\n";
     static const char nested_payload[] = "linux-dir-link-ok\n";
+    static timespec_t utimes[2];
     static char       linkbuf[64];
     static char       readbuf[64];
     vfs_file_t        file;
     stat_t            st;
     ssize_t           n;
     int               rc;
+    uint64_t          ret;
 
     if (!blk_is_ready() || !ext4_is_mounted())
         return 0;
@@ -2116,6 +2146,7 @@ static int selftest_case_linux_at_paths(void)
     (void)vfs_unlink("/data/LNXAT.DIR/LINK");
     (void)vfs_unlink("/data/LNXAT.DIR/LINKDIR");
     (void)vfs_unlink("/data/LNXAT.DIR/LINKCREATE");
+    (void)vfs_unlink("/data/LNXAT.DIR/DANGLE");
     (void)vfs_unlink("/data/LNXAT.DIR/CREATED.TXT");
     (void)vfs_unlink("/data/LNXAT.DIR/SUBDIR/NESTED.TXT");
     (void)vfs_unlink("/data/LNXAT.DIR/SUBDIR");
@@ -2196,6 +2227,37 @@ static int selftest_case_linux_at_paths(void)
     ST_CHECK(case_name, st.st_size == (uint64_t)st_strlen(target_name),
              "size symlink inattesa");
 
+    rc = vfs_symlink(dangle_target_name, "/data/LNXAT.DIR/DANGLE");
+    ST_CHECK(case_name, rc == 0, "symlink DANGLE -> MISSING.TXT fallita");
+
+    memset(utimes, 0, sizeof(utimes));
+    utimes[0].tv_nsec = VFS_UTIME_NOW;
+    utimes[1].tv_sec = 1234;
+    utimes[1].tv_nsec = 0;
+
+    ret = st_linux_syscall4(LINUX_NR_utimensat,
+                            (uint64_t)LINUX_AT_FDCWD,
+                            (uint64_t)(uintptr_t)"/data/LNXAT.DIR/TARGET.TXT",
+                            (uint64_t)(uintptr_t)utimes,
+                            0ULL);
+    ST_CHECK(case_name, ret == 0ULL, "utimensat file regolare fallita");
+
+    ret = st_linux_syscall4(LINUX_NR_utimensat,
+                            (uint64_t)LINUX_AT_FDCWD,
+                            (uint64_t)(uintptr_t)"/data/LNXAT.DIR/DANGLE",
+                            (uint64_t)(uintptr_t)utimes,
+                            (uint64_t)LINUX_AT_SYMLINK_NOFOLLOW);
+    ST_CHECK(case_name, ret == 0ULL,
+             "utimensat nofollow su symlink dangling fallita");
+
+    ret = st_linux_syscall4(LINUX_NR_utimensat,
+                            (uint64_t)LINUX_AT_FDCWD,
+                            (uint64_t)(uintptr_t)"/data/LNXAT.DIR/DANGLE",
+                            (uint64_t)(uintptr_t)utimes,
+                            0ULL);
+    ST_CHECK(case_name, ret == ERR(ENOENT),
+             "utimensat follow su symlink dangling non ritorna ENOENT");
+
     rc = vfs_unlink("/data/LNXAT.DIR");
     ST_CHECK(case_name, rc == -ENOTEMPTY,
              "unlink dir non-vuota non ritorna ENOTEMPTY");
@@ -2206,6 +2268,8 @@ static int selftest_case_linux_at_paths(void)
     ST_CHECK(case_name, rc == 0, "unlink LINKDIR fallita");
     rc = vfs_unlink("/data/LNXAT.DIR/LINKCREATE");
     ST_CHECK(case_name, rc == 0, "unlink LINKCREATE fallita");
+    rc = vfs_unlink("/data/LNXAT.DIR/DANGLE");
+    ST_CHECK(case_name, rc == 0, "unlink DANGLE fallita");
     rc = vfs_unlink("/data/LNXAT.DIR/CREATED.TXT");
     ST_CHECK(case_name, rc == 0, "unlink CREATED.TXT fallita");
     rc = vfs_unlink("/data/LNXAT.DIR/SUBDIR/NESTED.TXT");

@@ -3412,6 +3412,76 @@ static int ext4_truncate_vfs(const vfs_mount_t *mount, const char *relpath, uint
     return ext4_truncate_inode(ino, &inode, size);
 }
 
+static int ext4_utimens_vfs(const vfs_mount_t *mount, const char *relpath,
+                            const timespec_t *times, uint32_t flags)
+{
+    ext4_inode_t inode;
+    uint32_t     ino;
+    uint32_t     now = (uint32_t)(timer_now_ms() / 1000ULL);
+    uint32_t     new_atime = 0U;
+    uint32_t     new_mtime = 0U;
+    uint8_t      touch_atime = 0U;
+    uint8_t      touch_mtime = 0U;
+    int          rc;
+
+    (void)mount;
+    if (flags & ~VFS_UTIMENS_NOFOLLOW)
+        return -EINVAL;
+    if (ext4_internal_journal_path(relpath))
+        return -EROFS;
+
+    rc = ext4_lookup_path(relpath, &ino, &inode);
+    if (rc < 0)
+        return rc;
+
+    if (!times) {
+        new_atime = now;
+        new_mtime = now;
+        touch_atime = 1U;
+        touch_mtime = 1U;
+    } else {
+        for (uint32_t i = 0U; i < 2U; i++) {
+            int64_t nsec = times[i].tv_nsec;
+            int64_t sec = times[i].tv_sec;
+
+            if (nsec == VFS_UTIME_OMIT)
+                continue;
+            if (nsec == VFS_UTIME_NOW) {
+                if (i == 0U) {
+                    new_atime = now;
+                    touch_atime = 1U;
+                } else {
+                    new_mtime = now;
+                    touch_mtime = 1U;
+                }
+                continue;
+            }
+            if (sec < 0LL || nsec < 0LL || nsec >= 1000000000LL)
+                return -EINVAL;
+            if ((uint64_t)sec > 0xFFFFFFFFULL)
+                return -EINVAL;
+            if (i == 0U) {
+                new_atime = (uint32_t)sec;
+                touch_atime = 1U;
+            } else {
+                new_mtime = (uint32_t)sec;
+                touch_mtime = 1U;
+            }
+        }
+    }
+
+    if (!touch_atime && !touch_mtime)
+        return 0;
+
+    if (touch_atime)
+        inode.i_atime = new_atime;
+    if (touch_mtime)
+        inode.i_mtime = new_mtime;
+    inode.i_ctime = now;
+
+    return ext4_mark_inode_dirty(ino, &inode);
+}
+
 static int ext4_sync_vfs(const vfs_mount_t *mount)
 {
     (void)mount;
@@ -3433,6 +3503,7 @@ static const vfs_ops_t ext4_ops = {
     .rename  = ext4_rename_vfs,
     .fsync   = ext4_fsync_vfs,
     .truncate = ext4_truncate_vfs,
+    .utimens = ext4_utimens_vfs,
     .sync    = ext4_sync_vfs,
 };
 

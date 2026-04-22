@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=49 pass=49 fail=0`
+- suite runtime piu' recente: `SUMMARY total=51 pass=51 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=49 pass=49 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=51 pass=51 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1739,7 +1739,7 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 > 4. un subset ampio di syscall Linux già funzionanti
 >
 > Il lavoro residuo non è più “iniziare la compatibilità”, ma chiudere:
-> - gli ultimi gap syscall reali (`M11-05a`)
+> - l'hardening semantico residuo del vertical slice `M11-05a`
 > - `epoll` (`M11-05b`)
 > - System V IPC (`M11-05c`)
 > - loader/linker e shim glibc più completi (`M11-05d/g`)
@@ -1751,7 +1751,7 @@ Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreut
 ---
 
 #### M11-05a · Syscall Linux Mancanti
-**Stato attuale:** quasi chiusa, residuo piccolo
+**Stato attuale:** completata `v1` per `bash-linux` statico, con residuo di hardening
 
 Il backlog storico di questa sottostoria è rimasto indietro rispetto al codice.
 Oggi EnlilOS ha già una larga parte del subset Linux AArch64 realmente bindato nella
@@ -1773,23 +1773,31 @@ tabella compat, quindi qui sotto teniamo separati:
 - tempo/processo/thread: `nanosleep`, `clock_gettime`, `sched_yield`, `wait4`, `getpid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`, `gettid`, `set_tid_address`, `clone`, `execve`, `futex`, `tgkill`, `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`
 - memoria/runtime: `mmap`, `munmap`, `brk`, `prlimit64`, `sysinfo`, `getrandom`
 - VFS Linux compat: `mkdirat`, `unlinkat`, `readlinkat`, `renameat`, `faccessat`, `truncate`, `ftruncate`, `fsync`, `flock`, `symlinkat`
+- metadata path: `utimensat`
 - rete/socket: `socket`, `bind`, `listen`, `accept`, `connect`, `getsockname`, `getpeername`, `sendto`, `recvfrom`, `setsockopt`, `getsockopt`, `shutdown`
 - multiplexing: `pselect6`, `ppoll`
 - semantica `*at` gia' chiusa in `v1`: `AT_REMOVEDIR` in `unlinkat`, `AT_SYMLINK_NOFOLLOW` in `newfstatat`, `readlinkat` sopra VFS reale e alias Linux compat
 
-**Presente ma ancora con semantica v1 / stub**
+**Presente ma ancora con semantica v1 / stub non bloccante**
 - `wait4`: implementata sopra `waitpid` con `rusage` minimo/stub
 - `flock`: advisory lock `v1` reale, whole-file, bounded, con `LOCK_SH/EX/UN/NB`, coda FIFO dedicata e deadlock detection best-effort; resta senza lease/record lock e senza PI dedicata
 - `prlimit64`: profilo principalmente read-only, con scrittura limiti ancora molto limitata
 - `mprotect`: valida il range ma non applica ancora un cambio permessi MMU completo
 - `rseq`: ritorna volutamente `ENOSYS`
 
-**Manca davvero per chiudere bene `M11-05a`**
-- `utimensat`
+**Gia' validato end-to-end**
+- `bash-linux` statico installato nel disco di test come `/data/bash-linux`
+- `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
+- `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
+- smoke reale: `/data/bash-linux -c 'echo ok'`
+- suite selftest piu' recente: `51/51`
+
+**Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
   `chown`, `fchown`, `lchown`, `setuid`, `setgid`, `settimeofday`,
   `sched_setaffinity`, `sched_getaffinity`, `getrusage`, `ptrace`
 - eventuale `clone3` stub/compat minima documentata
+- hardening semantico su `mprotect` e `prlimit64`
 
 **Fuori da `M11-05a` e già spostati correttamente**
 - `epoll_*` appartiene a `M11-05b`
@@ -1799,12 +1807,12 @@ tabella compat, quindi qui sotto teniamo separati:
 
 **Selftest gia' aggiunti**
 - `linux-proc-dev-etc`
-- `linux-at-paths` per `symlinkat`, `readlink`, `lstat` e semantica directory/file su `unlinkat`
+- `linux-at-paths` per `symlinkat`, `readlink`, `lstat`, `utimensat` e semantica directory/file su `unlinkat`
 
 **Criterio di chiusura aggiornato**
-- chiudere i gap veri sopra
-- aggiungere ancora un test dedicato al dispatch ABI Linux, oltre a `linux-proc-dev-etc` e `linux-at-paths`
-- riallineare README e note milestone quando il residuo scende a zero o a stub esplicitamente accettati
+- `M11-05a` e' considerata chiusa in `v1` quando il profilo shell/tool Linux statico resta stabile
+- i residui sopra passano in hardening del layer Linux compat, non bloccano piu' `bash-linux`
+- da qui il focus si sposta su `M11-05b/c/d/e/f/g`
 
 ---
 
@@ -3297,7 +3305,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M10-03`: suite `selftest` a `47/47`.
+> Stato verificato dopo la chiusura di `M11-05a v1`: suite `selftest` a `51/51`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3306,6 +3314,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
 - ✅ **BSD socket API v1**: `M10-03` (`AF_INET` loopback-only, TCP/UDP, selftest `socket-api`)
+- ✅ **Linux compat v1**: `M11-05a` con ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA e `bash-linux` statico funzionante
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`, TCP/IP `netd`, BSD socket loopback `v1`
@@ -3316,7 +3325,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05** Linux compatibility layer | `M11-03 + M10-03 + M14-01` | Dopo `M10-03` la compat Linux ha finalmente rete e file I/O piu' credibili |
+| 3 | **M11-05b/c/d/e/f/g** hardening Linux compatibility layer | `M11-05a + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare `epoll`, SysV IPC, glibc shims e PTY |
 | 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
@@ -3357,7 +3366,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05`
+3. `M11-05b/c/d/e/f/g`
 4. `M12-01`
 5. `M12-02`
 6. `M13-02`
