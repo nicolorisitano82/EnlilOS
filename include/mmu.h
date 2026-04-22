@@ -216,6 +216,16 @@ int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
                                 size_t size, uint32_t prot);
 int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
+/*
+ * Alias di un mapping user esistente su un secondo VA.
+ * Usato dalla compat Linux per ET_EXEC statici con indirizzi assoluti bassi:
+ * il binario viene caricato nel window alto, ma alcune word interne possono
+ * ancora dereferenziare il layout originale 0x0040....  Questo helper mappa
+ * le stesse pagine anche al VA alias richiesto.
+ */
+int         mmu_alias_user_region(mm_space_t *space, uintptr_t alias_start,
+                                  uintptr_t src_start, size_t size,
+                                  uint32_t prot);
 int         mmu_unmap_user_region(mm_space_t *space, uintptr_t start,
                                   size_t size);
 /* Flags per mmu_remap_user_region (= mremap Linux flags) */

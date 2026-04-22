@@ -54,6 +54,7 @@ extern void *memset(void *dst, int value, size_t n);
 
 #define ELF64_MAX_PHDRS    16U
 #define ELF64_DYN_BASE     0x0000007FC2000000ULL
+#define ELF64_EXEC_BASE    0x0000007FC8000000ULL
 #define ELF64_HWCAP        0x3ULL /* FP | ASIMD */
 #define ELF64_MAX_OBJECTS  8U
 #define ELF64_MAX_NEEDED   8U
@@ -446,6 +447,8 @@ static int elf_compute_bias(const elf64_ehdr_t *ehdr,
 
     if (ehdr->e_type == ET_DYN)
         bias = ELF64_DYN_BASE - min_va;
+    else if (min_va < MMU_USER_BASE)
+        bias = ELF64_EXEC_BASE - min_va;
 
     if (min_va + bias < MMU_USER_BASE || max_va + bias > stack_base) {
         elf_set_error("range ELF fuori dal window user");
@@ -456,6 +459,33 @@ static int elf_compute_bias(const elf64_ehdr_t *ehdr,
     *image_lo_out = min_va + bias;
     *image_hi_out = max_va + bias;
     return 0;
+}
+
+static int elf_exec_uses_low_alias(const elf64_ehdr_t *ehdr, uintptr_t bias)
+{
+    return (ehdr &&
+            ehdr->e_type == ET_EXEC &&
+            bias != 0ULL &&
+            (uintptr_t)ehdr->e_entry < MMU_USER_BASE) ? 1 : 0;
+}
+
+static int elf_interp_is_linux_compat(const char *path)
+{
+    static const char *glibc = "/lib/ld-linux-aarch64.so.1";
+    static const char *musl  = "/lib/ld-musl-aarch64.so.1";
+
+    if (!path || path[0] == '\0')
+        return 0;
+    return elf_streq(path, glibc) || elf_streq(path, musl);
+}
+
+static uint8_t elf_detect_abi_mode(const elf64_ehdr_t *ehdr,
+                                   uintptr_t bias,
+                                   const char *interp_path)
+{
+    if (elf_exec_uses_low_alias(ehdr, bias) || elf_interp_is_linux_compat(interp_path))
+        return (uint8_t)SCHED_ABI_LINUX;
+    return (uint8_t)SCHED_ABI_ENLILOS;
 }
 
 static int elf_validate_header(const elf64_ehdr_t *ehdr, size_t image_size)
@@ -560,6 +590,7 @@ static int elf_build_stack(mm_space_t *space,
     uint32_t words;
     size_t   table_bytes;
     uint64_t *stack_words;
+    int      low_exec_alias;
 
     if (argc > ELF_LOADER_MAX_ARGS || envc > ELF_LOADER_MAX_ENVP) {
         elf_set_error("argc/envc oltre limite loader");
@@ -597,7 +628,8 @@ static int elf_build_stack(mm_space_t *space,
     }
 
     sp &= ~0xFULL;
-    phdr_va = elf_phdr_runtime_va(ehdr, phdrs, bias);
+    low_exec_alias = elf_exec_uses_low_alias(ehdr, bias);
+    phdr_va = elf_phdr_runtime_va(ehdr, phdrs, low_exec_alias ? 0ULL : bias);
     if (phdr_va == 0ULL) {
         elf_set_error("AT_PHDR non risolvibile");
         return -1;
@@ -621,7 +653,9 @@ static int elf_build_stack(mm_space_t *space,
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PHNUM,  ehdr->e_phnum };
     if (at_base != 0ULL)
         auxv[auxc++] = (elf64_auxv_t){ ELF_AT_BASE, at_base };
-    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_ENTRY,  ehdr->e_entry + bias };
+    auxv[auxc++] = (elf64_auxv_t){ ELF_AT_ENTRY,
+                                   low_exec_alias ? (uintptr_t)ehdr->e_entry
+                                                  : (uintptr_t)ehdr->e_entry + bias };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_PAGESZ, (uint64_t)PAGE_SIZE };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_HWCAP,  ELF64_HWCAP };
     auxv[auxc++] = (elf64_auxv_t){ ELF_AT_RANDOM, random_va };
@@ -798,6 +832,15 @@ static int elf_map_tls_block(elf_read_fn rd, void *ctx,
     return 0;
 }
 
+static void elf_rebase_exec_data_pointers(mm_space_t *space,
+                                          const elf64_ehdr_t *ehdr,
+                                          const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
+                                          uintptr_t bias);
+static int elf_alias_exec_segments(mm_space_t *space,
+                                   const elf64_ehdr_t *ehdr,
+                                   const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
+                                   uintptr_t bias);
+
 static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
                            const char *const *argv, uint64_t argc,
                            const char *const *envp, uint64_t envc,
@@ -905,11 +948,17 @@ static int elf_load_common(elf_read_fn rd, void *ctx, size_t image_size,
     }
 
     image.space     = space;
-    image.entry     = (uintptr_t)ehdr.e_entry + bias;
+    image.entry     = elf_exec_uses_low_alias(&ehdr, bias)
+                      ? (uintptr_t)ehdr.e_entry
+                      : (uintptr_t)ehdr.e_entry + bias;
     image.image_base = image_lo;
     image.image_end  = image_hi;
     image.phentsize = ehdr.e_phentsize;
     image.phnum     = ehdr.e_phnum;
+    image.abi_mode  = elf_detect_abi_mode(&ehdr, bias, NULL);
+    elf_rebase_exec_data_pointers(space, &ehdr, phdrs, bias);
+    if (elf_alias_exec_segments(space, &ehdr, phdrs, bias) < 0)
+        goto fail;
 
     /* M11-01b: if the ELF has a PT_TLS segment, allocate the TLS block
      * and compute the initial thread pointer value. */
@@ -1029,6 +1078,11 @@ static int elf_plan_object(const elf64_ehdr_t *ehdr,
                          ELF64_DYN_BASE : *next_dyn_base;
         base = elf_align_up(base);
         bias = base - min_va;
+    } else if (min_va < MMU_USER_BASE) {
+        uintptr_t base = (*next_dyn_base < ELF64_EXEC_BASE) ?
+                         ELF64_EXEC_BASE : *next_dyn_base;
+        base = elf_align_up(base);
+        bias = base - min_va;
     }
 
     if (min_va + bias < MMU_USER_BASE || max_va + bias > stack_base) {
@@ -1102,6 +1156,123 @@ static int elf_map_object_segments(elf_read_fn rd, void *ctx, size_t image_size,
                 return -1;
             }
             copied += chunk;
+        }
+    }
+
+    return 0;
+}
+
+static void elf_compute_original_range(const elf64_ehdr_t *ehdr,
+                                       const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
+                                       uintptr_t *min_out,
+                                       uintptr_t *max_out)
+{
+    uintptr_t min_va = 0ULL;
+    uintptr_t max_va = 0ULL;
+    uint8_t have_load = 0U;
+
+    for (uint32_t i = 0U; i < ehdr->e_phnum; i++) {
+        uintptr_t seg_lo;
+        uintptr_t seg_hi;
+
+        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_memsz == 0ULL)
+            continue;
+
+        seg_lo = elf_align_down((uintptr_t)phdrs[i].p_vaddr);
+        seg_hi = elf_align_up((uintptr_t)(phdrs[i].p_vaddr + phdrs[i].p_memsz));
+        if (!have_load || seg_lo < min_va) min_va = seg_lo;
+        if (!have_load || seg_hi > max_va) max_va = seg_hi;
+        have_load = 1U;
+    }
+
+    *min_out = have_load ? min_va : 0ULL;
+    *max_out = have_load ? max_va : 0ULL;
+}
+
+/*
+ * Rebase best-effort dei puntatori assoluti nei segmenti dati di un ET_EXEC
+ * caricato con bias alto. I binari Linux statici non-PIE continuano spesso a
+ * usare PC-relative nel testo, ma GOT / init_array / data.rel.ro possono
+ * contenere indirizzi assoluti del layout basso originale.
+ */
+static void elf_rebase_exec_data_pointers(mm_space_t *space,
+                                          const elf64_ehdr_t *ehdr,
+                                          const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
+                                          uintptr_t bias)
+{
+    uintptr_t min_va;
+    uintptr_t max_va;
+
+    if (!space || !ehdr || bias == 0ULL || ehdr->e_type != ET_EXEC)
+        return;
+
+    elf_compute_original_range(ehdr, phdrs, &min_va, &max_va);
+    if (min_va == 0ULL || max_va <= min_va)
+        return;
+
+    for (uint32_t i = 0U; i < ehdr->e_phnum; i++) {
+        uintptr_t seg_va;
+        uintptr_t seg_size;
+        uint64_t *words;
+        size_t word_count;
+
+        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_memsz < sizeof(uint64_t))
+            continue;
+        if ((phdrs[i].p_flags & PF_X) != 0U)
+            continue;
+
+        seg_va = (uintptr_t)phdrs[i].p_vaddr + bias;
+        seg_size = (uintptr_t)phdrs[i].p_memsz & ~(uintptr_t)(sizeof(uint64_t) - 1U);
+        words = (uint64_t *)mmu_space_resolve_ptr(space, seg_va, seg_size);
+        if (!words)
+            continue;
+
+        word_count = seg_size / sizeof(uint64_t);
+        for (size_t w = 0U; w < word_count; w++) {
+            uint64_t value = words[w];
+            if (value >= min_va && value < max_va)
+                words[w] = value + bias;
+        }
+    }
+}
+
+static int elf_alias_exec_segments(mm_space_t *space,
+                                   const elf64_ehdr_t *ehdr,
+                                   const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
+                                   uintptr_t bias)
+{
+    uintptr_t min_va;
+    uintptr_t max_va;
+
+    if (!space || !ehdr || ehdr->e_type != ET_EXEC || bias == 0ULL)
+        return 0;
+
+    elf_compute_original_range(ehdr, phdrs, &min_va, &max_va);
+    if (min_va == 0ULL || max_va <= min_va || min_va >= MMU_USER_BASE)
+        return 0;
+
+    for (uint32_t i = 0U; i < ehdr->e_phnum; i++) {
+        uintptr_t alias_lo;
+        uintptr_t alias_hi;
+        uintptr_t src_lo;
+        uint32_t  prot = 0U;
+
+        if (phdrs[i].p_type != PT_LOAD || phdrs[i].p_memsz == 0ULL)
+            continue;
+
+        alias_lo = elf_align_down((uintptr_t)phdrs[i].p_vaddr);
+        alias_hi = elf_align_up((uintptr_t)(phdrs[i].p_vaddr + phdrs[i].p_memsz));
+        src_lo   = alias_lo + bias;
+
+        if (phdrs[i].p_flags & PF_R) prot |= MMU_PROT_USER_R;
+        if (phdrs[i].p_flags & PF_W) prot |= MMU_PROT_USER_W;
+        if (phdrs[i].p_flags & PF_X) prot |= MMU_PROT_USER_X;
+        if (prot == 0U) prot = MMU_PROT_USER_R;
+
+        if (mmu_alias_user_region(space, alias_lo, src_lo,
+                                  alias_hi - alias_lo, prot) < 0) {
+            elf_set_error("alias low-VA PT_LOAD fallita");
+            return -1;
         }
     }
 
@@ -1322,10 +1493,17 @@ static int elf_load_vfs_object(mm_space_t *space, const char *path,
     (void)vfs_close(&file);
 
     obj->bias = bias;
-    obj->entry = (uintptr_t)obj->ehdr.e_entry + bias;
+    obj->entry = elf_exec_uses_low_alias(&obj->ehdr, bias)
+                 ? (uintptr_t)obj->ehdr.e_entry
+                 : (uintptr_t)obj->ehdr.e_entry + bias;
     obj->image_lo = image_lo;
     obj->image_hi = image_hi;
-    obj->phdr_va = elf_phdr_runtime_va(&obj->ehdr, obj->phdrs, bias);
+    obj->phdr_va = elf_phdr_runtime_va(&obj->ehdr, obj->phdrs,
+                                       elf_exec_uses_low_alias(&obj->ehdr, bias)
+                                       ? 0ULL : bias);
+    elf_rebase_exec_data_pointers(space, &obj->ehdr, obj->phdrs, bias);
+    if (elf_alias_exec_segments(space, &obj->ehdr, obj->phdrs, bias) < 0)
+        return -1;
 
     if (elf_parse_interp(space, obj) < 0)
         return -1;
@@ -1609,6 +1787,8 @@ static int elf_load_path_exec_dynamic(const char *path,
     image.image_end = max_hi;
     image.phentsize = objects[0].ehdr.e_phentsize;
     image.phnum = objects[0].ehdr.e_phnum;
+    image.abi_mode = elf_detect_abi_mode(&objects[0].ehdr, objects[0].bias,
+                                         objects[0].dyn.interp_path);
 
     /* M11-01b: PT_TLS from main executable (objects[0]).
      * Re-open the file to use the VFS reader for the TLS template copy. */
@@ -2009,7 +2189,7 @@ int elf64_spawn_path(const char *path, const char *argv0,
     (void)sched_task_set_abi_mode(task,
                                   vfs_path_is_linux_compat(path)
                                       ? SCHED_ABI_LINUX
-                                      : SCHED_ABI_ENLILOS);
+                                      : (uint32_t)image.abi_mode);
     (void)sched_task_set_exec_path(task, path);
 
     if (pid_out) *pid_out = task->pid;

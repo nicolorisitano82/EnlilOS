@@ -202,6 +202,8 @@ static int net_srv_owner_ok(void)
  * brk=0 → non ancora inizializzato.
  */
 static uint64_t task_brk[SCHED_MAX_TASKS];
+static uint64_t task_brk_shadow[SCHED_MAX_TASKS];
+static uint64_t task_brk_mapped[SCHED_MAX_TASKS];
 static exception_frame_t *active_syscall_frame;
 static uint8_t            active_syscall_replaced;
 
@@ -1156,6 +1158,8 @@ void syscall_task_cleanup(sched_tcb_t *task)
     idx = (int)(sched_task_proc_slot(task) % SCHED_MAX_TASKS);
     fd_reset_slot_defaults(idx);
     task_brk[idx] = 0ULL;
+    task_brk_shadow[idx] = 0ULL;
+    task_brk_mapped[idx] = 0ULL;
 }
 
 static int vfs_srv_task_slot(void)
@@ -3789,25 +3793,57 @@ static uint64_t sys_msync(uint64_t args[6])
 
 static uint64_t sys_brk(uint64_t args[6])
 {
+    uint64_t    base;
+    uint64_t    limit;
+    uint64_t    new_brk = args[0];
+    uint64_t    grow_end;
+    mm_space_t *space;
+
     if (!current_task) return ERR(ENOMEM);
 
     int idx = task_idx();
 
     /* Prima chiamata: inizializza il break alla base dell'area del task */
-    if (task_brk[idx] == 0)
-        task_brk[idx] = HEAP_BASE + (uint64_t)idx * HEAP_TASK_SIZE;
-
-    uint64_t new_brk = args[0];
+    base  = HEAP_BASE + (uint64_t)idx * HEAP_TASK_SIZE;
+    limit = base + HEAP_TASK_SIZE;
+    if (task_brk[idx] == 0ULL) {
+        task_brk[idx] = base;
+        task_brk_mapped[idx] = base;
+    }
 
     /* args[0] == 0 → query del break corrente */
     if (new_brk == 0)
         return task_brk[idx];
 
-    uint64_t base  = HEAP_BASE + (uint64_t)idx * HEAP_TASK_SIZE;
-    uint64_t limit = base + HEAP_TASK_SIZE;
-
     if (new_brk < base || new_brk >= limit)
         return task_brk[idx];   /* ritorna vecchio break = ENOMEM implicito */
+
+    space = sched_task_space(current_task);
+    if (!space)
+        return task_brk[idx];
+
+    grow_end = (new_brk + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    if (grow_end > task_brk_mapped[idx]) {
+        if (task_brk_shadow[idx] == 0ULL) {
+            uintptr_t shadow_base = 0ULL;
+
+            if (mmu_map_user_anywhere(space, HEAP_TASK_SIZE,
+                                      MMU_PROT_USER_R | MMU_PROT_USER_W,
+                                      &shadow_base) < 0)
+                return task_brk[idx];
+            task_brk_shadow[idx] = shadow_base;
+        }
+
+        if (mmu_alias_user_region(space,
+                                  (uintptr_t)task_brk_mapped[idx],
+                                  (uintptr_t)(task_brk_shadow[idx] +
+                                              (task_brk_mapped[idx] - base)),
+                                  (size_t)(grow_end - task_brk_mapped[idx]),
+                                  MMU_PROT_USER_R | MMU_PROT_USER_W) < 0)
+            return task_brk[idx];
+
+        task_brk_mapped[idx] = grow_end;
+    }
 
     task_brk[idx] = new_brk;
     return new_brk;
@@ -3847,7 +3883,6 @@ static uint64_t sys_execve(uint64_t args[6])
         kfree(copy);
         return ERR(-rc);
     }
-
     rc = resolve_user_vfs_path_meta(copy->path, resolved_path, sizeof(resolved_path),
                                     &resolve_flags);
     if (rc < 0) {
@@ -3890,9 +3925,11 @@ static uint64_t sys_execve(uint64_t args[6])
     (void)sched_task_set_abi_mode(current_task,
                                   (resolve_flags & VFSD_RESP_FLAG_LINUX_COMPAT) != 0U
                                       ? SCHED_ABI_LINUX
-                                      : SCHED_ABI_ENLILOS);
+                                      : (uint32_t)image.abi_mode);
     (void)sched_task_set_exec_path(current_task, resolved_path);
     task_brk[task_idx()] = 0ULL;
+    task_brk_shadow[task_idx()] = 0ULL;
+    task_brk_mapped[task_idx()] = 0ULL;
     elf64_dlreset_proc((uint32_t)task_idx());
     /* Rebase del thread pointer sul TLS iniziale preparato dal loader.
      * Binarî statici musl possono toccare errno/TLS gia' nello startup
@@ -3953,6 +3990,8 @@ static uint64_t sys_fork(uint64_t args[6])
     child_idx = (int)(sched_task_proc_slot(child) % SCHED_MAX_TASKS);
     fd_clone_task_table(child_idx, parent_idx);
     task_brk[child_idx] = task_brk[parent_idx];
+    task_brk_shadow[child_idx] = task_brk_shadow[parent_idx];
+    task_brk_mapped[child_idx] = task_brk_mapped[parent_idx];
     signal_task_fork(child, current_task);
     (void)sched_task_set_abi_mode(child, sched_task_abi_mode(current_task));
 
@@ -7669,9 +7708,12 @@ void syscall_init(void)
         fd_init_slot_defaults(i);
     }
 
-    /* 3. Inizializza task_brk a zero (lazy-init alla prima chiamata brk) */
-    for (int i = 0; i < SCHED_MAX_TASKS; i++)
+    /* 3. Inizializza stato brk a zero (lazy-init alla prima chiamata brk) */
+    for (int i = 0; i < SCHED_MAX_TASKS; i++) {
         task_brk[i] = 0;
+        task_brk_shadow[i] = 0;
+        task_brk_mapped[i] = 0;
+    }
     memset(vfs_srv_tables, 0, sizeof(vfs_srv_tables));
 
     /* 4. Riempi la tabella con ENOSYS */

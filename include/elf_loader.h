@@ -60,6 +60,8 @@ typedef struct {
     uint64_t    argc;
     uint16_t    phentsize;
     uint16_t    phnum;
+    uint8_t     abi_mode;
+    uint8_t     _pad[3];
 } elf_image_t;
 
 int           elf64_load_from_memory(const void *image, size_t image_size,

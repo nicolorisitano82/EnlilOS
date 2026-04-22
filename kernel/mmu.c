@@ -287,21 +287,24 @@ static int space_find_free_gap(mm_space_t *space, size_t size,
     return -1;
 }
 
-static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
-{
-    uint32_t   l1i, l2i;
-    uint64_t  *root;
-    uint64_t  *l2;
-    uint64_t  *l3;
-    uint64_t   pa;
+static inline int pte_is_table_desc(uint64_t pte);
 
-    if (!space || !out_l3) return -1;
+static int space_ensure_l2(mm_space_t *space, uintptr_t va, uint64_t **out_l2)
+{
+    uint32_t  l1i;
+    uint64_t *root;
+    uint64_t  desc;
+    uint64_t  pa;
+    uint64_t *l2;
+
+    if (!space || !out_l2)
+        return -1;
 
     l1i = (uint32_t)((va >> 30) & 0x1FFU);
-    l2i = (uint32_t)((va >> 21) & 0x1FFU);
     root = space->root;
+    desc = root[l1i];
 
-    if ((root[l1i] & PTE_VALID) == 0U) {
+    if ((desc & PTE_VALID) == 0U) {
         pa = phys_alloc_page();
         memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
         if (space_track_table(space, pa) < 0) {
@@ -310,10 +313,57 @@ static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
         }
         root[l1i] = table_desc(pa);
         clean_dcache_range((uintptr_t)root, (uintptr_t)root + PAGE_SIZE);
+        *out_l2 = (uint64_t *)(uintptr_t)pa;
+        return 0;
     }
 
-    l2 = (uint64_t *)(uintptr_t)(root[l1i] & PTE_ADDR_MASK);
-    if ((l2[l2i] & PTE_VALID) == 0U) {
+    if (pte_is_table_desc(desc)) {
+        *out_l2 = (uint64_t *)(uintptr_t)(desc & PTE_ADDR_MASK);
+        return 0;
+    }
+
+    /*
+     * Split di un block descriptor L1 in una L2 table da 2MB.
+     * Serve per gli alias Linux compat a VA bassi senza perdere le
+     * mappature kernel/MMIO già presenti nello spazio.
+     */
+    pa = phys_alloc_page();
+    memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
+    if (space_track_table(space, pa) < 0) {
+        phys_free_page(pa);
+        return -1;
+    }
+
+    l2 = (uint64_t *)(uintptr_t)pa;
+    for (uint32_t i = 0U; i < 512U; i++) {
+        uint64_t block_pa = (((uint64_t)l1i << 30) |
+                             ((uint64_t)i << 21)) & PTE_ADDR_MASK;
+        l2[i] = block_pa | (desc & ~PTE_ADDR_MASK);
+    }
+    clean_dcache_range((uintptr_t)l2, (uintptr_t)l2 + PAGE_SIZE);
+
+    root[l1i] = table_desc(pa);
+    clean_dcache_range((uintptr_t)root, (uintptr_t)root + PAGE_SIZE);
+    *out_l2 = l2;
+    return 0;
+}
+
+static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
+{
+    uint32_t   l1i, l2i;
+    uint64_t  *l2;
+    uint64_t  *l3;
+    uint64_t   pa;
+
+    if (!space || !out_l3) return -1;
+
+    l1i = (uint32_t)((va >> 30) & 0x1FFU);
+    l2i = (uint32_t)((va >> 21) & 0x1FFU);
+
+    if (space_ensure_l2(space, va, &l2) < 0)
+        return -1;
+
+    if ((l2[l2i] & PTE_VALID) == 0U || !pte_is_table_desc(l2[l2i])) {
         pa = phys_alloc_page();
         memset((void *)(uintptr_t)pa, 0, PAGE_SIZE);
         if (space_track_table(space, pa) < 0) {
@@ -386,15 +436,110 @@ static void mmu_sync_table(mm_space_t *space, uintptr_t table_va)
     }
 }
 
+static uint32_t mmu_count_space_pa_mappings(mm_space_t *space, uint64_t pa)
+{
+    uint32_t count = 0U;
+
+    if (!space || !space->in_use)
+        return 0U;
+
+    for (uint32_t l1i = 0U; l1i < 512U; l1i++) {
+        uint64_t root_desc = space->root[l1i];
+        uint64_t *l2;
+
+        if (!pte_is_table_desc(root_desc))
+            continue;
+
+        l2 = (uint64_t *)(uintptr_t)(root_desc & PTE_ADDR_MASK);
+        for (uint32_t l2i = 0U; l2i < 512U; l2i++) {
+            uint64_t l2_desc = l2[l2i];
+            uint64_t *l3;
+
+            if (!pte_is_table_desc(l2_desc))
+                continue;
+
+            l3 = (uint64_t *)(uintptr_t)(l2_desc & PTE_ADDR_MASK);
+            for (uint32_t l3i = 0U; l3i < 512U; l3i++) {
+                uint64_t pte = l3[l3i];
+
+                if ((pte & PTE_VALID) == 0U)
+                    continue;
+                if ((pte & PTE_ADDR_MASK) == pa)
+                    count++;
+            }
+        }
+    }
+
+    return count;
+}
+
+static int mmu_rewrite_space_pa_mappings(mm_space_t *space,
+                                         uint64_t old_pa, uint64_t new_pa,
+                                         int clear_cow,
+                                         uint32_t *count_out)
+{
+    uint32_t replaced = 0U;
+
+    if (!space || !space->in_use)
+        return -1;
+
+    for (uint32_t l1i = 0U; l1i < 512U; l1i++) {
+        uint64_t root_desc = space->root[l1i];
+        uint64_t *l2;
+
+        if (!pte_is_table_desc(root_desc))
+            continue;
+
+        l2 = (uint64_t *)(uintptr_t)(root_desc & PTE_ADDR_MASK);
+        for (uint32_t l2i = 0U; l2i < 512U; l2i++) {
+            uint64_t l2_desc = l2[l2i];
+            uint64_t *l3;
+            uint8_t touched = 0U;
+
+            if (!pte_is_table_desc(l2_desc))
+                continue;
+
+            l3 = (uint64_t *)(uintptr_t)(l2_desc & PTE_ADDR_MASK);
+            for (uint32_t l3i = 0U; l3i < 512U; l3i++) {
+                uint64_t pte = l3[l3i];
+
+                if ((pte & PTE_VALID) == 0U)
+                    continue;
+                if ((pte & PTE_ADDR_MASK) != old_pa)
+                    continue;
+
+                if (replaced > 0U && new_pa != old_pa)
+                    phys_retain_page(new_pa);
+
+                if (clear_cow && (pte & PTE_COW))
+                    l3[l3i] = pte_make_user_rw(pte, new_pa);
+                else
+                    l3[l3i] = (pte & ~PTE_ADDR_MASK) | (new_pa & PTE_ADDR_MASK);
+
+                replaced++;
+                touched = 1U;
+            }
+
+            if (touched)
+                mmu_sync_table(space, (uintptr_t)l3);
+        }
+    }
+
+    if (count_out)
+        *count_out = replaced;
+    return (replaced > 0U) ? 0 : -1;
+}
+
 static int mmu_make_private_page(mm_space_t *space, uintptr_t va, int force_copy)
 {
     uint64_t *pte;
-    uint64_t *l3;
     uint64_t  old_pte;
     uint64_t  old_pa;
     uint64_t  new_pa;
+    uint32_t  local_refs;
+    uint32_t  replaced = 0U;
 
-    if (mmu_lookup_pte(space, va, &pte, &l3) < 0)
+    if (mmu_lookup_pte(space, va, &pte, NULL) < 0)
         return -1;
 
     old_pte = *pte;
@@ -408,17 +553,24 @@ static int mmu_make_private_page(mm_space_t *space, uintptr_t va, int force_copy
     }
 
     old_pa = old_pte & PTE_ADDR_MASK;
-    if (!force_copy && phys_page_refcount(old_pa) <= 1U) {
-        *pte = pte_make_user_rw(old_pte, old_pa);
-        mmu_sync_table(space, (uintptr_t)l3);
+    local_refs = mmu_count_space_pa_mappings(space, old_pa);
+
+    if (!force_copy && phys_page_refcount(old_pa) <= local_refs) {
+        if (mmu_rewrite_space_pa_mappings(space, old_pa, old_pa, 1,
+                                          &replaced) < 0)
+            return -1;
         return 0;
     }
 
     new_pa = phys_alloc_page();
     memcpy((void *)(uintptr_t)new_pa, (const void *)(uintptr_t)old_pa, PAGE_SIZE);
-    *pte = pte_make_user_rw(old_pte, new_pa);
-    mmu_sync_table(space, (uintptr_t)l3);
-    phys_free_page(old_pa);
+    if (mmu_rewrite_space_pa_mappings(space, old_pa, new_pa, 1,
+                                      &replaced) < 0) {
+        phys_free_page(new_pa);
+        return -1;
+    }
+    while (replaced-- > 0U)
+        phys_free_page(old_pa);
     return 0;
 }
 
@@ -634,8 +786,6 @@ mm_space_t *mmu_space_create(void)
 mm_space_t *mmu_space_clone_cow(mm_space_t *parent, uintptr_t stack_copy_start)
 {
     mm_space_t *child;
-    uint32_t    l1_start;
-    uint32_t    l1_end;
 
     if (!parent || !parent->in_use)
         return NULL;
@@ -646,10 +796,7 @@ mm_space_t *mmu_space_clone_cow(mm_space_t *parent, uintptr_t stack_copy_start)
 
     child->brk       = parent->brk;
     child->mmap_base = parent->mmap_base;
-    l1_start = mmu_user_l1_start();
-    l1_end   = mmu_user_l1_end();
-
-    for (uint32_t l1i = l1_start; l1i <= l1_end; l1i++) {
+    for (uint32_t l1i = 0U; l1i < 512U; l1i++) {
         uint64_t root_desc = parent->root[l1i];
         uint64_t *parent_l2;
 
@@ -730,19 +877,13 @@ void mmu_activate_space(mm_space_t *space)
 
 void mmu_space_destroy(mm_space_t *space)
 {
-    uint32_t l1_start;
-    uint32_t l1_end;
-
     if (!space || !space->in_use || space->is_kernel)
         return;
 
     if (current_space == space)
         mmu_activate_space(&kernel_space);
 
-    l1_start = mmu_user_l1_start();
-    l1_end   = mmu_user_l1_end();
-
-    for (uint32_t l1i = l1_start; l1i <= l1_end; l1i++) {
+    for (uint32_t l1i = 0U; l1i < 512U; l1i++) {
         uint64_t root_desc = space->root[l1i];
         uint64_t *l2;
 
@@ -821,6 +962,66 @@ int mmu_map_user_region(mm_space_t *space, uintptr_t start,
 
         cur_va += (uintptr_t)bytes;
         remaining_pages -= pages;
+    }
+
+    return 0;
+}
+
+int mmu_alias_user_region(mm_space_t *space, uintptr_t alias_start,
+                          uintptr_t src_start, size_t size,
+                          uint32_t prot)
+{
+    uintptr_t cur_alias;
+    uintptr_t cur_src;
+    uintptr_t end;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+    if ((alias_start & (PAGE_SIZE - 1ULL)) != 0ULL ||
+        (src_start & (PAGE_SIZE - 1ULL)) != 0ULL ||
+        (size & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return -1;
+    if (alias_start >= MMU_USER_BASE || alias_start + size < alias_start ||
+        alias_start + size > MMU_USER_BASE)
+        return -1;
+
+    end = alias_start + size;
+    cur_alias = alias_start;
+    cur_src = src_start;
+
+    while (cur_alias < end) {
+        uint64_t *src_pte;
+        uint64_t *dst_l3;
+        uint32_t  l3i;
+        uint64_t  src_pa;
+        uint64_t  new_pte;
+
+        if (mmu_lookup_pte(space, cur_src, &src_pte, NULL) < 0 ||
+            (*src_pte & PTE_VALID) == 0U)
+            return -1;
+
+        if (space_ensure_l3(space, cur_alias, &dst_l3) < 0)
+            return -1;
+
+        l3i = (uint32_t)((cur_alias >> 12) & 0x1FFU);
+        src_pa = *src_pte & PTE_ADDR_MASK;
+        new_pte = src_pa | user_leaf_flags(prot);
+
+        if ((dst_l3[l3i] & PTE_VALID) != 0U) {
+            if ((dst_l3[l3i] & PTE_ADDR_MASK) == src_pa) {
+                cur_alias += PAGE_SIZE;
+                cur_src += PAGE_SIZE;
+                continue;
+            }
+            return -1;
+        }
+
+        phys_retain_page(src_pa);
+        dst_l3[l3i] = new_pte;
+        mmu_sync_table(space, (uintptr_t)dst_l3);
+
+        cur_alias += PAGE_SIZE;
+        cur_src += PAGE_SIZE;
     }
 
     return 0;
@@ -1223,12 +1424,15 @@ int mmu_handle_user_fault(mm_space_t *space, uintptr_t far, uint64_t esr)
     uintptr_t va = far & PAGE_MASK;
     uint32_t  iss = (uint32_t)ESR_ISS(esr);
     uint32_t  wnr = (iss >> 6) & 1U;
+    uint64_t *pte;
 
     if (!space || !space->in_use)
         return -1;
     if (!wnr)
         return -1;
-    if (va < MMU_USER_BASE || va >= MMU_USER_LIMIT)
+    if (mmu_lookup_pte(space, va, &pte, NULL) < 0)
+        return -1;
+    if ((*pte & PTE_VALID) == 0U)
         return -1;
 
     return mmu_make_private_page(space, va, 0);

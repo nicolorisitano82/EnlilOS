@@ -294,7 +294,7 @@ static int boot_path_is_regular_file(const char *path)
 static const char *boot_find_real_arksh_path(void)
 {
     if (boot_path_is_regular_file("/bin/arksh.real"))
-        return "/bin/arksh.real";
+        return "/bin/arksh";
     return NULL;
 }
 

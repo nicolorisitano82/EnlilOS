@@ -9,6 +9,7 @@
 #define ARKSHBOOT_OUT        "/data/ARKSHBOOT.TXT"
 #define ARKSH_USER_RC        "/home/user/.config/arksh/arkshrc"
 #define ARKSH_ETC_RC         "/etc/arkshrc"
+#define ARKSH_EXTRA_ENV      "ARKSH_FORCE_CAPTURE=1"
 
 static unsigned long ab_strlen(const char *s)
 {
@@ -197,6 +198,8 @@ int main(int argc, char **argv, char **envp)
         "[arksh] shell reale non presente, fallback su /bin/nsh\n";
     static char *const real_argv[] = { (char *)"/bin/arksh", NULL };
     static char *const nsh_argv[] = { (char *)"/bin/nsh", NULL };
+    char *real_env[96];
+    int   envc = 0;
 
     (void)argc;
 #ifdef ARKSH_BOOT_SELFTEST
@@ -206,8 +209,15 @@ int main(int argc, char **argv, char **envp)
 
     ab_prepare_login_home();
 
+    while (envp && envp[envc] && envc + 2 < (int)(sizeof(real_env) / sizeof(real_env[0]))) {
+        real_env[envc] = envp[envc];
+        envc++;
+    }
+    real_env[envc++] = (char *)ARKSH_EXTRA_ENV;
+    real_env[envc] = NULL;
+
     if (ab_file_exists("/bin/arksh.real")) {
-        execve("/bin/arksh.real", real_argv, envp);
+        execve("/bin/arksh.real", real_argv, real_env);
     }
 
     (void)ab_write_all_fd(STDOUT_FILENO, fallback_msg);
