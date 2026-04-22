@@ -6583,7 +6583,15 @@ static uint64_t sys_linux_getitimer(uint64_t args[6])
     return 0U;
 }
 
-static uint64_t sys_linux_clone(uint64_t args[6])           { return sys_linux_passthrough(args, sys_clone); }
+static uint64_t sys_linux_clone(uint64_t args[6])
+{
+    uint32_t flags = (uint32_t)args[0];
+    /* Fork-like clone (no CLONE_THREAD): route to sys_fork which handles
+     * COW address space, fd table copy, brk state and ABI mode inheritance. */
+    if ((flags & CLONE_THREAD) == 0U)
+        return sys_fork(args);
+    return sys_clone(args);
+}
 static uint64_t sys_linux_execve(uint64_t args[6])          { return sys_linux_passthrough(args, sys_execve); }
 static uint64_t sys_linux_mmap(uint64_t args[6])            { return sys_linux_passthrough(args, sys_mmap); }
 static uint64_t sys_linux_munmap(uint64_t args[6])          { return sys_linux_passthrough(args, sys_munmap); }
