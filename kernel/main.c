@@ -2106,17 +2106,10 @@ static void bootcli_execute_command(void)
         }
     } else if (bootcli_startswith(bootcli_input, "runelf ")) {
         char resolved[BOOTCLI_PATH_MAX + 1];
-        uint32_t pid = 0U;
         if (!bootcli_resolve_path(bootcli_input + 7, resolved, sizeof(resolved))) {
             bootcli_push_line("runelf: path troppo lungo o non valido.");
-        } else if (elf64_spawn_path(resolved, resolved,
-                             PRIO_KERNEL, &pid) < 0) {
-            bootcli_push_line(elf64_last_error());
         } else {
-            line[0] = '\0';
-            bootcli_buf_append(line, sizeof(line), "ELF lanciato a EL0, pid=");
-            bootcli_buf_append_u32(line, sizeof(line), pid);
-            bootcli_push_line(line);
+            bootcli_launch_shell(resolved, bootcli_input + 7, bootcli_input + 7, 1);
         }
     } else if (bootcli_streq(bootcli_input, "mouse")) {
         if (!bootcli_mouse_ready) {
