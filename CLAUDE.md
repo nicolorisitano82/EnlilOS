@@ -552,6 +552,7 @@ SUMMARY total=51 pass=51 fail=0
   - `mprotect` MMU completa
   - `prlimit64` write-side piu' ricca
   - alcuni stub Linux coerenti (`ptrace`, `setuid`, `sched_*affinity`, ecc.)
+- Smoke interattivo validato: `runelf bash-linux` → prompt appare → `ls` → output → prompt torna. I bug che bloccavano questo path sono descritti nella sezione knowledge operativa bash-linux più sotto.
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 
@@ -581,6 +582,37 @@ SUMMARY total=51 pass=51 fail=0
 - `termios` è v1 minimale sulla console globale: canonical mode, raw mode, `isatty()`, `VINTR`, `VEOF`, `VERASE`, `VKILL`, `ISIG`, `ECHO/ECHOE`, `OPOST/ONLCR`.
 - `VMIN/VTIME` non hanno ancora semantica POSIX completa e termios state non è per-open-file o per-pty. OK per bootstrap shell/REPL, non ancora per compat piena.
 - `POSIXDEMO.ELF` e selftest `posix-ux` sono riferimento runtime per validare insieme: env bootstrap, `getcwd/chdir`, `pipe`, `dup`, `dup2`, `isatty`, `tcgetattr`, `tcsetattr`.
+
+### Knowledge operativa — bash-linux interattivo (runelf + foreground + segnali)
+
+**File**: [kernel/syscall.c](kernel/syscall.c), [kernel/sched.c](kernel/sched.c),
+[include/sched.h](include/sched.h), [kernel/tty.c](kernel/tty.c),
+[kernel/signal.c](kernel/signal.c), [kernel/mmu.c](kernel/mmu.c), [include/mmu.h](include/mmu.h)
+
+#### `sys_linux_clone` — fork-path dispatch
+- Bash usa `clone(SIGCHLD)` per forkare processi figli (senza `CLONE_THREAD`). `sys_linux_clone` passava tutto a `sys_clone` che richiede `CLONE_VM|CLONE_THREAD` → EINVAL.
+- **Fix**: `sys_linux_clone` controlla `flags & CLONE_THREAD`; se assente → `sys_fork(args)`.
+
+#### `runelf` — foreground TTY
+- `runelf <path>` usava `elf64_spawn_path` direttamente senza chiamare `term80_activate` o impostare `BOOTCLI_MODE_TERM` → bash avviato ma non riceveva input da tastiera.
+- **Fix**: `runelf` passa per `bootcli_launch_shell` che chiama `term80_activate` e setta la modalità terminale.
+
+#### `sys_waitpid` — WCONTINUED + zombie reap
+- Bash passa flag `WCONTINUED` (= 8) a `wait4`. Il kernel accettava solo `WNOHANG|WUNTRACED` → EINVAL.
+  **Fix**: `options & ~(WNOHANG | WUNTRACED | 8U)` — WCONTINUED accettato come no-op.
+- Zombie non veniva mai consumato dopo `waitpid`: il proc slot restava `waitable=1` per sempre.
+  **Fix**: `sched_task_mark_reaped(t)` chiamata dopo il reap imposta `proc->waitable = 0` e `proc->in_use = 0`.
+- **Attenzione**: `proc_of(t)` ritorna NULL se `in_use == 0`. Dopo `sched_task_mark_reaped`, nessuna API che usa `proc_of` deve essere chiamata su quel TCB.
+
+#### `tty_is_background_current` — stale foreground pgrp
+- Dopo che un figlio (es. `ls`) esce, `tty_foreground_pgid` punta al suo pgid (ora morto). Bash tenta di scrivere il prompt → `tty_is_background_current()` = true → SIGTTOU inviato → bash ha SIG_IGN → `tty_check_output_current` ritorna -EINTR → loop infinito.
+- **Fix**: aggiunto controllo `!sched_task_has_pgrp(tty_session_sid, tty_foreground_pgid)` dentro `tty_is_background_current`. Se il pgid foreground non ha task vivi, il writer viene trattato come foreground.
+- **Non fare**: aggiungere `tty_adopt_current_session()` a `tty_check_output_current`. Causa regressione in `jobctl-core`: i server di sistema (vfsd/netd) scrivono su stdout, `tty_adopt_current_session` può rubare `tty_session_sid` dalla sessione corretta assegnandola a quella dei server. `tty_adopt_current_session` appartiene solo al path `tty_read`.
+
+#### Signal trampoline Linux ABI
+- La pagina trampoline a `MMU_USER_SIGTRAMP_VA = MMU_USER_LIMIT - 0x1000` conteneva solo `movz x8, #19; svc #0; brk #0` (EnlilOS `SYS_SIGRETURN = 19`). Processi Linux ABI dispatchano via `linux_syscall_table` → syscall 19 non esiste lì → ENOSYS → cade su `brk #0` → SIGILL loop.
+- **Fix**: seconda trampoline a `MMU_USER_LINUX_SIGTRAMP_VA = MMU_USER_SIGTRAMP_VA + 12` con `movz x8, #139` (Linux `NR_rt_sigreturn = 139`). La pagina fisica contiene entrambe. `signal_deliver_to_current` seleziona la VA in base a `sched_task_abi_mode(current_task)`.
+- Encoding AArch64: `movz x8, #N` = `0xD2800000 | (N << 5) | 8`. Per N=19: `0xD2800268`; per N=139: `0xD2801168`.
 
 ### Knowledge operativa — kbd ring buffer OOB (62° char freeze)
 
