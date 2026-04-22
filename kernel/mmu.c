@@ -350,14 +350,13 @@ static int space_ensure_l2(mm_space_t *space, uintptr_t va, uint64_t **out_l2)
 
 static int space_ensure_l3(mm_space_t *space, uintptr_t va, uint64_t **out_l3)
 {
-    uint32_t   l1i, l2i;
+    uint32_t   l2i;
     uint64_t  *l2;
     uint64_t  *l3;
     uint64_t   pa;
 
     if (!space || !out_l3) return -1;
 
-    l1i = (uint32_t)((va >> 30) & 0x1FFU);
     l2i = (uint32_t)((va >> 21) & 0x1FFU);
 
     if (space_ensure_l2(space, va, &l2) < 0)
@@ -574,11 +573,13 @@ static int mmu_make_private_page(mm_space_t *space, uintptr_t va, int force_copy
     return 0;
 }
 
+static uint32_t mmu_user_l1_start(void) __attribute__((unused));
 static uint32_t mmu_user_l1_start(void)
 {
     return (uint32_t)((MMU_USER_BASE >> 30) & 0x1FFU);
 }
 
+static uint32_t mmu_user_l1_end(void) __attribute__((unused));
 static uint32_t mmu_user_l1_end(void)
 {
     return (uint32_t)(((MMU_USER_LIMIT - 1ULL) >> 30) & 0x1FFU);
@@ -1326,7 +1327,7 @@ int mmu_remap_user_region(mm_space_t *space,
 
         {
             uintptr_t new_va    = 0U;
-            size_t    copy_pgs  = old_aligned / PAGE_SIZE;
+            (void)(old_aligned / PAGE_SIZE); /* copy_pgs reserved for future COW remap */
             int       fixed     = (flags & MMU_REMAP_FIXED) != 0U;
 
             if (fixed) {
