@@ -4095,7 +4095,8 @@ static uint64_t sys_waitpid(uint64_t args[6])
     uint64_t  deadline;
     uint32_t  caller_pid;
 
-    if (options & ~(WNOHANG | WUNTRACED))
+    /* WCONTINUED (8) accepted as no-op: we have no SIGCONT resume tracking yet */
+    if (options & ~(WNOHANG | WUNTRACED | 8U))
         return ERR(EINVAL);
     if (!current_task)
         return ERR(ECHILD);
@@ -4141,6 +4142,7 @@ static uint64_t sys_waitpid(uint64_t args[6])
                 if (status_uva != 0U &&
                     user_store_bytes(status_uva, &status, sizeof(status)) < 0)
                     return ERR(EFAULT);
+                sched_task_mark_reaped(t);
                 return (uint64_t)t->pid;
             }
 

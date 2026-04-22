@@ -1342,6 +1342,16 @@ int sched_task_is_process_waitable(const sched_tcb_t *t)
     return proc->waitable ? 1 : 0;
 }
 
+void sched_task_mark_reaped(sched_tcb_t *t)
+{
+    sched_proc_ctx_t *proc = proc_of(t);
+
+    if (!t || !proc)
+        return;
+    proc->waitable = 0U;
+    proc->in_use   = 0U;
+}
+
 int sched_task_has_session(uint32_t sid)
 {
     if (sid == 0U)

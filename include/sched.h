@@ -227,6 +227,7 @@ const char *sched_task_exec_path(const sched_tcb_t *t);
 int         sched_task_set_exec_path(sched_tcb_t *t, const char *path);
 int         sched_task_is_thread(const sched_tcb_t *t);
 int         sched_task_is_process_waitable(const sched_tcb_t *t);
+void        sched_task_mark_reaped(sched_tcb_t *t);
 int         sched_task_has_session(uint32_t sid);
 int         sched_task_has_pgrp(uint32_t sid, uint32_t pgid);
 int         sched_task_setpgid(const sched_tcb_t *caller, sched_tcb_t *target,

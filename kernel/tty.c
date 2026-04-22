@@ -127,7 +127,12 @@ static int tty_is_background_current(void)
         return 0;
     if (sid != tty_session_sid)
         return 0;
-    return pgid != 0U && pgid != tty_foreground_pgid;
+    if (pgid == 0U || pgid == tty_foreground_pgid)
+        return 0;
+    /* Stale foreground pgrp: if no live task holds it, let the write through */
+    if (!sched_task_has_pgrp(tty_session_sid, tty_foreground_pgid))
+        return 0;
+    return 1;
 }
 
 static void tty_signal_foreground(int sig)
