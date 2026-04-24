@@ -2572,6 +2572,29 @@ static int selftest_case_bash_linux_fork(void)
     return 0;
 }
 
+/*
+ * M11-05d: verify ld-linux-aarch64.so.1 interpreter alias resolution.
+ * LDINTDEMO.ELF has PT_INTERP=/lib/ld-linux-aarch64.so.1.
+ * The ELF loader must fall back to /LD-ENLIL.SO when that path is absent.
+ */
+static int selftest_case_linux_ld_shim(void)
+{
+    static const char case_name[] = "linux-ld-shim";
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+
+    if (st_spawn_user_task(case_name, "/LDINTDEMO.ELF", PRIO_KERNEL, &pid) < 0)
+        return -1;
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 2000ULL);
+    ST_CHECK(case_name, task != NULL, "LDINTDEMO.ELF task non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa LDINTDEMO.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "LDINTDEMO.ELF exit code non e' 0");
+    return 0;
+}
+
 static int selftest_case_epoll_core(void)
 {
     static const char case_name[] = "epoll-core";
@@ -2834,6 +2857,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
     { "gnu-ls",          selftest_case_gnu_ls },
     { "bash-linux-fork", selftest_case_bash_linux_fork },
+    { "linux-ld-shim",   selftest_case_linux_ld_shim },
     { "epoll-core",      selftest_case_epoll_core },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },

@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=54 pass=54 fail=0`
+- Stato validato: `SUMMARY total=55 pass=55 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -511,24 +511,34 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-21)
+## Milestone completate (stato 2026-04-24)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d` e `M8-08d/e/f/g` completi in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=54 pass=54 fail=0
+SUMMARY total=55 pass=55 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
 2. **M8-08h** — i18n / localizzazione stringhe
-3. **M11-05d/e/f/g** — hardening Linux compat residuo (glibc shims, PTY, fs Linux-like)
+3. **M11-05e/f/g** — hardening Linux compat residuo (PTY, fs Linux-like)
 4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 6. **M13-02** — SMP bootstrap
 7. **M13-03** — scheduler multicore
+### Stato operativo M11-05d / ld-linux shim + library search paths
+
+- `M11-05d` e' chiusa in `v1`: ELF loader risolve `PT_INTERP = /lib/ld-linux-aarch64.so.1` (e varianti musl/lib64) tramite alias automatico verso `/LD-ENLIL.SO` quando il file non esiste nel VFS.
+- `LDINTDEMO.ELF` in initrd e' il test binario: PIE identico a `DYNDEMO.ELF` ma linked con `--dynamic-linker=/lib/ld-linux-aarch64.so.1`.
+- Selftest di riferimento: `linux-ld-shim`; suite completa `55/55`.
+- VFS aggiunto: `/lib/aarch64-linux-gnu` → bindfs → `/sysroot/lib/aarch64-linux-gnu` (per linux-compat-stage con layout Debian/Ubuntu multiarch).
+- DT_NEEDED fallback search order: path originale → `/lib/aarch64-linux-gnu/<basename>` → `/usr/lib/<basename>` → `/usr/lib/aarch64-linux-gnu/<basename>`.
+- Quando `linux-compat-stage` e' popolato (`make linux-compat-stage LINUX_ROOT_DIR=...`), `lib/ld-linux-aarch64.so.1` viene copiato dalla radice Linux reale e diventa accessibile via bindfs `/lib` → `/sysroot/lib`.
+- Boot command interattivo: `ldintdemo`.
+
 ### Stato operativo M11-05a/b/c / bash-linux + epoll + SysV IPC
 
 - `M11-05a` e' chiusa in `v1`: `bash-linux` statico funziona davvero.

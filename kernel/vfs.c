@@ -1178,6 +1178,10 @@ static void build_mount_table(void)
                    false, false, &devfs_ops, 0U);
     mount_register("/lib", "linux-lib", "bindfs",
                    true, true, &bindfs_ops, (uintptr_t)"/sysroot/lib");
+    /* M11-05d: lib/aarch64-linux-gnu is the canonical Debian/Ubuntu multiarch path */
+    mount_register("/lib/aarch64-linux-gnu", "linux-lib-ma", "bindfs",
+                   true, true, &bindfs_ops,
+                   (uintptr_t)"/sysroot/lib/aarch64-linux-gnu");
     mount_register("/usr", "linux-usr", "bindfs",
                    true, true, &bindfs_ops, (uintptr_t)"/sysroot/usr");
     mount_register("/bin/sh", "linux-shell", "bindfs",

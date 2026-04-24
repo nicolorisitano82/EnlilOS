@@ -1686,6 +1686,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
         bootcli_push_line("dyndemo   lancia un PIE con PT_INTERP + DT_NEEDED");
+        bootcli_push_line("ldintdemo lancia un PIE con PT_INTERP=/lib/ld-linux-aarch64.so.1 (M11-05d)");
         bootcli_push_line("forkdemo  lancia un ELF che verifica fork() + COW");
         bootcli_push_line("sigdemo   lancia un ELF che verifica signal + SIGCHLD");
         bootcli_push_line("mreactdemo lancia un ELF che attende su una word reattiva");
@@ -1923,6 +1924,17 @@ static void bootcli_execute_command(void)
         } else {
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "dynamic ELF lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "ldintdemo")) {
+        /* M11-05d: Linux-compat interpreter alias demo */
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/LDINTDEMO.ELF", "/LDINTDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "linux-interp ELF lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }

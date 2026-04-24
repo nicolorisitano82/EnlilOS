@@ -471,12 +471,27 @@ static int elf_exec_uses_low_alias(const elf64_ehdr_t *ehdr, uintptr_t bias)
 
 static int elf_interp_is_linux_compat(const char *path)
 {
-    static const char *glibc = "/lib/ld-linux-aarch64.so.1";
-    static const char *musl  = "/lib/ld-musl-aarch64.so.1";
+    static const char *glibc  = "/lib/ld-linux-aarch64.so.1";
+    static const char *musl   = "/lib/ld-musl-aarch64.so.1";
+    static const char *glibc64 = "/lib64/ld-linux-aarch64.so.1";
 
     if (!path || path[0] == '\0')
         return 0;
-    return elf_streq(path, glibc) || elf_streq(path, musl);
+    return elf_streq(path, glibc) || elf_streq(path, musl)
+        || elf_streq(path, glibc64);
+}
+
+/* M11-05d: basename offset (index of first char after last '/') */
+static uint32_t elf_basename_off(const char *path)
+{
+    uint32_t i = 0U;
+    uint32_t last = 0U;
+    if (!path) return 0U;
+    while (path[i] != '\0') {
+        if (path[i] == '/') last = i + 1U;
+        i++;
+    }
+    return last;
 }
 
 static uint8_t elf_detect_abi_mode(const elf64_ehdr_t *ehdr,
@@ -1512,6 +1527,48 @@ static int elf_load_vfs_object(mm_space_t *space, const char *path,
     return 0;
 }
 
+/*
+ * M11-05d: elf_load_vfs_object_searched
+ *
+ * Wrapper that tries the primary path first. On failure, retries with
+ * standard Linux library search directories (used when linux-compat-stage
+ * provides libraries under /lib/aarch64-linux-gnu or /usr/lib).
+ */
+static int elf_load_vfs_object_searched(mm_space_t *space, const char *path,
+                                         uintptr_t *next_dyn_base,
+                                         elf_object_t *obj)
+{
+    static const char * const search_dirs[] = {
+        "/lib/aarch64-linux-gnu/",
+        "/usr/lib/",
+        "/usr/lib/aarch64-linux-gnu/",
+        NULL
+    };
+    char     search_path[ELF64_NAME_MAX];
+    uint32_t base_off;
+    uint32_t blen;
+
+    if (elf_load_vfs_object(space, path, next_dyn_base, obj) == 0)
+        return 0;
+
+    base_off = elf_basename_off(path);
+    blen     = elf_strlen(path + base_off);
+
+    for (uint32_t i = 0U; search_dirs[i]; i++) {
+        uint32_t dlen = elf_strlen(search_dirs[i]);
+        if (dlen + blen + 1U > sizeof(search_path))
+            continue;
+        elf_strlcpy(search_path, search_dirs[i], sizeof(search_path));
+        elf_strlcpy(search_path + dlen, path + base_off,
+                    sizeof(search_path) - dlen);
+        if (elf_load_vfs_object(space, search_path, next_dyn_base, obj) == 0)
+            return 0;
+    }
+
+    elf_set_error("libreria ELF non trovata");
+    return -1;
+}
+
 static int elf_lookup_symbol_in_object(mm_space_t *space, const elf_object_t *obj,
                                        const char *name, uintptr_t *value_out)
 {
@@ -1728,6 +1785,20 @@ static int elf_load_path_exec_dynamic(const char *path,
             elf_set_error("PT_INTERP troppo lungo");
             goto fail;
         }
+        /*
+         * M11-05d: Linux-compat interpreter alias resolution.
+         * If the binary requests ld-linux-aarch64.so.1 / ld-musl-aarch64.so.1
+         * and the file doesn't exist in VFS, fall back to /LD-ENLIL.SO
+         * (our custom dynamic linker already handles Linux-ABI binaries).
+         */
+        if (elf_interp_is_linux_compat(interp_path)) {
+            vfs_file_t probe;
+            if (vfs_open(interp_path, O_RDONLY, &probe) < 0) {
+                elf_strlcpy(interp_path, "/LD-ENLIL.SO", sizeof(interp_path));
+            } else {
+                (void)vfs_close(&probe);
+            }
+        }
         if (elf_find_loaded_object(objects, object_count, interp_path) < 0) {
             if (object_count >= ELF64_MAX_OBJECTS) {
                 elf_set_error("troppi oggetti ELF");
@@ -1759,8 +1830,9 @@ static int elf_load_path_exec_dynamic(const char *path,
                 elf_set_error("troppi oggetti ELF");
                 goto fail;
             }
-            if (elf_load_vfs_object(space, needed_path, &next_dyn_base,
-                                    &objects[object_count]) < 0)
+            /* M11-05d: use searched loader for DT_NEEDED resolution */
+            if (elf_load_vfs_object_searched(space, needed_path, &next_dyn_base,
+                                             &objects[object_count]) < 0)
                 goto fail;
             if (objects[object_count].image_hi > max_hi)
                 max_hi = objects[object_count].image_hi;
@@ -1899,8 +1971,9 @@ static int elf_dl_load_module(mm_space_t *space,
                 elf_set_error("troppi oggetti in dlopen()");
                 return -ENOMEM;
             }
-            if (elf_load_vfs_object(space, needed_path, &next_dyn_base,
-                                    &mod->objects[mod->object_count]) < 0)
+            /* M11-05d: use searched loader */
+            if (elf_load_vfs_object_searched(space, needed_path, &next_dyn_base,
+                                              &mod->objects[mod->object_count]) < 0)
                 return -EIO;
             mod->object_count++;
         }

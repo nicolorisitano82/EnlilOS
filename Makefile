@@ -105,7 +105,7 @@ USER_CRT_C_SRCS       = user/crt1.c user/crt_demo.c
 USER_CRT_OBJS         = $(USER_CRT_ASM_SRCS:.S=.o) $(USER_CRT_C_SRCS:.c=.o)
 USER_CRT_ELFS         = user/crt_demo.elf
 USER_CRT_EMBEDOBJS    = $(USER_CRT_ELFS:.elf=.embed.o)
-USER_DYNAPP_SRCS      = user/dynamic_demo.c
+USER_DYNAPP_SRCS      = user/dynamic_demo.c user/linux_interp_demo.c
 USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
 USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
 USER_DYNAPP_EMBEDOBJS = $(USER_DYNAPP_ELFS:.elf=.embed.o)
@@ -420,6 +420,11 @@ user/dynamic_demo.elf: user/dynamic_demo.pie.o user/user_dyn.ld user/libdyn.so
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ $<
 
+# M11-05d: same binary but requests Linux-compat interpreter
+user/linux_interp_demo.elf: user/linux_interp_demo.pie.o user/user_dyn.ld user/libdyn.so
+	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
+	      -Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1 -Luser -ldyn -o $@ $<
+
 $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
                 initrd/vconsole.conf initrd/arkshrc initrd/arksh_user_rc \
                 initrd/us.map initrd/it.map initrd/hostname initrd/hosts \
@@ -464,6 +469,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		EXEC1.ELF=user/execve_demo.elf \
 		EXEC2.ELF=user/execve_target.elf \
 		DYNDEMO.ELF=user/dynamic_demo.elf \
+		LDINTDEMO.ELF=user/linux_interp_demo.elf \
 		FORKDEMO.ELF=user/fork_demo.elf \
 		SIGDEMO.ELF=user/signal_demo.elf \
 		MREACTDEMO.ELF=user/mreact_demo.elf \
