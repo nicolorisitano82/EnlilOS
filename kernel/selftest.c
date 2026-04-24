@@ -27,6 +27,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "syscall.h"
+#include "sysv_ipc.h"
 #include "timer.h"
 #include "uart.h"
 #include "vfs.h"
@@ -2543,6 +2544,34 @@ static int selftest_case_gnu_ls(void)
     return st_run_user_path(case_name, "/LS.ELF", 3000ULL);
 }
 
+static int selftest_case_bash_linux_fork(void)
+{
+    static const char  case_name[] = "bash-linux-fork";
+    static const char  path[]      = "/BASH-LINUX.ELF";
+    static const char *argv[]      = { path, "-c", "(true); true", NULL };
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    vfs_file_t   probe;
+
+    /* Skip gracefully if binary not bundled in this build */
+    if (vfs_open(path, O_RDONLY, &probe) != 0)
+        return 0;
+    (void)vfs_close(&probe);
+
+    if (elf64_spawn_path_argv(path, argv, 3U, PRIO_KERNEL, &pid) < 0) {
+        st_log_fail(case_name, "spawn BASH-LINUX.ELF fallita");
+        return -1;
+    }
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 5000ULL);
+    ST_CHECK(case_name, task != NULL, "BASH-LINUX.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa BASH-LINUX.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "BASH-LINUX.ELF exit code non e' 0");
+    return 0;
+}
+
 static int selftest_case_epoll_core(void)
 {
     static const char case_name[] = "epoll-core";
@@ -2555,6 +2584,48 @@ static int selftest_case_epoll_core(void)
         return -1;
     return st_expect_text_file(case_name, "/data/EPOLLDEMO.TXT",
                                "epoll core ok\n", 1);
+}
+
+static int selftest_case_sysv_ipc(void)
+{
+    static const char case_name[] = "sysv-ipc";
+    uint64_t ret;
+    int      rc;
+
+    rc = vfs_unlink("/data/SYSVIPC.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup SYSVIPC.TXT fallita");
+
+    ret = st_linux_syscall4(LINUX_NR_shmget,
+                            (uint64_t)SYSV_IPC_PRIVATE,
+                            (uint64_t)PAGE_SIZE,
+                            (uint64_t)SYSV_IPC_CREAT,
+                            0ULL);
+    ST_CHECK(case_name, (int64_t)ret > 0LL, "linux shmget fallita");
+    ST_CHECK(case_name, st_linux_syscall4(LINUX_NR_shmctl, ret,
+                                          (uint64_t)SYSV_IPC_RMID, 0ULL, 0ULL) == 0ULL,
+             "linux shmctl IPC_RMID fallita");
+
+    ret = st_linux_syscall4(LINUX_NR_semget,
+                            (uint64_t)SYSV_IPC_PRIVATE,
+                            1ULL,
+                            (uint64_t)SYSV_IPC_CREAT,
+                            0ULL);
+    ST_CHECK(case_name, (int64_t)ret > 0LL, "linux semget fallita");
+    ST_CHECK(case_name, st_linux_syscall4(LINUX_NR_semctl, ret, 0ULL,
+                                          (uint64_t)SYSV_SEM_SETVAL, 2ULL) == 0ULL,
+             "linux semctl SETVAL fallita");
+    ST_CHECK(case_name, st_linux_syscall4(LINUX_NR_semctl, ret, 0ULL,
+                                          (uint64_t)SYSV_SEM_GETVAL, 0ULL) == 2ULL,
+             "linux semctl GETVAL inattesa");
+    ST_CHECK(case_name, st_linux_syscall4(LINUX_NR_semctl, ret, 0ULL,
+                                          (uint64_t)SYSV_IPC_RMID, 0ULL) == 0ULL,
+             "linux semctl IPC_RMID fallita");
+
+    if (st_run_user_path(case_name, "/SYSVIPC.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/SYSVIPC.TXT",
+                               "sysv ipc ok\n", 1);
 }
 
 static int selftest_case_kbd_layout(void)
@@ -2750,6 +2821,7 @@ static const selftest_case_t selftest_cases[] = {
     { "procfs-core", selftest_case_procfs    },
     { "linux-proc-dev-etc", selftest_case_linux_proc_dev_etc },
     { "linux-at-paths", selftest_case_linux_at_paths },
+    { "sysv-ipc", selftest_case_sysv_ipc },
     { "mmap-file",   selftest_case_mmap_file },
     { "tls-tp",      selftest_case_tls_tp   },
     { "crt-startup", selftest_case_crt_startup },
@@ -2760,8 +2832,9 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-pipe",   selftest_case_musl_pipe },
     { "musl-glob",   selftest_case_musl_glob },
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
-    { "gnu-ls",      selftest_case_gnu_ls },
-    { "epoll-core",  selftest_case_epoll_core },
+    { "gnu-ls",          selftest_case_gnu_ls },
+    { "bash-linux-fork", selftest_case_bash_linux_fork },
+    { "epoll-core",      selftest_case_epoll_core },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
     { "mmu-user-va", selftest_case_mmu_user_va },

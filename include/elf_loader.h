@@ -78,6 +78,9 @@ sched_tcb_t  *elf64_spawn_image(const char *task_name, const elf_image_t *image,
                                 uint8_t priority);
 int           elf64_spawn_path(const char *path, const char *argv0,
                                uint8_t priority, uint32_t *pid_out);
+int           elf64_spawn_path_argv(const char *path,
+                                    const char *const *argv, uint64_t argc,
+                                    uint8_t priority, uint32_t *pid_out);
 int           elf64_spawn_demo(uint8_t priority, uint32_t *pid_out);
 int           elf64_dlopen_current(const char *path, uint32_t flags,
                                    uintptr_t *handle_out);

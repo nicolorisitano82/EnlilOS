@@ -2196,6 +2196,44 @@ int elf64_spawn_path(const char *path, const char *argv0,
     return 0;
 }
 
+int elf64_spawn_path_argv(const char *path,
+                          const char *const *argv, uint64_t argc,
+                          uint8_t priority, uint32_t *pid_out)
+{
+    static const char *const env_default[] = {
+        "PATH=/bin:/usr/bin",
+        "HOME=/home/user",
+        "PWD=/",
+        "SHELL=/bin/arksh",
+        "TERM=vt100",
+        "USER=user",
+    };
+    elf_image_t   image;
+    sched_tcb_t  *task;
+
+    if (elf64_load_from_path_exec(path, argv, argc,
+                                  env_default,
+                                  sizeof(env_default) / sizeof(env_default[0]),
+                                  &image) < 0)
+        return -1;
+
+    task = elf64_spawn_image("user-elf", &image, priority);
+    if (!task) {
+        elf64_unload_image(&image);
+        elf_set_error("spawn ELF fallita");
+        return -1;
+    }
+
+    (void)sched_task_set_abi_mode(task,
+                                  vfs_path_is_linux_compat(path)
+                                      ? SCHED_ABI_LINUX
+                                      : (uint32_t)image.abi_mode);
+    (void)sched_task_set_exec_path(task, path);
+
+    if (pid_out) *pid_out = task->pid;
+    return 0;
+}
+
 int elf64_spawn_demo(uint8_t priority, uint32_t *pid_out)
 {
     elf_image_t image;

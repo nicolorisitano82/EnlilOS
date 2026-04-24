@@ -72,6 +72,7 @@ C_SRCS   = kernel/main.c \
            kernel/cap.c \
            kernel/vmm.c \
            kernel/procfs.c \
+           kernel/sysv_ipc.c \
            kernel/vfs.c \
            kernel/sock.c \
            kernel/syscall.c \
@@ -93,7 +94,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/netd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/netd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c user/sysvipc_demo.c
 NETD_STACK_OBJ        = user/net_stack.o
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o) \
                         $(NETD_STACK_OBJ)
@@ -219,6 +220,8 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),bin/arksh.real=$(ARKSH_REAL_ELF),)
 LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
+BASH_LINUX_BINARY     = bash-linux/bash-linux-aarch64
+BASH_LINUX_INITRD     = $(if $(wildcard $(BASH_LINUX_BINARY)),BASH-LINUX.ELF=$(BASH_LINUX_BINARY),)
 INITRD_CPIO           = boot/initrd.cpio
 INITRD_EMBEDOBJ       = boot/initrd.embed.o
 KSYMS_DATA            = kernel/ksyms_data.c
@@ -477,6 +480,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		CLONEDEMO.ELF=user/clone_demo.elf \
 		THREADLIFE.ELF=user/thread_life_demo.elf \
 		FUTEXDEMO.ELF=user/futex_demo.elf \
+		SYSVIPC.ELF=user/sysvipc_demo.elf \
 		CRTDEMO.ELF=user/crt_demo.elf \
 		MUSLHELLO.ELF=toolchain/smoke/musl_hello.elf \
 		MUSLSTDIO.ELF=toolchain/smoke/musl_stdio.elf \
@@ -526,6 +530,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
+		$(BASH_LINUX_INITRD) \
 		$(LINUX_COMPAT_INITRD) NSH.ELF=user/nsh.elf
 
 $(INITRD_EMBEDOBJ): $(INITRD_CPIO)
