@@ -51,6 +51,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define FD_TYPE_VFSD    2
 #define FD_TYPE_PIPE    3
 #define FD_TYPE_SOCK    4
+#define FD_TYPE_EPOLL   5
 
 #define VFSD_HANDLE_MAX 64U
 #define FD_OBJECT_MAX   (SCHED_MAX_TASKS * MAX_FD)
@@ -60,6 +61,8 @@ extern void *memset(void *dst, int value, size_t n);
 #define FLOCK_MAX_LOCKS 32U
 #define FLOCK_MAX_HOLDERS 16U
 #define FLOCK_MAX_WAITERS SCHED_MAX_TASKS
+#define EPOLL_SET_MAX    16U
+#define EPOLL_INTEREST_MAX MAX_FD
 
 #define PIPE_END_READ   0U
 #define PIPE_END_WRITE  1U
@@ -147,16 +150,37 @@ typedef struct flock_waiter {
     struct flock_waiter *next;
 } flock_waiter_t;
 
+typedef struct {
+    uint8_t      in_use;
+    uint8_t      edge_triggered;
+    uint16_t     _pad0;
+    int32_t      fd;
+    uint32_t     events;
+    uint16_t     last_ready;
+    uint16_t     _pad1;
+    uint64_t     data;
+    fd_object_t *obj;
+} epoll_interest_t;
+
+typedef struct {
+    uint8_t          in_use;
+    uint8_t          _pad0[7];
+    epoll_interest_t interests[EPOLL_INTEREST_MAX];
+} epoll_set_t;
+
 #define FLOCK_WAKE_NONE   0U
 #define FLOCK_WAKE_LOCK   1U
 #define FLOCK_WAKE_INTR   2U
 
 static flock_entry_t flock_table[FLOCK_MAX_LOCKS];
 static flock_waiter_t flock_waiters[FLOCK_MAX_WAITERS];
+static epoll_set_t epoll_pool[EPOLL_SET_MAX];
 
 static void sock_sync_fd_flags(fd_object_t *obj);
 static int  netd_proxy_close(uint32_t handle);
 static void syscall_copy_fixed_string(char *dst, size_t cap, const char *src);
+static int  epoll_set_has_ready(const epoll_set_t *set);
+static uint16_t fd_poll_ready_mask(fd_object_t *obj);
 
 static int sock_handle_is_remote_netd(uint32_t handle)
 {
@@ -772,6 +796,9 @@ int syscall_describe_fd_current(int fd, char *out, size_t cap)
     case FD_TYPE_SOCK:
         syscall_copy_fixed_string(out, cap, "socket:[inet]");
         return 0;
+    case FD_TYPE_EPOLL:
+        syscall_copy_fixed_string(out, cap, "anon:[epoll]");
+        return 0;
     case FD_TYPE_VFS:
     case FD_TYPE_VFSD:
         syscall_copy_fixed_string(out, cap, "anon:[file]");
@@ -892,6 +919,11 @@ static void fd_object_put(fd_object_t *obj)
             (void)netd_proxy_close(sock_handle_from_remote_netd(obj->remote_handle));
         else
             sock_free((int)obj->remote_handle);
+    } else if (obj->type == FD_TYPE_EPOLL) {
+        epoll_set_t *set = (epoll_set_t *)obj->pipe;
+
+        if (set && set->in_use)
+            memset(set, 0, sizeof(*set));
     }
 
     memset(obj, 0, sizeof(*obj));
@@ -7376,6 +7408,127 @@ static uint64_t sys_linux_rseq(uint64_t args[6])
     return ERR(ENOSYS);
 }
 
+static epoll_set_t *epoll_set_alloc(void)
+{
+    for (uint32_t i = 0U; i < EPOLL_SET_MAX; i++) {
+        if (epoll_pool[i].in_use)
+            continue;
+        memset(&epoll_pool[i], 0, sizeof(epoll_pool[i]));
+        epoll_pool[i].in_use = 1U;
+        return &epoll_pool[i];
+    }
+    return NULL;
+}
+
+static epoll_interest_t *epoll_find_interest(epoll_set_t *set, int fd)
+{
+    if (!set)
+        return NULL;
+
+    for (uint32_t i = 0U; i < EPOLL_INTEREST_MAX; i++) {
+        epoll_interest_t *it = &set->interests[i];
+
+        if (!it->in_use)
+            continue;
+        if (it->fd == fd)
+            return it;
+    }
+    return NULL;
+}
+
+static epoll_interest_t *epoll_alloc_interest(epoll_set_t *set)
+{
+    if (!set)
+        return NULL;
+
+    for (uint32_t i = 0U; i < EPOLL_INTEREST_MAX; i++) {
+        epoll_interest_t *it = &set->interests[i];
+
+        if (it->in_use)
+            continue;
+        memset(it, 0, sizeof(*it));
+        it->in_use = 1U;
+        return it;
+    }
+    return NULL;
+}
+
+static uint16_t epoll_interest_revents(epoll_interest_t *it)
+{
+    fd_object_t *obj;
+    uint16_t     ready;
+    uint16_t     requested;
+    uint16_t     revents;
+
+    if (!it || !it->in_use)
+        return 0U;
+
+    obj = fd_get(it->fd);
+    if (!obj || obj != it->obj)
+        return (uint16_t)(LINUX_EPOLLERR | LINUX_EPOLLHUP);
+
+    ready = fd_poll_ready_mask(obj);
+    requested = (uint16_t)(it->events &
+                           (LINUX_EPOLLIN | LINUX_EPOLLPRI | LINUX_EPOLLOUT));
+    revents = (uint16_t)(ready &
+                         (requested | LINUX_EPOLLERR | LINUX_EPOLLHUP | LINUX_POLLNVAL));
+    if ((ready & LINUX_POLLNVAL) != 0U)
+        revents |= (uint16_t)(LINUX_EPOLLERR | LINUX_EPOLLHUP);
+    return revents;
+}
+
+static int epoll_scan_ready(epoll_set_t *set, linux_epoll_event_t *events,
+                            uint32_t maxevents, int consume)
+{
+    int ready = 0;
+
+    if (!set)
+        return -EINVAL;
+
+    for (uint32_t i = 0U; i < EPOLL_INTEREST_MAX; i++) {
+        epoll_interest_t    *it = &set->interests[i];
+        linux_epoll_event_t ev;
+        uint16_t            revents;
+        uint16_t            current_nonzero;
+
+        if (!it->in_use)
+            continue;
+
+        revents = epoll_interest_revents(it);
+        current_nonzero = (revents != 0U) ? 1U : 0U;
+
+        if (it->edge_triggered) {
+            if (current_nonzero == 0U || it->last_ready != 0U) {
+                if (consume)
+                    it->last_ready = current_nonzero;
+                continue;
+            }
+        } else if (revents == 0U) {
+            if (consume)
+                it->last_ready = 0U;
+            continue;
+        }
+
+        if (events && (uint32_t)ready < maxevents) {
+            memset(&ev, 0, sizeof(ev));
+            ev.events = (uint32_t)revents;
+            ev.data = it->data;
+            events[ready] = ev;
+        }
+        ready++;
+
+        if (consume)
+            it->last_ready = current_nonzero;
+    }
+
+    return ready;
+}
+
+static int epoll_set_has_ready(const epoll_set_t *set)
+{
+    return epoll_scan_ready((epoll_set_t *)set, NULL, 0U, 0) > 0 ? 1 : 0;
+}
+
 static uint16_t fd_poll_ready_mask(fd_object_t *obj)
 {
     uint16_t mask = 0U;
@@ -7411,6 +7564,16 @@ static uint16_t fd_poll_ready_mask(fd_object_t *obj)
             else if (pipe->size < PIPE_BUF_SIZE)
                 mask |= LINUX_POLLOUT;
         }
+        return mask;
+    }
+
+    if (obj->type == FD_TYPE_EPOLL) {
+        epoll_set_t *set = (epoll_set_t *)obj->pipe;
+
+        if (!set || !set->in_use)
+            return LINUX_POLLNVAL;
+        if (epoll_set_has_ready(set))
+            mask |= LINUX_POLLIN;
         return mask;
     }
 
@@ -7640,6 +7803,209 @@ static uint64_t sys_linux_pselect6(uint64_t args[6])
     return (uint64_t)ready;
 }
 
+static uint64_t sys_epoll_create1(uint64_t args[6])
+{
+    uint32_t     flags = (uint32_t)args[0];
+    uint8_t      fd_flags = 0U;
+    int          fd;
+    int          idx;
+    fd_object_t *obj;
+    epoll_set_t *set;
+
+    if ((flags & (uint32_t)~O_CLOEXEC) != 0U)
+        return ERR(EINVAL);
+    if ((flags & O_CLOEXEC) != 0U)
+        fd_flags |= FD_ENTRY_CLOEXEC;
+
+    fd = fd_alloc();
+    if (fd < 0)
+        return ERR(EMFILE);
+
+    obj = fd_object_alloc();
+    if (!obj)
+        return ERR(ENFILE);
+
+    set = epoll_set_alloc();
+    if (!set) {
+        memset(obj, 0, sizeof(*obj));
+        return ERR(ENFILE);
+    }
+
+    obj->type = FD_TYPE_EPOLL;
+    obj->pipe = set;
+    syscall_copy_fixed_string(obj->path, sizeof(obj->path), "anon:[epoll]");
+
+    idx = task_idx();
+    if (idx < 0 || idx >= SCHED_MAX_TASKS ||
+        fd_attach_object(&fd_tables[idx][fd], obj) < 0) {
+        memset(set, 0, sizeof(*set));
+        memset(obj, 0, sizeof(*obj));
+        return ERR(ENFILE);
+    }
+    fd_tables[idx][fd].fd_flags = fd_flags;
+    return (uint64_t)fd;
+}
+
+static uint64_t sys_epoll_ctl(uint64_t args[6])
+{
+    int                  epfd = (int)args[0];
+    int                  op = (int)args[1];
+    int                  fd = (int)args[2];
+    uintptr_t            event_uva = (uintptr_t)args[3];
+    fd_object_t         *epobj = fd_get(epfd);
+    fd_object_t         *target;
+    epoll_set_t         *set;
+    epoll_interest_t    *it;
+    linux_epoll_event_t  ev;
+    uint32_t             supported = (LINUX_EPOLLIN | LINUX_EPOLLPRI | LINUX_EPOLLOUT |
+                                      LINUX_EPOLLERR | LINUX_EPOLLHUP | LINUX_EPOLLRDHUP |
+                                      LINUX_EPOLLET);
+    int                  rc;
+
+    if (!epobj)
+        return ERR(EBADF);
+    if (epobj->type != FD_TYPE_EPOLL)
+        return ERR(EINVAL);
+    if (fd < 0 || fd >= MAX_FD)
+        return ERR(EBADF);
+    if (fd == epfd)
+        return ERR(EINVAL);
+
+    target = fd_get(fd);
+    if (!target)
+        return ERR(EBADF);
+
+    set = (epoll_set_t *)epobj->pipe;
+    if (!set || !set->in_use)
+        return ERR(EINVAL);
+
+    if (op != LINUX_EPOLL_CTL_DEL) {
+        if (!event_uva)
+            return ERR(EFAULT);
+        rc = user_copy_bytes(event_uva, &ev, sizeof(ev));
+        if (rc < 0)
+            return ERR(-rc);
+        if ((ev.events & ~supported) != 0U)
+            return ERR(EINVAL);
+    } else {
+        memset(&ev, 0, sizeof(ev));
+    }
+
+    it = epoll_find_interest(set, fd);
+
+    switch (op) {
+    case LINUX_EPOLL_CTL_ADD:
+        if (it)
+            return ERR(EEXIST);
+        it = epoll_alloc_interest(set);
+        if (!it)
+            return ERR(ENOSPC);
+        it->fd = fd;
+        it->obj = target;
+        it->events = ev.events;
+        it->edge_triggered = ((ev.events & LINUX_EPOLLET) != 0U) ? 1U : 0U;
+        it->data = ev.data;
+        it->last_ready = 0U;
+        return 0ULL;
+    case LINUX_EPOLL_CTL_MOD:
+        if (!it)
+            return ERR(ENOENT);
+        it->obj = target;
+        it->events = ev.events;
+        it->edge_triggered = ((ev.events & LINUX_EPOLLET) != 0U) ? 1U : 0U;
+        it->data = ev.data;
+        it->last_ready = 0U;
+        return 0ULL;
+    case LINUX_EPOLL_CTL_DEL:
+        if (!it)
+            return ERR(ENOENT);
+        memset(it, 0, sizeof(*it));
+        return 0ULL;
+    default:
+        return ERR(EINVAL);
+    }
+}
+
+static uint64_t sys_epoll_pwait(uint64_t args[6])
+{
+    int                  epfd = (int)args[0];
+    uintptr_t            events_uva = (uintptr_t)args[1];
+    int                  maxevents = (int)args[2];
+    int                  timeout_ms = (int)args[3];
+    fd_object_t         *epobj = fd_get(epfd);
+    epoll_set_t         *set;
+    linux_epoll_event_t  out[MAX_FD];
+    uint64_t             deadline = (uint64_t)-1ULL;
+    int                  ready;
+    int                  store_count;
+    int                  rc;
+
+    (void)args[4];
+    (void)args[5];
+
+    if (!epobj)
+        return ERR(EBADF);
+    if (epobj->type != FD_TYPE_EPOLL)
+        return ERR(EINVAL);
+    if (maxevents <= 0 || maxevents > MAX_FD)
+        return ERR(EINVAL);
+    if (!events_uva)
+        return ERR(EFAULT);
+    if (timeout_ms < -1)
+        return ERR(EINVAL);
+
+    set = (epoll_set_t *)epobj->pipe;
+    if (!set || !set->in_use)
+        return ERR(EINVAL);
+
+    if (timeout_ms >= 0)
+        deadline = timer_now_ns() + (uint64_t)timeout_ms * 1000000ULL;
+
+    for (;;) {
+        ready = epoll_scan_ready(set, out, (uint32_t)maxevents, 1);
+        if (ready > 0)
+            break;
+        if (signal_has_unblocked_pending(current_task))
+            return ERR(EINTR);
+        if (timeout_ms == 0)
+            break;
+        if (deadline != (uint64_t)-1ULL && timer_now_ns() >= deadline)
+            break;
+        sched_yield();
+    }
+
+    store_count = (ready > maxevents) ? maxevents : ready;
+    if (store_count > 0) {
+        rc = user_store_bytes(events_uva, out, (size_t)store_count * sizeof(out[0]));
+        if (rc < 0)
+            return ERR(-rc);
+    }
+    return (uint64_t)(store_count > 0 ? store_count : 0);
+}
+
+static uint64_t sys_linux_epoll_create1(uint64_t args[6])
+{
+    uint64_t native_args[6];
+    uint32_t flags = (uint32_t)args[0];
+
+    memset(native_args, 0, sizeof(native_args));
+    if ((flags & (uint32_t)~LINUX_EPOLL_CLOEXEC) != 0U)
+        return ERR(EINVAL);
+    if ((flags & LINUX_EPOLL_CLOEXEC) != 0U)
+        native_args[0] = O_CLOEXEC;
+    return sys_epoll_create1(native_args);
+}
+
+static uint64_t sys_linux_epoll_ctl(uint64_t args[6])
+{
+    return sys_epoll_ctl(args);
+}
+
+static uint64_t sys_linux_epoll_pwait(uint64_t args[6])
+{
+    return sys_epoll_pwait(args);
+}
+
 static uint64_t sys_linux_rt_sigaction(uint64_t args[6])
 {
     int                sig = (int)args[0];
@@ -7829,6 +8195,7 @@ void syscall_init(void)
     sock_init();
     memset(fd_objects, 0, sizeof(fd_objects));
     memset(pipe_pool, 0, sizeof(pipe_pool));
+    memset(epoll_pool, 0, sizeof(epoll_pool));
     for (int i = 0; i < SCHED_MAX_TASKS; i++) {
         fd_init_slot_defaults(i);
     }
@@ -8223,6 +8590,9 @@ void syscall_init(void)
     syscall_table[SYS_SHUTDOWN]   = (syscall_entry_t){ sys_shutdown,   0, "shutdown"   };
     syscall_table[SYS_PRLIMIT64]  = (syscall_entry_t){ sys_prlimit64,  0, "prlimit64"  };
     syscall_table[SYS_REBOOT]     = (syscall_entry_t){ sys_reboot,     0, "reboot"     };
+    syscall_table[SYS_EPOLL_CREATE1] = (syscall_entry_t){ sys_epoll_create1, 0, "epoll_create1" };
+    syscall_table[SYS_EPOLL_CTL]     = (syscall_entry_t){ sys_epoll_ctl,     0, "epoll_ctl" };
+    syscall_table[SYS_EPOLL_PWAIT]   = (syscall_entry_t){ sys_epoll_pwait,   0, "epoll_pwait" };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,
@@ -8341,6 +8711,9 @@ void syscall_init(void)
                        SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_sysinfo");
     linux_syscall_bind(LINUX_NR_getrandom, sys_linux_getrandom, 0, "linux_getrandom");
     linux_syscall_bind(LINUX_NR_rseq, sys_linux_rseq, 0, "linux_rseq");
+    linux_syscall_bind(LINUX_NR_epoll_create1, sys_linux_epoll_create1, 0, "linux_epoll_create1");
+    linux_syscall_bind(LINUX_NR_epoll_ctl, sys_linux_epoll_ctl, 0, "linux_epoll_ctl");
+    linux_syscall_bind(LINUX_NR_epoll_pwait, sys_linux_epoll_pwait, 0, "linux_epoll_pwait");
     linux_syscall_bind(LINUX_NR_pselect6, sys_linux_pselect6, 0, "linux_pselect6");
     linux_syscall_bind(LINUX_NR_ppoll, sys_linux_ppoll, 0, "linux_ppoll");
     linux_syscall_bind(LINUX_NR_socket, sys_linux_socket, 0, "linux_socket");

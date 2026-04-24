@@ -14,6 +14,9 @@
 /* Linux AArch64 syscall numbers (subset M11-05 v1) */
 #define LINUX_NR_io_setup          0
 #define LINUX_NR_getcwd            17
+#define LINUX_NR_epoll_create1     20
+#define LINUX_NR_epoll_ctl         21
+#define LINUX_NR_epoll_pwait       22
 #define LINUX_NR_dup               23
 #define LINUX_NR_dup3              24
 #define LINUX_NR_fcntl             25
@@ -122,6 +125,20 @@
 #define LINUX_POLLHUP       0x0010U
 #define LINUX_POLLNVAL      0x0020U
 
+/* Linux epoll flags */
+#define LINUX_EPOLL_CLOEXEC 0x00080000U
+#define LINUX_EPOLLIN       LINUX_POLLIN
+#define LINUX_EPOLLPRI      LINUX_POLLPRI
+#define LINUX_EPOLLOUT      LINUX_POLLOUT
+#define LINUX_EPOLLERR      LINUX_POLLERR
+#define LINUX_EPOLLHUP      LINUX_POLLHUP
+#define LINUX_EPOLLRDHUP    0x2000U
+#define LINUX_EPOLLET       0x80000000U
+
+#define LINUX_EPOLL_CTL_ADD 1
+#define LINUX_EPOLL_CTL_DEL 2
+#define LINUX_EPOLL_CTL_MOD 3
+
 /* Linux flock operations */
 #define LINUX_LOCK_SH       1U
 #define LINUX_LOCK_EX       2U
@@ -224,6 +241,12 @@ typedef struct {
     int16_t  events;
     int16_t  revents;
 } linux_pollfd_t;
+
+typedef struct {
+    uint32_t events;
+    uint32_t _pad;
+    uint64_t data;
+} linux_epoll_event_t;
 
 typedef struct {
     int64_t tv_sec;

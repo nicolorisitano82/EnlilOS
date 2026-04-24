@@ -18,7 +18,7 @@ Le milestone completate oggi coprono:
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M10**: driver `virtio-net` MMIO `v1`, `netd` bootstrap con stack IPv4/ARP/ICMP/UDP/TCP minimale e BSD socket API `v1` (`AF_INET`, `SOCK_STREAM`/`SOCK_DGRAM`) loopback-only su `127.0.0.1`.
-- **M11-05a**: compat Linux AArch64 `v1` già operativa, con tabella syscall separata, mount compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`), supporto `ET_EXEC` low-VA tramite alias user-space e `bash-linux` statico funzionante da `/data/bash-linux`.
+- **M11-05a/b**: compat Linux AArch64 `v1` già operativa, con tabella syscall separata, mount compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`), supporto `ET_EXEC` low-VA tramite alias user-space, `bash-linux` statico funzionante da `/data/bash-linux` ed `epoll_create1/ctl/pwait` bounded per il profilo shell/tool Linux.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
 - **M11-02a/b/c/d/e**: profilo multi-thread `v1` chiuso, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond`, TLS statico multi-thread per `__thread`, `errno` thread-local e smoke `musl-pthread` + `musl-sem` + `tls-mt`.
@@ -26,7 +26,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=51 pass=51 fail=0`.
+`SUMMARY total=52 pass=52 fail=0`.
 
 ---
 
@@ -278,6 +278,7 @@ La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili
 - `runelf /MUSLFORK.ELF`
 - `runelf /MUSLPIPE.ELF`
 - `runelf /MUSLGLOB.ELF`
+- `epolldemo`
 - `runelf PATH`
 - `nsh`
 - `selftest`, `selftest [nome]`
@@ -318,7 +319,7 @@ solo loopback `127.0.0.1` per ora. Il comando `socketdemo` lancia
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 51 casi:
+Esiste una suite di self-test kernel-side che oggi copre 52 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`, `net-core`, `net-stack`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
@@ -327,6 +328,7 @@ Esiste una suite di self-test kernel-side che oggi copre 51 casi:
 - `kdebug-core`, `gpu-stack`, `procfs-core`, `linux-proc-dev-etc`, `linux-at-paths`, `mmap-file`, `tls-tp`, `crt-startup`
 - `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`
 - `musl-dlfcn`
+- `epoll-core`
 - `arksh-toolchain`, `arksh-login`
 - `kbd-layout`, `gnu-ls`, `mmu-user-va`
 - `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`
@@ -346,7 +348,7 @@ in halt dopo il summary finale.
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=51 pass=51 fail=0
+SUMMARY total=52 pass=52 fail=0
 ```
 
 Nota: se il selftest si blocca prima del poweroff, conviene leggere il log seriale

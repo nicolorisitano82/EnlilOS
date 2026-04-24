@@ -77,6 +77,11 @@
 /* Reboot/poweroff */
 #define SYS_REBOOT          213
 
+/* epoll v1 */
+#define SYS_EPOLL_CREATE1   214
+#define SYS_EPOLL_CTL       215
+#define SYS_EPOLL_PWAIT     216
+
 /* BSD socket API (M10-03) */
 #define SYS_SOCKET          200
 #define SYS_BIND            201

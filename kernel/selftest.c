@@ -2543,6 +2543,20 @@ static int selftest_case_gnu_ls(void)
     return st_run_user_path(case_name, "/LS.ELF", 3000ULL);
 }
 
+static int selftest_case_epoll_core(void)
+{
+    static const char case_name[] = "epoll-core";
+    int rc;
+
+    rc = vfs_unlink("/data/EPOLLDEMO.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup EPOLLDEMO.TXT fallita");
+    if (st_run_user_path(case_name, "/EPOLLDEMO.ELF", 3000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/EPOLLDEMO.TXT",
+                               "epoll core ok\n", 1);
+}
+
 static int selftest_case_kbd_layout(void)
 {
     return (keyboard_selftest_run() == 0) ? 0 : -1;
@@ -2747,6 +2761,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-glob",   selftest_case_musl_glob },
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
     { "gnu-ls",      selftest_case_gnu_ls },
+    { "epoll-core",  selftest_case_epoll_core },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
     { "mmu-user-va", selftest_case_mmu_user_va },

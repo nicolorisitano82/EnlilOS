@@ -140,6 +140,7 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/ctype.h \
                         $(MUSL_ROOT)/include/dlfcn.h \
                         $(MUSL_ROOT)/include/dirent.h \
+                        $(MUSL_ROOT)/include/sys/epoll.h \
                         $(MUSL_ROOT)/include/fcntl.h \
                         $(MUSL_ROOT)/include/fnmatch.h \
                         $(MUSL_ROOT)/include/glob.h \
@@ -172,6 +173,7 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/ctype.c \
                         $(MUSL_ROOT)/src/dlfcn.c \
                         $(MUSL_ROOT)/src/dirent.c \
+                        $(MUSL_ROOT)/src/epoll.c \
                         $(MUSL_ROOT)/src/fnmatch.c \
                         $(MUSL_ROOT)/src/glob.c \
                         $(MUSL_ROOT)/src/posix.c \
@@ -207,6 +209,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/kbdlayout.c \
                         toolchain/smoke/socket_demo.c \
                         toolchain/smoke/net_outbound.c \
+                        toolchain/smoke/epoll_demo.c \
                         toolchain/smoke/poweroff.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
@@ -490,6 +493,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		TLSMTDEMO.ELF=toolchain/smoke/musl_tls_mt.elf \
 		SOCKDEMO.ELF=toolchain/smoke/socket_demo.elf \
 		NETOUT.ELF=toolchain/smoke/net_outbound.elf \
+		EPOLLDEMO.ELF=toolchain/smoke/epoll_demo.elf \
 		POWEROFF.ELF=toolchain/smoke/poweroff.elf \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
@@ -497,6 +501,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		bin/nsh=user/nsh.elf \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
 		$(ARKSH_REAL_INITRD) \
+		usr/bin/epolldemo=toolchain/smoke/epoll_demo.elf \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
 		sbin/poweroff=toolchain/smoke/poweroff.elf \

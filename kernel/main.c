@@ -1544,7 +1544,7 @@ static void bootcli_render(void)
                       "socketdemo clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 172U,
-                      "crtdemo | net mostra MAC/link/counter virtio-net e stato del bootstrap",
+                      "crtdemo epolldemo | net mostra MAC/link/counter virtio-net e stato del bootstrap",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1703,6 +1703,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("pthreaddemo lancia un ELF che verifica pthread/mutex/cond/signal");
         bootcli_push_line("semdemo   lancia un ELF che verifica sem_t sopra ksem");
         bootcli_push_line("tlsmtdemo lancia un ELF che verifica __thread + errno per-thread");
+        bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
@@ -2094,6 +2095,16 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "epolldemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/EPOLLDEMO.ELF", "/EPOLLDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "epoll demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "crtdemo")) {
         uint32_t pid = 0U;
         if (elf64_spawn_path("/CRTDEMO.ELF", "/CRTDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
@@ -2321,6 +2332,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-02c: prova 'futexdemo' per FUTEX_WAIT/WAKE/REQUEUE e join via clear_child_tid.");
     bootcli_push_line("M11-02d: prova 'pthreaddemo' e 'semdemo' per pthread/mutex/cond/signal e sem_t POSIX.");
     bootcli_push_line("M11-02e: prova 'tlsmtdemo' per TLS multi-thread, __thread ed errno per-thread.");
+    bootcli_push_line("M11-05b: prova 'epolldemo' per epoll_create1(), ctl(), edge-trigger e timeout.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");

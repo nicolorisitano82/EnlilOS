@@ -151,6 +151,11 @@
 /* ── Reboot/poweroff: 213 ───────────────────────────────────────── */
 #define SYS_REBOOT          213
 
+/* ── epoll v1 (M11-05b): 214–216 ───────────────────────────────── */
+#define SYS_EPOLL_CREATE1   214
+#define SYS_EPOLL_CTL       215
+#define SYS_EPOLL_PWAIT     216
+
 /* cmd valori (compatibili con Linux reboot(2)) */
 #define REBOOT_CMD_RESTART      0x01234567U
 #define REBOOT_CMD_HALT         0xCDEF0123U
@@ -203,6 +208,7 @@
 #define EISDIR              21
 #define EINVAL              22
 #define ENFILE              23
+#define EMFILE              24
 #define ENOSPC              28
 #define EROFS               30
 #define EPIPE               32

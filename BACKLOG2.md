@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=51 pass=51 fail=0`
+- suite runtime piu' recente: `SUMMARY total=52 pass=52 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1173,7 +1173,7 @@ Migra `drivers/blk.c` (M5-01) fuori dal kernel. Il driver virtio-blk diventa un 
 
 - `AF_UNIX` rinviato: non ancora implementato
 - socket API oggi usa un backend loopback kernel-side, non espone ancora la rete esterna del profilo `netd`
-- no `select/poll/epoll`
+- no `select/poll` nativi sulla socket API `v1`; `epoll` Linux compat è disponibile da `M11-05b`
 - no resolver / `getaddrinfo()` kernel-side
 
 ---
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=51 pass=51 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=52 pass=52 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1738,8 +1738,9 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 > 3. primo layer filesystem compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`)
 > 4. un subset ampio di syscall Linux già funzionanti
 >
-> Il lavoro residuo non è più “iniziare la compatibilità”, ma chiudere:
-> - l'hardening semantico residuo del vertical slice `M11-05a`
+> Il lavoro residuo non è più “iniziare la compatibilità”, ma proseguire dopo
+> la chiusura `v1` di `M11-05a` con:
+> - l'hardening semantico residuo del vertical slice Linux compat
 > - `epoll` (`M11-05b`)
 > - System V IPC (`M11-05c`)
 > - loader/linker e shim glibc più completi (`M11-05d/g`)
@@ -1751,7 +1752,7 @@ Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreut
 ---
 
 #### M11-05a · Syscall Linux Mancanti
-**Stato attuale:** completata `v1` per `bash-linux` statico, con residuo di hardening
+**Stato attuale:** **chiusa `v1`**, con residuo di hardening fuori dal criterio di done iniziale
 
 Il backlog storico di questa sottostoria è rimasto indietro rispetto al codice.
 Oggi EnlilOS ha già una larga parte del subset Linux AArch64 realmente bindato nella
@@ -1790,7 +1791,7 @@ tabella compat, quindi qui sotto teniamo separati:
 - `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
 - `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
 - smoke reale: `/data/bash-linux -c 'echo ok'`
-- suite selftest piu' recente: `51/51`
+- suite selftest piu' recente: `52/52`
 
 **Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
@@ -1810,43 +1811,45 @@ tabella compat, quindi qui sotto teniamo separati:
 - `linux-at-paths` per `symlinkat`, `readlink`, `lstat`, `utimensat` e semantica directory/file su `unlinkat`
 
 **Criterio di chiusura aggiornato**
-- `M11-05a` e' considerata chiusa in `v1` quando il profilo shell/tool Linux statico resta stabile
-- i residui sopra passano in hardening del layer Linux compat, non bloccano piu' `bash-linux`
-- da qui il focus si sposta su `M11-05b/c/d/e/f/g`
+- `M11-05a` e' da considerare **chiusa in `v1`**: il profilo shell/tool Linux statico e' stabile e validato
+- i residui sopra passano in hardening del layer Linux compat, non bloccano piu' `bash-linux` ne' il vertical slice gia' consegnato
+- da qui il focus operativo si sposta su `M11-05b/c/d/e/f/g`
 
 ---
 
 #### M11-05b · epoll — Event Polling Scalabile
+**Stato attuale:** **chiusa `v1`**
 
 `epoll` è richiesto da ogni server Linux moderno (`nginx`, `node`, `python asyncio`).
-Rimpiazza `select`/`poll` con O(1) per evento invece di O(N) su tutti i fd.
+In EnlilOS oggi è disponibile un profilo bounded già sufficiente per il vertical slice
+Linux compat shell/tool.
 
-```c
-/* Kernel: set epoll statico per processo */
-typedef struct {
-    int          fd;
-    uint32_t     events;     /* EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLET */
-    uint64_t     data;       /* user data opaco */
-} epoll_event_t;
+**Deliverable chiusi**
+- syscall native: `SYS_EPOLL_CREATE1`, `SYS_EPOLL_CTL`, `SYS_EPOLL_PWAIT`
+- binding Linux AArch64: `epoll_create1`, `epoll_ctl`, `epoll_pwait`
+- nuovo `FD_TYPE_EPOLL` kernel-side con pool statico di epoll set
+- supporto `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`
+- supporto `EPOLLIN`, `EPOLLPRI`, `EPOLLOUT`, `EPOLLERR`, `EPOLLHUP`, `EPOLLRDHUP`, `EPOLLET`
+- supporto `EPOLL_CLOEXEC`
+- smoke `/EPOLLDEMO.ELF`, comando boot `epolldemo` e selftest `epoll-core`
 
-typedef struct {
-    epoll_event_t  interests[MAX_EPOLL_FDS];  /* fd registrati */
-    uint32_t       n;
-    sched_tcb_t   *waiter;
-} epoll_set_t;
+**Semantica v1**
+- pool statico: `16` epoll set
+- interessi per set bounded a `MAX_FD`
+- readiness costruita sopra il core già usato da `ppoll/pselect6`
+- `epoll` può essere osservato a sua volta come fd readable quando ha eventi pronti
+- edge-triggered gestito con tracking della transizione `not-ready -> ready`
+- timeout e `EINTR` già chiusi per il path `epoll_pwait`
 
-#define MAX_EPOLL_SETS  16
-#define MAX_EPOLL_FDS   256
-static epoll_set_t epoll_pool[MAX_EPOLL_SETS];
-```
+**Limiti dichiarati onestamente**
+- wait path ancora cooperativo con `sched_yield()`, non callback-driven
+- `sigmask` di `epoll_pwait()` ignorata in `v1`
+- nessuna wake queue dedicata per fd né fanout callback dai backend VFS/socket
+- scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
-- `epoll_create1(flags)` — alloca un `epoll_set_t` dal pool; ritorna fd "epoll"
-- `epoll_ctl(epfd, EPOLL_CTL_ADD/MOD/DEL, fd, event)` — modifica il set
-- `epoll_wait(epfd, events, maxevents, timeout_ms)`:
-  - Itera sugli fd registrati, controlla disponibilità (read/write ready)
-  - Se nessuno pronto + timeout > 0: blocca con `sched_block(timeout_ms * 1_000_000)`
-  - Il VFS server notifica l'epoll set quando un fd diventa readable/writable via callback
-  - Edge-triggered (`EPOLLET`): notifica solo alla transizione not-ready → ready
+**Validazione runtime**
+- selftest completo più recente: `SUMMARY total=52 pass=52 fail=0`
+- `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
 
@@ -3305,7 +3308,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a v1`: suite `selftest` a `51/51`.
+> Stato verificato dopo la chiusura di `M11-05a/b v1`: suite `selftest` a `52/52`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3325,7 +3328,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05b/c/d/e/f/g** hardening Linux compatibility layer | `M11-05a + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare `epoll`, SysV IPC, glibc shims e PTY |
+| 3 | **M11-05c/d/e/f/g** hardening Linux compatibility layer | `M11-05a/b + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare SysV IPC, glibc shims e PTY |
 | 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
@@ -3366,7 +3369,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05b/c/d/e/f/g`
+3. `M11-05c/d/e/f/g`
 4. `M12-01`
 5. `M12-02`
 6. `M13-02`
