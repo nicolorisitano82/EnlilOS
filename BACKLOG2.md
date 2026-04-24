@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=52 pass=52 fail=0`
+- suite runtime piu' recente: `SUMMARY total=53 pass=53 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=52 pass=52 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=53 pass=53 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1742,7 +1742,7 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 > la chiusura `v1` di `M11-05a` con:
 > - l'hardening semantico residuo del vertical slice Linux compat
 > - `epoll` (`M11-05b`)
-> - System V IPC (`M11-05c`)
+> - hardening Linux compat residuo (`M11-05d/e/f/g`)
 > - loader/linker e shim glibc più completi (`M11-05d/g`)
 > - filesystem Linux-like e PTY completi (`M11-05e/f`)
 
@@ -1791,7 +1791,7 @@ tabella compat, quindi qui sotto teniamo separati:
 - `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
 - `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
 - smoke reale: `/data/bash-linux -c 'echo ok'`
-- suite selftest piu' recente: `52/52`
+- suite selftest piu' recente: `53/53`
 
 **Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
@@ -1802,7 +1802,7 @@ tabella compat, quindi qui sotto teniamo separati:
 
 **Fuori da `M11-05a` e già spostati correttamente**
 - `epoll_*` appartiene a `M11-05b`
-- `shm*` e `sem*` System V appartengono a `M11-05c`
+- `shm*` e `sem*` System V sono ora chiusi in `M11-05c v1`
 - il vecchio riferimento a `select/poll` generici è obsoleto sul path AArch64 Linux:
   il profilo attuale usa già `pselect6/ppoll`
 
@@ -1848,27 +1848,46 @@ Linux compat shell/tool.
 - scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=52 pass=52 fail=0`
+- selftest completo più recente: `SUMMARY total=53 pass=53 fail=0`
 - `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
 
 #### M11-05c · System V IPC (shmem, semafori)
+**Stato attuale:** **chiusa `v1`**
 
 I binari Linux spesso usano System V IPC per shared memory inter-processo.
-EnlilOS lo implementa come thin wrapper sopra le primitive native:
+EnlilOS espone ora un profilo bounded e già verificato per shared memory e
+set di semafori, sufficiente per il vertical slice Linux compat attuale.
 
-**Shared Memory System V (`shmget`/`shmat`/`shmctl`):**
-- `shmget(key, size, flags)` → alloca `phys_alloc_pages(order)` + registra in `shm_table[key]`
-- `shmat(shmid, addr, flags)` → mappa le pagine nell'address space del chiamante via MMU
-- `shmctl(shmid, IPC_RMID, ...)` → decrementa refcount; libera quando zero
-- Pool statico: `shm_table[64]` — max 64 segmenti shared memory simultanei
-- Implementazione naturale sopra l'MMU identity-map già presente (M1-02)
+**Deliverable chiusi**
+- syscall native: `SYS_SHMGET`, `SYS_SHMAT`, `SYS_SHMDT`, `SYS_SHMCTL`, `SYS_SEMGET`, `SYS_SEMOP`, `SYS_SEMCTL`
+- binding Linux AArch64: `shmget`, `shmat`, `shmdt`, `shmctl`, `semget`, `semop`, `semtimedop`, `semctl`
+- shared memory System V sopra backing fisico reale con mapping user-space condiviso
+- `IPC_PRIVATE`, `IPC_CREAT`, `IPC_EXCL`, `IPC_RMID`
+- `shmat()` con supporto `addr == 0`, address hint esplicito, `SHM_RDONLY`, `SHM_RND`
+- `shmdt()` con detach reale dal processo corrente
+- set di semafori System V con `semget`, `semop` atomico multi-operazione, `IPC_NOWAIT`
+- `semctl` subset: `IPC_RMID`, `GETVAL`, `SETVAL`
+- demo `/SYSVIPC.ELF`, comando boot `sysvipcdemo` e selftest `sysv-ipc`
 
-**Semafori System V (`semget`/`semop`/`semctl`):**
-- `semget(key, nsems, flags)` → crea array di `nsems` ksem (M8-06) con chiave IPC
-- `semop(semid, sops, nsops)` → esegue array di P/V operazioni atomicamente
-- `semctl(semid, semnum, IPC_RMID)` → distrugge il set
+**Semantica v1**
+- pool statico shared memory: `64` segmenti
+- pool statico attach: `256` attach contemporanei
+- pool statico semafori: `32` set, fino a `16` semafori per set
+- `semop()` supporta attese su decremento, attesa su zero, operazioni positive, timeout per il path Linux `semtimedop`
+- cleanup su exit/exec del processo con rilascio attach bookkeeping
+- distruzione deferred dei segmenti marcati `IPC_RMID` finché esistono ancora attachment attivi
+
+**Limiti dichiarati onestamente**
+- nessuna message queue System V in questa wave
+- `semctl` non copre ancora l'intero set di comandi Linux/System V
+- wait path dei semafori ancora cooperativo con `sched_yield()`, non ancora su primitive sleep/wake dedicate
+- i timestamp e metadati avanzati IPC non sono ancora esportati in una forma Linux completa
+
+**Validazione runtime**
+- selftest completo più recente: `SUMMARY total=53 pass=53 fail=0`
+- `sysv-ipc` verifica binding Linux minimi (`shm*`, `sem*`) e smoke end-to-end via `/SYSVIPC.ELF`
 
 ---
 
@@ -3308,7 +3327,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b v1`: suite `selftest` a `52/52`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c v1`: suite `selftest` a `53/53`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3328,7 +3347,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05c/d/e/f/g** hardening Linux compatibility layer | `M11-05a/b + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare SysV IPC, glibc shims e PTY |
+| 3 | **M11-05d/e/f/g** hardening Linux compatibility layer | `M11-05a/b/c + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare glibc shims, PTY e fs Linux-like |
 | 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
@@ -3369,7 +3388,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05c/d/e/f/g`
+3. `M11-05d/e/f/g`
 4. `M12-01`
 5. `M12-02`
 6. `M13-02`

@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=52 pass=52 fail=0`
+- Stato validato: `SUMMARY total=54 pass=54 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -518,21 +518,22 @@ Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64
 Run di riferimento:
 
 ```text
-SUMMARY total=52 pass=52 fail=0
+SUMMARY total=54 pass=54 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
 2. **M8-08h** — i18n / localizzazione stringhe
-3. **M11-05c/d/e/f/g** — hardening Linux compat (SysV IPC, glibc shims, PTY, fs Linux-like)
+3. **M11-05d/e/f/g** — hardening Linux compat residuo (glibc shims, PTY, fs Linux-like)
 4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 6. **M13-02** — SMP bootstrap
 7. **M13-03** — scheduler multicore
-### Stato operativo M11-05a/b / bash-linux + epoll
+### Stato operativo M11-05a/b/c / bash-linux + epoll + SysV IPC
 
 - `M11-05a` e' chiusa in `v1`: `bash-linux` statico funziona davvero.
 - `M11-05b` e' chiusa in `v1`: `epoll_create1/ctl/pwait` sono disponibili sia nativamente sia nella tabella Linux AArch64.
+- `M11-05c` e' chiusa in `v1`: System V shared memory e semaphore set sono disponibili sia nativamente sia nella tabella Linux AArch64.
 - Smoke reale validato:
   ```sh
   /data/bash-linux -c 'echo ok'
@@ -547,15 +548,17 @@ SUMMARY total=52 pass=52 fail=0
   - `brk()` reale con backing high-VA + alias low-VA per heap glibc/malloc
   - `/proc/self/exe` e `/proc/self/fd/*` corretti lato procfs/VFS
   - `symlinkat`, `readlinkat`, `AT_REMOVEDIR`, `AT_SYMLINK_NOFOLLOW`
+  - `utimensat`
   - `flock v1` con coda FIFO dedicata e deadlock detection best-effort
   - `epoll` bounded con `FD_TYPE_EPOLL`, `EPOLL_CTL_ADD/MOD/DEL`, `EPOLLET`, timeout e `EINTR`
+  - System V IPC bounded con `shmget/shmat/shmdt/shmctl` e `semget/semop/semtimedop/semctl`
 - Hardening ancora aperto ma non piu' bloccante per shell/tool Linux statici:
-  - `utimensat`
   - `mprotect` MMU completa
   - `prlimit64` write-side piu' ricca
   - alcuni stub Linux coerenti (`ptrace`, `setuid`, `sched_*affinity`, ecc.)
 - Smoke interattivo validato: `runelf bash-linux` → prompt appare → `ls` → output → prompt torna. I bug che bloccavano questo path sono descritti nella sezione knowledge operativa bash-linux più sotto.
 - Smoke `epoll` validato: `/EPOLLDEMO.ELF`, comando boot `epolldemo`, selftest `epoll-core`.
+- Smoke `sysvipc` validato: `/SYSVIPC.ELF`, comando boot `sysvipcdemo`, selftest `sysv-ipc`.
 
 ### Knowledge operativa M8-08a/b/c (pipe, cwd/env, termios)
 

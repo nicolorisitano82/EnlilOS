@@ -218,6 +218,12 @@ int         mmu_map_user_region(mm_space_t *space, uintptr_t start,
                                 size_t size, uint32_t prot);
 int         mmu_map_user_anywhere(mm_space_t *space, size_t size,
                                   uint32_t prot, uintptr_t *start_out);
+int         mmu_map_user_phys_region(mm_space_t *space, uintptr_t start,
+                                     uint64_t pa, size_t size,
+                                     uint32_t prot, int retain_pages);
+int         mmu_map_user_phys_anywhere(mm_space_t *space, uint64_t pa,
+                                       size_t size, uint32_t prot,
+                                       uintptr_t *start_out, int retain_pages);
 /*
  * Alias di un mapping user esistente su un secondo VA.
  * Usato dalla compat Linux per ET_EXEC statici con indirizzi assoluti bassi:

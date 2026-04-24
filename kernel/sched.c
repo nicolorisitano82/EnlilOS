@@ -20,6 +20,7 @@
 #include "signal.h"
 #include "timer.h"
 #include "pmm.h"
+#include "sysv_ipc.h"
 #include "uart.h"
 #include "vmm.h"
 
@@ -1567,6 +1568,7 @@ static void sched_task_finish_exit(sched_tcb_t *task, int32_t code)
     if (ctx)
         last_thread = proc_release(ctx->proc_slot, code, &parent_pid);
     if (last_thread) {
+        sysv_ipc_proc_cleanup(proc_slot);
         vmm_cleanup_task(proc_slot);
         elf64_dlreset_proc(proc_slot);
         syscall_task_cleanup(task);

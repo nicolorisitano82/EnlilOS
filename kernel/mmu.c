@@ -611,6 +611,65 @@ static int map_user_pages_raw(mm_space_t *space, uintptr_t va, uint64_t pa,
     return 0;
 }
 
+static int map_user_pages_phys(mm_space_t *space, uintptr_t va, uint64_t pa,
+                               uint32_t pages, uint32_t prot,
+                               int retain_pages, uint32_t *mapped_out)
+{
+    uint64_t flags = user_leaf_flags(prot);
+    uint32_t mapped = 0U;
+
+    if (mapped_out)
+        *mapped_out = 0U;
+
+    for (uint32_t i = 0U; i < pages; i++) {
+        uintptr_t cur_va = va + (uintptr_t)i * PAGE_SIZE;
+        uint64_t  cur_pa = (pa + (uint64_t)i * PAGE_SIZE) & PTE_ADDR_MASK;
+        uint64_t *l3;
+        uint32_t  l3i;
+
+        if (space_ensure_l3(space, cur_va, &l3) < 0)
+            goto fail;
+
+        l3i = (uint32_t)((cur_va >> 12) & 0x1FFU);
+        if (l3[l3i] & PTE_VALID)
+            goto fail;
+
+        if (retain_pages)
+            phys_retain_page(cur_pa);
+
+        l3[l3i] = cur_pa | flags;
+        clean_dcache_range((uintptr_t)l3, (uintptr_t)l3 + PAGE_SIZE);
+        mapped++;
+    }
+
+    dsb_ish();
+    isb();
+    if (mapped_out)
+        *mapped_out = mapped;
+    return 0;
+
+fail:
+    while (mapped > 0U) {
+        uintptr_t cur_va = va + (uintptr_t)(mapped - 1U) * PAGE_SIZE;
+        uint64_t *pte;
+        uint64_t *l3;
+        uint64_t  old_pte;
+
+        if (mmu_lookup_pte(space, cur_va, &pte, &l3) == 0 &&
+            (*pte & PTE_VALID) != 0U) {
+            old_pte = *pte;
+            *pte = 0ULL;
+            mmu_sync_table(space, (uintptr_t)l3);
+            if (retain_pages)
+                phys_free_page(old_pte & PTE_ADDR_MASK);
+        }
+        mapped--;
+    }
+    dsb_ish();
+    isb();
+    return -1;
+}
+
 int mmu_space_map_signal_trampoline(mm_space_t *space)
 {
     static const uint32_t sigtramp_code[] = {
@@ -1060,6 +1119,58 @@ int mmu_map_user_anywhere(mm_space_t *space, size_t size,
         return -1;
 
     if (mmu_map_user_region(space, start, aligned, prot) < 0)
+        return -1;
+
+    if (start + aligned > space->mmap_base)
+        space->mmap_base = start + aligned;
+    if (start_out)
+        *start_out = start;
+    return 0;
+}
+
+int mmu_map_user_phys_region(mm_space_t *space, uintptr_t start,
+                             uint64_t pa, size_t size,
+                             uint32_t prot, int retain_pages)
+{
+    uint32_t pages;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+    if ((start & (PAGE_SIZE - 1ULL)) != 0ULL ||
+        (pa & (PAGE_SIZE - 1ULL)) != 0ULL ||
+        (size & (PAGE_SIZE - 1ULL)) != 0ULL)
+        return -1;
+    if (start < MMU_USER_BASE || start + size < start || start + size > MMU_USER_LIMIT)
+        return -1;
+
+    pages = (uint32_t)(size / PAGE_SIZE);
+    if (space_track_extent(space, start, pa, pages, 0U) < 0)
+        return -1;
+    if (map_user_pages_phys(space, start, pa, pages, prot,
+                            retain_pages, NULL) < 0) {
+        space_release_overlapping_extents(space, start, size);
+        return -1;
+    }
+    return 0;
+}
+
+int mmu_map_user_phys_anywhere(mm_space_t *space, uint64_t pa,
+                               size_t size, uint32_t prot,
+                               uintptr_t *start_out, int retain_pages)
+{
+    uintptr_t start;
+    size_t    aligned;
+
+    if (!space || !space->in_use || size == 0U)
+        return -1;
+
+    aligned = (size + PAGE_SIZE - 1ULL) & PAGE_MASK;
+    if (aligned == 0U)
+        return -1;
+    if (space_find_free_gap(space, aligned, &start) < 0)
+        return -1;
+    if (mmu_map_user_phys_region(space, start, pa, aligned, prot,
+                                 retain_pages) < 0)
         return -1;
 
     if (start + aligned > space->mmap_base)

@@ -156,6 +156,15 @@
 #define SYS_EPOLL_CTL       215
 #define SYS_EPOLL_PWAIT     216
 
+/* ── System V IPC v1 (M11-05c): 217–223 ────────────────────────── */
+#define SYS_SHMGET          217
+#define SYS_SHMAT           218
+#define SYS_SHMDT           219
+#define SYS_SHMCTL          220
+#define SYS_SEMGET          221
+#define SYS_SEMOP           222
+#define SYS_SEMCTL          223
+
 /* cmd valori (compatibili con Linux reboot(2)) */
 #define REBOOT_CMD_RESTART      0x01234567U
 #define REBOOT_CMD_HALT         0xCDEF0123U
@@ -216,6 +225,7 @@
 #define EDEADLK             35
 #define ENAMETOOLONG        36
 #define ELOOP               40
+#define EIDRM               43
 #define ENOTEMPTY           39
 #define EIO                 5
 #define ENOSYS              38
