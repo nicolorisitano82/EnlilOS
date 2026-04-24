@@ -80,6 +80,7 @@
 #define LINUX_NR_rt_sigprocmask    135
 #define LINUX_NR_rt_sigreturn      139
 #define LINUX_NR_uname             160
+#define LINUX_NR_prctl             167
 #define LINUX_NR_gettimeofday      169
 #define LINUX_NR_getpid            172
 #define LINUX_NR_getppid           173
@@ -89,6 +90,14 @@
 #define LINUX_NR_getegid           177
 #define LINUX_NR_gettid            178
 #define LINUX_NR_sysinfo           179
+#define LINUX_NR_semget            190
+#define LINUX_NR_semctl            191
+#define LINUX_NR_semtimedop        192
+#define LINUX_NR_semop             193
+#define LINUX_NR_shmget            194
+#define LINUX_NR_shmctl            195
+#define LINUX_NR_shmat             196
+#define LINUX_NR_shmdt             197
 #define LINUX_NR_socket            198
 #define LINUX_NR_bind              200
 #define LINUX_NR_listen            201

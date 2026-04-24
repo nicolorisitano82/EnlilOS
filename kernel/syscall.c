@@ -27,6 +27,7 @@
 #include "microkernel.h"
 #include "mmu.h"
 #include "sched.h"
+#include "sysv_ipc.h"
 #include "timer.h"
 #include "tty.h"
 #include "pmm.h"
@@ -2634,6 +2635,23 @@ static int linux_timespec_valid(const timespec_t *ts)
     return 1;
 }
 
+static int linux_timespec_to_timeout_ms(const timespec_t *ts, uint64_t *out_ms)
+{
+    uint64_t total_ms;
+
+    if (!ts || !out_ms)
+        return -EINVAL;
+    if (!linux_timespec_valid(ts))
+        return -EINVAL;
+
+    total_ms = (uint64_t)ts->tv_sec * 1000ULL;
+    total_ms += (uint64_t)ts->tv_nsec / 1000000ULL;
+    if (ts->tv_nsec != 0LL && total_ms == 0ULL)
+        total_ms = 1ULL;
+    *out_ms = total_ms;
+    return 0;
+}
+
 static void linux_fill_sysinfo(linux_sysinfo_t *info)
 {
     if (!info)
@@ -3963,6 +3981,7 @@ static uint64_t sys_execve(uint64_t args[6])
     mmu_activate_space(image.space);
     if (old_mm && old_mm != image.space && old_mm != mmu_kernel_space())
         mmu_space_destroy(old_mm);
+    sysv_ipc_proc_cleanup(sched_task_proc_slot(current_task));
 
     signal_task_reset_for_exec(current_task);
     (void)sched_task_set_abi_mode(current_task,
@@ -6479,6 +6498,59 @@ static uint64_t sys_linux_futex(uint64_t args[6])           { return sys_linux_p
 static uint64_t sys_linux_nanosleep(uint64_t args[6])       { return sys_linux_passthrough(args, sys_nanosleep); }
 static uint64_t sys_linux_clock_gettime(uint64_t args[6])   { return sys_linux_passthrough(args, sys_clock_gettime); }
 static uint64_t sys_linux_uname(uint64_t args[6])           { return sys_linux_passthrough(args, sys_uname); }
+
+/* ── prctl — process control ────────────────────────────────────────── */
+#define PR_SET_PDEATHSIG    1
+#define PR_GET_PDEATHSIG    2
+#define PR_GET_DUMPABLE     3
+#define PR_SET_DUMPABLE     4
+#define PR_SET_NAME        15
+#define PR_GET_NAME        16
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+#define PR_SET_SECCOMP     22
+#define PR_GET_SECCOMP     21
+
+static uint64_t sys_linux_prctl(uint64_t args[6])
+{
+    int       option  = (int)args[0];
+    uintptr_t arg2    = (uintptr_t)args[1];
+
+    switch (option) {
+    case PR_SET_PDEATHSIG:
+        return 0;                /* accept, no-op: death signal delivery not tracked */
+    case PR_GET_PDEATHSIG: {
+        uint32_t sig = 0U;       /* report 0: no death signal set */
+        if (arg2 && user_store_bytes(arg2, &sig, sizeof(uint32_t)) < 0)
+            return ERR(EFAULT);
+        return 0;
+    }
+    case PR_GET_DUMPABLE:
+        return 1;                /* always dumpable */
+    case PR_SET_DUMPABLE:
+        return 0;                /* accept, ignore */
+    case PR_SET_NAME:
+        return 0;                /* accept, ignore: task name is kernel-internal */
+    case PR_GET_NAME: {
+        const char *n = current_task ? current_task->name : "unknown";
+        char buf[16];
+        uint32_t i;
+        for (i = 0U; i < 15U && n[i]; i++)
+            buf[i] = n[i];
+        buf[i] = '\0';
+        if (!arg2 || user_store_bytes(arg2, buf, 16U) < 0)
+            return ERR(EFAULT);
+        return 0;
+    }
+    case PR_SET_NO_NEW_PRIVS:
+    case PR_GET_NO_NEW_PRIVS:
+    case PR_SET_SECCOMP:
+    case PR_GET_SECCOMP:
+        return 0;                /* accepted as no-op */
+    default:
+        return ERR(EINVAL);
+    }
+}
 static uint64_t sys_linux_gettimeofday(uint64_t args[6])    { return sys_linux_passthrough(args, sys_gettimeofday); }
 static uint64_t sys_linux_getpid(uint64_t args[6])          { return sys_linux_passthrough(args, sys_getpid); }
 static uint64_t sys_linux_getppid(uint64_t args[6])         { return sys_linux_passthrough(args, sys_getppid); }
@@ -7139,6 +7211,178 @@ static uint64_t sys_linux_utimensat(uint64_t args[6])
         vfs_flags |= VFS_UTIMENS_NOFOLLOW;
     rc = vfs_utimens(resolved, times, vfs_flags);
     return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_shmget(uint64_t args[6])
+{
+    int id = 0;
+    int rc;
+
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_shmget((uint32_t)args[0], (size_t)args[1], (uint32_t)args[2], &id);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)(int64_t)id;
+}
+
+static uint64_t sys_shmat(uint64_t args[6])
+{
+    uintptr_t addr = 0U;
+    int       rc;
+
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_shmat_current((int)args[0], (uintptr_t)args[1], (uint32_t)args[2], &addr);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)addr;
+}
+
+static uint64_t sys_shmdt(uint64_t args[6])
+{
+    int rc;
+
+    (void)args[1];
+    (void)args[2];
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_shmdt_current((uintptr_t)args[0]);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_shmctl(uint64_t args[6])
+{
+    int rc;
+
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_shmctl((int)args[0], (int)args[1], (void *)(uintptr_t)args[2]);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)(int64_t)rc;
+}
+
+static uint64_t sys_semget(uint64_t args[6])
+{
+    int id = 0;
+    int rc;
+
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_semget((uint32_t)args[0], (uint32_t)args[1], (uint32_t)args[2], &id);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)(int64_t)id;
+}
+
+static uint64_t sys_semop(uint64_t args[6])
+{
+    sysv_sembuf_t local_ops[SYSV_SEM_PER_SET_MAX];
+    const sysv_sembuf_t *ops = (const sysv_sembuf_t *)(uintptr_t)args[1];
+    uint32_t nsops = (uint32_t)args[2];
+    int      rc;
+
+    (void)args[3];
+    (void)args[4];
+    (void)args[5];
+
+    if (nsops == 0U || nsops > SYSV_SEM_PER_SET_MAX)
+        return ERR(EINVAL);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_bytes((uintptr_t)args[1], local_ops, (size_t)nsops * sizeof(local_ops[0]));
+        if (rc < 0)
+            return ERR(-rc);
+        ops = local_ops;
+    }
+
+    rc = sysv_semop_current((int)args[0], ops, nsops, 0ULL, 0);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_semctl(uint64_t args[6])
+{
+    int rc;
+
+    (void)args[4];
+    (void)args[5];
+
+    rc = sysv_semctl((int)args[0], (uint32_t)args[1], (int)args[2], args[3]);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)(int64_t)rc;
+}
+
+static uint64_t sys_linux_shmget(uint64_t args[6])
+{
+    return sys_shmget(args);
+}
+
+static uint64_t sys_linux_shmat(uint64_t args[6])
+{
+    return sys_shmat(args);
+}
+
+static uint64_t sys_linux_shmdt(uint64_t args[6])
+{
+    return sys_shmdt(args);
+}
+
+static uint64_t sys_linux_shmctl(uint64_t args[6])
+{
+    return sys_shmctl(args);
+}
+
+static uint64_t sys_linux_semget(uint64_t args[6])
+{
+    return sys_semget(args);
+}
+
+static uint64_t sys_linux_semop(uint64_t args[6])
+{
+    return sys_semop(args);
+}
+
+static uint64_t sys_linux_semtimedop(uint64_t args[6])
+{
+    sysv_sembuf_t local_ops[SYSV_SEM_PER_SET_MAX];
+    const sysv_sembuf_t *ops = (const sysv_sembuf_t *)(uintptr_t)args[1];
+    uint32_t nsops = (uint32_t)args[2];
+    uintptr_t timeout_uva = (uintptr_t)args[3];
+    timespec_t local_ts;
+    uint64_t timeout_ms = 0ULL;
+    int rc;
+
+    if (nsops == 0U || nsops > SYSV_SEM_PER_SET_MAX)
+        return ERR(EINVAL);
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_bytes((uintptr_t)args[1], local_ops, (size_t)nsops * sizeof(local_ops[0]));
+        if (rc < 0)
+            return ERR(-rc);
+        ops = local_ops;
+        if (timeout_uva != 0U) {
+            rc = user_copy_bytes(timeout_uva, &local_ts, sizeof(local_ts));
+            if (rc < 0)
+                return ERR(-rc);
+            rc = linux_timespec_to_timeout_ms(&local_ts, &timeout_ms);
+            if (rc < 0)
+                return ERR(-rc);
+        }
+    } else if (timeout_uva != 0U) {
+        memcpy(&local_ts, (const void *)(uintptr_t)timeout_uva, sizeof(local_ts));
+        rc = linux_timespec_to_timeout_ms(&local_ts, &timeout_ms);
+        if (rc < 0)
+            return ERR(-rc);
+    }
+
+    rc = sysv_semop_current((int)args[0], ops, nsops, timeout_ms,
+                            timeout_uva != 0U);
+    return (rc < 0) ? ERR(-rc) : 0ULL;
+}
+
+static uint64_t sys_linux_semctl(uint64_t args[6])
+{
+    return sys_semctl(args);
 }
 
 static uint64_t sys_linux_faccessat(uint64_t args[6])
@@ -8593,6 +8837,13 @@ void syscall_init(void)
     syscall_table[SYS_EPOLL_CREATE1] = (syscall_entry_t){ sys_epoll_create1, 0, "epoll_create1" };
     syscall_table[SYS_EPOLL_CTL]     = (syscall_entry_t){ sys_epoll_ctl,     0, "epoll_ctl" };
     syscall_table[SYS_EPOLL_PWAIT]   = (syscall_entry_t){ sys_epoll_pwait,   0, "epoll_pwait" };
+    syscall_table[SYS_SHMGET]        = (syscall_entry_t){ sys_shmget,        0, "shmget" };
+    syscall_table[SYS_SHMAT]         = (syscall_entry_t){ sys_shmat,         0, "shmat" };
+    syscall_table[SYS_SHMDT]         = (syscall_entry_t){ sys_shmdt,         0, "shmdt" };
+    syscall_table[SYS_SHMCTL]        = (syscall_entry_t){ sys_shmctl,        0, "shmctl" };
+    syscall_table[SYS_SEMGET]        = (syscall_entry_t){ sys_semget,        0, "semget" };
+    syscall_table[SYS_SEMOP]         = (syscall_entry_t){ sys_semop,         0, "semop" };
+    syscall_table[SYS_SEMCTL]        = (syscall_entry_t){ sys_semctl,        0, "semctl" };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,
@@ -8647,6 +8898,7 @@ void syscall_init(void)
                        SYSCALL_FLAG_RT, "linux_rt_sigreturn");
     linux_syscall_bind(LINUX_NR_uname, sys_linux_uname,
                        SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_uname");
+    linux_syscall_bind(LINUX_NR_prctl, sys_linux_prctl, 0, "linux_prctl");
     linux_syscall_bind(LINUX_NR_gettimeofday, sys_linux_gettimeofday,
                        SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "linux_gettimeofday");
     linux_syscall_bind(LINUX_NR_clone, sys_linux_clone, 0, "linux_clone");
@@ -8714,6 +8966,14 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_epoll_create1, sys_linux_epoll_create1, 0, "linux_epoll_create1");
     linux_syscall_bind(LINUX_NR_epoll_ctl, sys_linux_epoll_ctl, 0, "linux_epoll_ctl");
     linux_syscall_bind(LINUX_NR_epoll_pwait, sys_linux_epoll_pwait, 0, "linux_epoll_pwait");
+    linux_syscall_bind(LINUX_NR_shmget, sys_linux_shmget, 0, "linux_shmget");
+    linux_syscall_bind(LINUX_NR_shmat, sys_linux_shmat, 0, "linux_shmat");
+    linux_syscall_bind(LINUX_NR_shmdt, sys_linux_shmdt, 0, "linux_shmdt");
+    linux_syscall_bind(LINUX_NR_shmctl, sys_linux_shmctl, 0, "linux_shmctl");
+    linux_syscall_bind(LINUX_NR_semget, sys_linux_semget, 0, "linux_semget");
+    linux_syscall_bind(LINUX_NR_semop, sys_linux_semop, 0, "linux_semop");
+    linux_syscall_bind(LINUX_NR_semtimedop, sys_linux_semtimedop, 0, "linux_semtimedop");
+    linux_syscall_bind(LINUX_NR_semctl, sys_linux_semctl, 0, "linux_semctl");
     linux_syscall_bind(LINUX_NR_pselect6, sys_linux_pselect6, 0, "linux_pselect6");
     linux_syscall_bind(LINUX_NR_ppoll, sys_linux_ppoll, 0, "linux_ppoll");
     linux_syscall_bind(LINUX_NR_socket, sys_linux_socket, 0, "linux_socket");
