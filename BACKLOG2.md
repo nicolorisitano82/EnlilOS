@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=55 pass=55 fail=0`
+- suite runtime piu' recente: `SUMMARY total=56 pass=56 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=55 pass=55 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=56 pass=56 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1741,8 +1741,8 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 > Il lavoro residuo non è più “iniziare la compatibilità”, ma proseguire dopo
 > la chiusura `v1` di `M11-05a/b/c/d` con:
 > - l'hardening semantico residuo del vertical slice Linux compat
-> - filesystem Linux-like e PTY completi (`M11-05e/f`)
-> - hardening Linux compat residuo e shim glibc più completi (`M11-05e/f/g`)
+> - PTY completo (`M11-05f`)
+> - hardening Linux compat residuo e shim glibc più completi (`M11-05f/g`)
 
 **Target:** binari ELF AArch64 compilati per Linux con glibc o musl.
 Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreutils.
@@ -1846,7 +1846,7 @@ Linux compat shell/tool.
 - scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=55 pass=55 fail=0`
+- selftest completo più recente: `SUMMARY total=56 pass=56 fail=0`
 - `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
@@ -1884,7 +1884,7 @@ set di semafori, sufficiente per il vertical slice Linux compat attuale.
 - i timestamp e metadati avanzati IPC non sono ancora esportati in una forma Linux completa
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=55 pass=55 fail=0`
+- selftest completo più recente: `SUMMARY total=56 pass=56 fail=0`
 - `sysv-ipc` verifica binding Linux minimi (`shm*`, `sem*`) e smoke end-to-end via `/SYSVIPC.ELF`
 
 ---
@@ -1915,7 +1915,7 @@ usato direttamente via bindfs `/lib` → `/sysroot/lib`.
   `--dynamic-linker=/lib/ld-linux-aarch64.so.1`; embedded nell'initrd come test
 - **Selftest `linux-ld-shim`**: carica ed esegue `LDINTDEMO.ELF`, verifica exit 0
 - Boot command interattivo: `ldintdemo`
-- Suite: **55/55**
+- Suite: **55/55** (56/56 dopo M11-05e)
 
 **Processo al boot (con linux-compat-stage popolato):**
 ```
@@ -1946,53 +1946,31 @@ DT_NEEDED = libc.so.6                   →  cerca /lib/, /lib/aarch64-linux-gnu
 
 ---
 
-#### M11-05e · Linux Filesystem Environment
+#### ✅ M11-05e · Linux Filesystem Environment
+**Stato attuale:** **chiusa `v1`**
 
-I binari Linux si aspettano certi path e file nel filesystem. Il layer `procfs/sysfs`
-di M14-01 viene esteso per fornirli:
+**Deliverable chiusi nella v1:**
 
-**`/proc` — richiesto da glibc e molti tool:**
-```
-/proc/self/exe          → symlink all'ELF del processo corrente
-/proc/self/maps         → mappa di memoria (estensione M14-01)
-/proc/self/fd/          → file descriptor aperti (estensione M14-01)
-/proc/self/status       → già nel procfs core M14-01
-/proc/self/cmdline      → argv[0] + '\0' + argv[1] + '\0' + ...
-/proc/self/environ      → variabili d'ambiente concatenate
-/proc/cpuinfo           → "processor : 0\nBogoMIPS : 62.50\nFeatures : fp asimd..."
-/proc/meminfo           → "MemTotal: 524288 kB\nMemFree: ..."
-/proc/version           → "EnlilOS 1.0.0 (gcc) #1 SMP"
-/proc/sys/kernel/pid_max → 32768
-/proc/sys/vm/overcommit_memory → 0
-```
+- **`/proc/sys` subtree**: `/proc/sys` (dir), `/proc/sys/kernel` (dir), `/proc/sys/vm` (dir)
+  - `/proc/sys/kernel/pid_max` → `"32768\n"`
+  - `/proc/sys/vm/overcommit_memory` → `"0\n"`
+- **`/proc/<pid>/maps`**: stub presente; file esiste e si apre (`open` + `read` → 0 byte).
+  Page-table walk completo rinviato — sufficiente per i tool che fanno solo `access()`/`open()`.
+- **`/etc/locale.conf`**: `LANG=en_US.UTF-8` embedded nell'initrd.
+- **`/etc/ld.so.cache`**: header minimo glibc-ld.so.cache1.1 (48 B, 0 entries) in initrd;
+  glibc/musl non crasha, fallback automatico a directory scan.
+- **`/etc/localtime`**: TZif2 UTC (114 B) copiato da host macOS zoneinfo; `tzset()` funziona.
+- Tutti gli altri file `/etc` già presenti da milestone precedenti:
+  `hostname`, `hosts`, `resolv.conf`, `passwd`, `group`, `os-release`, `nsswitch.conf`, `ld.so.conf`.
+- Tutti i device node `/dev` già presenti: `null`, `zero`, `urandom`, `random`, `tty`,
+  `stdin`, `stdout`, `stderr`.
+- **Selftest `linux-fs-env`**: verifica `/proc/sys/kernel/pid_max`, `/proc/sys/vm/overcommit_memory`,
+  `/proc/self/maps`, `/etc/locale.conf`, `/etc/ld.so.cache`, `/etc/localtime`.
+- Suite: **56/56**
 
-**`/etc` — richiesto da glibc resolver, NSS, locale:**
-```
-/etc/hostname           → "enlilos"
-/etc/hosts              → "127.0.0.1 localhost\n::1 localhost"
-/etc/resolv.conf        → "nameserver 1.1.1.1"  (dopo M10-02)
-/etc/passwd             → "root:x:0:0:root:/root:/bin/arksh"
-/etc/group              → "root:x:0:"
-/etc/os-release         → "NAME=EnlilOS\nID=enlilos\nVERSION_ID=1.0"
-/etc/nsswitch.conf      → "passwd: files\nhosts: files dns"
-/etc/locale.conf        → "LANG=en_US.UTF-8" oppure "LANG=it_IT.UTF-8"
-/etc/localtime          → symlink → /usr/share/zoneinfo/UTC
-/etc/ld.so.cache        → cache percorsi .so (generata da ldconfig stub)
-/etc/ld.so.conf         → "/lib\n/usr/lib\n"
-```
-
-**`/dev` — device nodes:**
-```
-/dev/null               → già M3-02 (fd speciale — estendere come device node)
-/dev/zero               → read → zeri infiniti, write → discard
-/dev/urandom            → read → pseudo-random da CNTPCT_EL0 XOR state
-/dev/random             → alias /dev/urandom (EnlilOS non blocca su entropia)
-/dev/tty                → fd della console corrente
-/dev/stdin              → symlink /proc/self/fd/0
-/dev/stdout             → symlink /proc/self/fd/1
-/dev/stderr             → symlink /proc/self/fd/2
-/dev/pts/0              → pseudo-terminal (dopo M11-05f)
-```
+**Limiti onesti v1:**
+- `/proc/self/maps` è stub vuoto; page-table walk reale richiede estensione VMM.
+- `/dev/pts/N` (pseudo-terminal) rinviato a `M11-05f`.
 
 ---
 
@@ -3352,7 +3330,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c/d v1`: suite `selftest` a `55/55`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e v1`: suite `selftest` a `56/56`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3361,7 +3339,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
 - ✅ **BSD socket API v1**: `M10-03` (`AF_INET` loopback-only, TCP/UDP, selftest `socket-api`)
-- ✅ **Linux compat v1**: `M11-05a/b/c/d` — ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC, `ld-linux-aarch64.so.1` shim
+- ✅ **Linux compat v1**: `M11-05a/b/c/d/e` — ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC, `ld-linux-aarch64.so.1` shim, `/proc/sys` subtree, `/etc/locale.conf` + `localtime` + `ld.so.cache`
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`, TCP/IP `netd`, BSD socket loopback `v1`
@@ -3372,7 +3350,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05e/f/g** hardening Linux compatibility layer | `M11-05a/b/c/d + M11-03 + M10-03 + M14-01` | Interpreter shim chiuso; il passo successivo e' PTY, fs Linux-like e glibc shims |
+| 3 | **M11-05f/g** hardening Linux compatibility layer | `M11-05e + M11-03 + M10-03` | fs env chiusa; il passo successivo e' PTY (`M11-05f`) e glibc shims (`M11-05g`) |
 | 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
@@ -3413,7 +3391,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05e/f/g`
+3. `M11-05f/g`
 4. `M12-01`
 5. `M12-02`
 6. `M13-02`
