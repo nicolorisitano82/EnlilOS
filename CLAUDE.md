@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=55 pass=55 fail=0`
+- Stato validato: `SUMMARY total=56 pass=56 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -513,22 +513,32 @@ Per task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-24)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e` e `M8-08d/e/f/g` completi in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=55 pass=55 fail=0
+SUMMARY total=56 pass=56 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
 2. **M8-08h** — i18n / localizzazione stringhe
-3. **M11-05e/f/g** — hardening Linux compat residuo (PTY, fs Linux-like)
+3. **M11-05f/g** — hardening Linux compat residuo (PTY, glibc shims)
 4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 6. **M13-02** — SMP bootstrap
 7. **M13-03** — scheduler multicore
+### Stato operativo M11-05e / Linux filesystem environment
+
+- `M11-05e` e' chiusa in `v1`.
+- **`/proc/sys` subtree**: `/proc/sys` (dir), `/proc/sys/kernel` (dir), `/proc/sys/vm` (dir), `/proc/sys/kernel/pid_max` (`32768\n`), `/proc/sys/vm/overcommit_memory` (`0\n`).
+- **`/proc/<pid>/maps`**: stub presente (file esiste, contenuto vuoto; page-table walk completo rinviato).
+- **`/etc/locale.conf`**: `LANG=en_US.UTF-8` in initrd.
+- **`/etc/ld.so.cache`**: stub binario minimo in initrd (magic glibc-ld.so.cache1.1, 0 entries).
+- **`/etc/localtime`**: TZif2 UTC copiato da host macOS (`/usr/share/zoneinfo/UTC`, 114 B).
+- Selftest: `linux-fs-env`. Suite: `56/56`.
+
 ### Stato operativo M11-05d / ld-linux shim + library search paths
 
 - `M11-05d` e' chiusa in `v1`: ELF loader risolve `PT_INTERP = /lib/ld-linux-aarch64.so.1` (e varianti musl/lib64) tramite alias automatico verso `/LD-ENLIL.SO` quando il file non esiste nel VFS.

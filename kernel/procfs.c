@@ -39,6 +39,12 @@
 #define PROC_NODE_PID_EXE       0x09U   /* /proc/<pid>/exe              */
 #define PROC_NODE_PID_FD_DIR    0x0AU   /* /proc/<pid>/fd               */
 #define PROC_NODE_PID_FD_LINK   0x0BU   /* /proc/<pid>/fd/<n>           */
+#define PROC_NODE_SYS_DIR       0x0CU   /* /proc/sys                    */
+#define PROC_NODE_SYS_KERN_DIR  0x0DU   /* /proc/sys/kernel             */
+#define PROC_NODE_SYS_VM_DIR    0x0EU   /* /proc/sys/vm                 */
+#define PROC_NODE_SYS_PID_MAX   0x0FU   /* /proc/sys/kernel/pid_max     */
+#define PROC_NODE_SYS_OVERCOMMIT 0x10U  /* /proc/sys/vm/overcommit_memory */
+#define PROC_NODE_PID_MAPS      0x11U   /* /proc/<pid>/maps             */
 
 #define PROC_NODE_TYPE(id)      ((id) & 0xFFU)
 #define PROC_NODE_PID(id)       ((id) >> 8)
@@ -382,6 +388,35 @@ static int proc_streq(const char *a, const char *b)
     return (*a == '\0' && *b == '\0');
 }
 
+/* M11-05e: /proc/sys generators */
+static size_t gen_pid_max(char *buf, size_t bufsz)
+{
+    char *p = buf, *end = buf + bufsz - 1U;
+    p = proc_puts(p, end, "32768\n");
+    *p = '\0';
+    return (size_t)(p - buf);
+}
+
+static size_t gen_overcommit(char *buf, size_t bufsz)
+{
+    char *p = buf, *end = buf + bufsz - 1U;
+    p = proc_puts(p, end, "0\n");
+    *p = '\0';
+    return (size_t)(p - buf);
+}
+
+/*
+ * M11-05e: /proc/<pid>/maps — stub; returns empty file.
+ * Full implementation requires page-table walk; deferred.
+ * Many tools only need the file to exist (open succeeds, read returns 0).
+ */
+static size_t gen_pid_maps(char *buf, size_t bufsz, uint32_t pid)
+{
+    (void)pid; (void)bufsz;
+    buf[0] = '\0';
+    return 0U;
+}
+
 /* ── Operazioni VFS ───────────────────────────────────────────────── */
 
 static int procfs_open(const vfs_mount_t *mount, const char *relpath,
@@ -444,6 +479,33 @@ static int procfs_open(const vfs_mount_t *mount, const char *relpath,
         goto text_root_node;
     }
 
+    /* ── M11-05e: /proc/sys subtree ────────────────────────────── */
+    if (proc_streq(p, "sys")) {
+        out->mount = mount; out->node_id = PROC_NODE_MAKE(PROC_NODE_SYS_DIR, 0U);
+        out->flags = flags; out->pos = 0; out->size_hint = 0; out->dir_index = 0; out->cookie = 0;
+        return 0;
+    }
+    if (proc_streq(p, "sys/kernel")) {
+        out->mount = mount; out->node_id = PROC_NODE_MAKE(PROC_NODE_SYS_KERN_DIR, 0U);
+        out->flags = flags; out->pos = 0; out->size_hint = 0; out->dir_index = 0; out->cookie = 0;
+        return 0;
+    }
+    if (proc_streq(p, "sys/vm")) {
+        out->mount = mount; out->node_id = PROC_NODE_MAKE(PROC_NODE_SYS_VM_DIR, 0U);
+        out->flags = flags; out->pos = 0; out->size_hint = 0; out->dir_index = 0; out->cookie = 0;
+        return 0;
+    }
+    if (proc_streq(p, "sys/kernel/pid_max")) {
+        content_len = gen_pid_max(proc_buf, PROC_BUFSIZE);
+        type = PROC_NODE_SYS_PID_MAX;
+        goto text_root_node;
+    }
+    if (proc_streq(p, "sys/vm/overcommit_memory")) {
+        content_len = gen_overcommit(proc_buf, PROC_BUFSIZE);
+        type = PROC_NODE_SYS_OVERCOMMIT;
+        goto text_root_node;
+    }
+
     /* ── /proc/self o /proc/self/status ────────────────────────── */
     if (proc_streq(p, "self")) {
         out->mount     = mount;
@@ -500,6 +562,12 @@ static int procfs_open(const vfs_mount_t *mount, const char *relpath,
         out->dir_index = 0;
         out->cookie    = (uintptr_t)proc_buf;
         return 0;
+    }
+    if (p[0] == 's' && p[1] == 'e' && p[2] == 'l' && p[3] == 'f' &&
+        p[4] == '/' && proc_streq(p + 5, "maps")) {
+        content_len = gen_pid_maps(proc_buf, PROC_BUFSIZE, self_pid);
+        type = PROC_NODE_PID_MAPS;
+        goto text_self_node;
     }
     if (p[0] == 's' && p[1] == 'e' && p[2] == 'l' && p[3] == 'f' &&
         p[4] == '/' && proc_streq(p + 5, "status")) {
@@ -561,6 +629,9 @@ text_self_node:
         } else if (proc_streq(after_slash, "exe")) {
             content_len = gen_pid_exe(proc_buf, PROC_BUFSIZE, (uint32_t)pid);
             type = PROC_NODE_PID_EXE;
+        } else if (proc_streq(after_slash, "maps")) {
+            content_len = gen_pid_maps(proc_buf, PROC_BUFSIZE, (uint32_t)pid);
+            type = PROC_NODE_PID_MAPS;
         } else if (proc_streq(after_slash, "fd")) {
             out->mount     = mount;
             out->node_id   = PROC_NODE_MAKE(PROC_NODE_PID_FD_DIR, (uint32_t)pid);
@@ -623,7 +694,9 @@ static ssize_t procfs_read(vfs_file_t *file, void *buf, size_t count)
 
     if (!buf) return -EFAULT;
 
-    if (type == PROC_NODE_ROOT || type == PROC_NODE_PID_DIR)
+    if (type == PROC_NODE_ROOT || type == PROC_NODE_PID_DIR ||
+        type == PROC_NODE_SYS_DIR || type == PROC_NODE_SYS_KERN_DIR ||
+        type == PROC_NODE_SYS_VM_DIR)
         return -EISDIR;
 
     /* I file di testo usano cookie come puntatore al buffer generato */
@@ -694,6 +767,7 @@ static int procfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
             { "cmdline", S_IFREG | S_IRUSR | S_IRGRP | S_IROTH },
             { "environ", S_IFREG | S_IRUSR | S_IRGRP | S_IROTH },
             { "exe",     S_IFLNK | S_IRUSR | S_IRGRP | S_IROTH },
+            { "maps",    S_IFREG | S_IRUSR | S_IRGRP | S_IROTH },
             { "fd",      S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH },
         };
 
@@ -706,6 +780,34 @@ static int procfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
             out->name[i] = '\0';
         }
         out->mode = entries[idx].mode;
+        file->dir_index++;
+        return 0;
+    }
+
+    /* M11-05e: readdir for /proc/sys subtree */
+    if (type == PROC_NODE_SYS_DIR) {
+        static const char *const sys_entries[] = { "kernel", "vm" };
+        static const uint32_t    sys_modes[]   = {
+            S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH,
+            S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH,
+        };
+        if (idx >= 2U) return -ENOENT;
+        { const char *n = sys_entries[idx]; size_t i; for (i = 0; n[i]; i++) out->name[i] = n[i]; out->name[i] = '\0'; }
+        out->mode = sys_modes[idx];
+        file->dir_index++;
+        return 0;
+    }
+    if (type == PROC_NODE_SYS_KERN_DIR) {
+        if (idx >= 1U) return -ENOENT;
+        { const char *n = "pid_max"; size_t i; for (i = 0; n[i]; i++) out->name[i] = n[i]; out->name[i] = '\0'; }
+        out->mode = S_IFREG | S_IRUSR | S_IRGRP | S_IROTH;
+        file->dir_index++;
+        return 0;
+    }
+    if (type == PROC_NODE_SYS_VM_DIR) {
+        if (idx >= 1U) return -ENOENT;
+        { const char *n = "overcommit_memory"; size_t i; for (i = 0; n[i]; i++) out->name[i] = n[i]; out->name[i] = '\0'; }
+        out->mode = S_IFREG | S_IRUSR | S_IRGRP | S_IROTH;
         file->dir_index++;
         return 0;
     }
@@ -764,11 +866,22 @@ static int procfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
         return 0;
     }
 
-    /* Indici 5+: PID task (salta quelli inesistenti/zombie) */
+    /* Indice 5: "sys" (M11-05e) */
+    if (idx == 5U) {
+        const char *n = "sys";
+        size_t i;
+        for (i = 0; n[i]; i++) out->name[i] = n[i];
+        out->name[i] = '\0';
+        out->mode = S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH;
+        file->dir_index++;
+        return 0;
+    }
+
+    /* Indici 6+: PID task (salta quelli inesistenti/zombie) */
     {
         sched_task_info_t snap[SCHED_MAX_TASKS];
         uint32_t          n_tasks = sched_task_snapshot(snap, SCHED_MAX_TASKS);
-        uint32_t          task_idx = idx - 5U;
+        uint32_t          task_idx = idx - 6U;
 
         /* Salta i task zombie */
         uint32_t live = 0U;
@@ -805,7 +918,8 @@ static int procfs_stat(vfs_file_t *file, stat_t *out)
     if (!out) return -EFAULT;
 
     if (type == PROC_NODE_ROOT || type == PROC_NODE_PID_DIR ||
-        type == PROC_NODE_PID_FD_DIR) {
+        type == PROC_NODE_PID_FD_DIR || type == PROC_NODE_SYS_DIR ||
+        type == PROC_NODE_SYS_KERN_DIR || type == PROC_NODE_SYS_VM_DIR) {
         out->st_mode    = S_IFDIR | S_IRUSR | S_IRGRP | S_IROTH;
         out->st_size    = 0;
         out->st_blksize = 512U;

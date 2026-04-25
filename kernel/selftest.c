@@ -2124,6 +2124,71 @@ static int selftest_case_linux_proc_dev_etc(void)
     return 0;
 }
 
+/* M11-05e: Linux filesystem environment — /proc/sys, /etc locale/localtime/ldcache */
+static int selftest_case_linux_fs_env(void)
+{
+    static const char case_name[] = "linux-fs-env";
+    static char       buf[128];
+    vfs_file_t        file;
+    stat_t            st;
+    ssize_t           n;
+    int               rc;
+
+    /* /proc/sys directory exists */
+    rc = vfs_open("/proc/sys", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/sys fallita");
+    rc = vfs_stat(&file, &st);
+    ST_CHECK(case_name, rc == 0 && (st.st_mode & S_IFMT) == S_IFDIR,
+             "/proc/sys non e' directory");
+    (void)vfs_close(&file);
+
+    /* /proc/sys/kernel/pid_max → "32768" */
+    rc = vfs_open("/proc/sys/kernel/pid_max", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/sys/kernel/pid_max fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /proc/sys/kernel/pid_max vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "32768"),
+             "/proc/sys/kernel/pid_max inatteso");
+    (void)vfs_close(&file);
+
+    /* /proc/sys/vm/overcommit_memory → "0" */
+    rc = vfs_open("/proc/sys/vm/overcommit_memory", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/sys/vm/overcommit_memory fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /proc/sys/vm/overcommit_memory vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, buf[0] == '0', "/proc/sys/vm/overcommit_memory non e' 0");
+    (void)vfs_close(&file);
+
+    /* /proc/self/maps exists (may be empty) */
+    rc = vfs_open("/proc/self/maps", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /proc/self/maps fallita");
+    (void)vfs_close(&file);
+
+    /* /etc/locale.conf → "LANG=" */
+    rc = vfs_open("/etc/locale.conf", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/locale.conf fallita");
+    n = vfs_read(&file, buf, sizeof(buf) - 1U);
+    ST_CHECK(case_name, n > 0, "read /etc/locale.conf vuota");
+    buf[n] = '\0';
+    ST_CHECK(case_name, st_contains(buf, "LANG="),
+             "/etc/locale.conf senza LANG=");
+    (void)vfs_close(&file);
+
+    /* /etc/ld.so.cache exists */
+    rc = vfs_open("/etc/ld.so.cache", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/ld.so.cache fallita");
+    (void)vfs_close(&file);
+
+    /* /etc/localtime exists */
+    rc = vfs_open("/etc/localtime", O_RDONLY, &file);
+    ST_CHECK(case_name, rc == 0, "open /etc/localtime fallita");
+    (void)vfs_close(&file);
+
+    return 0;
+}
+
 static int selftest_case_linux_at_paths(void)
 {
     static const char case_name[] = "linux-at-paths";
@@ -2843,6 +2908,7 @@ static const selftest_case_t selftest_cases[] = {
     { "gpu-stack",   gpu_selftest_run        },
     { "procfs-core", selftest_case_procfs    },
     { "linux-proc-dev-etc", selftest_case_linux_proc_dev_etc },
+    { "linux-fs-env",       selftest_case_linux_fs_env },
     { "linux-at-paths", selftest_case_linux_at_paths },
     { "sysv-ipc", selftest_case_sysv_ipc },
     { "mmap-file",   selftest_case_mmap_file },

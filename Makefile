@@ -430,6 +430,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
                 initrd/us.map initrd/it.map initrd/hostname initrd/hosts \
                 initrd/passwd initrd/group initrd/os-release \
                 initrd/nsswitch.conf initrd/ld.so.conf initrd/resolv.conf \
+                initrd/locale.conf initrd/ld_so_cache initrd/localtime \
                 $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) \
                 $(ARKSH_SMOKE_ELF) $(ARKSH_SELFTEST_ELF) \
                 $(wildcard $(ARKSH_REAL_ELF)) $(wildcard $(LINUX_COMPAT_STAGE_MARK))
@@ -531,6 +532,9 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		etc/os-release=initrd/os-release \
 		etc/nsswitch.conf=initrd/nsswitch.conf \
 		etc/ld.so.conf=initrd/ld.so.conf \
+		etc/ld.so.cache=initrd/ld_so_cache \
+		etc/locale.conf=initrd/locale.conf \
+		etc/localtime=initrd/localtime \
 		etc/resolv.conf=initrd/resolv.conf \
 		etc/arkshrc=initrd/arkshrc \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
