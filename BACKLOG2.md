@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=53 pass=53 fail=0`
+- suite runtime piu' recente: `SUMMARY total=55 pass=55 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=53 pass=53 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=55 pass=55 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1739,12 +1739,10 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 > 4. un subset ampio di syscall Linux già funzionanti
 >
 > Il lavoro residuo non è più “iniziare la compatibilità”, ma proseguire dopo
-> la chiusura `v1` di `M11-05a` con:
+> la chiusura `v1` di `M11-05a/b/c/d` con:
 > - l'hardening semantico residuo del vertical slice Linux compat
-> - `epoll` (`M11-05b`)
-> - hardening Linux compat residuo (`M11-05d/e/f/g`)
-> - loader/linker e shim glibc più completi (`M11-05d/g`)
 > - filesystem Linux-like e PTY completi (`M11-05e/f`)
+> - hardening Linux compat residuo e shim glibc più completi (`M11-05e/f/g`)
 
 **Target:** binari ELF AArch64 compilati per Linux con glibc o musl.
 Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreutils.
@@ -1791,7 +1789,7 @@ tabella compat, quindi qui sotto teniamo separati:
 - `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
 - `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
 - smoke reale: `/data/bash-linux -c 'echo ok'`
-- suite selftest piu' recente: `53/53`
+- suite selftest piu' recente: `55/55`
 
 **Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
@@ -1848,7 +1846,7 @@ Linux compat shell/tool.
 - scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=53 pass=53 fail=0`
+- selftest completo più recente: `SUMMARY total=55 pass=55 fail=0`
 - `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
@@ -1886,38 +1884,65 @@ set di semafori, sufficiente per il vertical slice Linux compat attuale.
 - i timestamp e metadati avanzati IPC non sono ancora esportati in una forma Linux completa
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=53 pass=53 fail=0`
+- selftest completo più recente: `SUMMARY total=55 pass=55 fail=0`
 - `sysv-ipc` verifica binding Linux minimi (`shm*`, `sem*`) e smoke end-to-end via `/SYSVIPC.ELF`
 
 ---
 
-#### M11-05d · ld-linux-aarch64.so.1 Shim
+#### ✅ M11-05d · ld-linux-aarch64.so.1 Shim
+**Stato attuale:** **chiusa `v1`**
 
 I binari Linux dinamici cercano `/lib/ld-linux-aarch64.so.1` come dynamic linker.
-Due approcci:
+L'approccio implementato è l'alias automatico nel loader ELF: quando il file non esiste
+nel VFS, il kernel usa `/LD-ENLIL.SO` (il dynamic linker nativo EnlilOS) come fallback.
+Quando `linux-compat-stage` è popolato con un root Linux reale, il file vero viene
+usato direttamente via bindfs `/lib` → `/sysroot/lib`.
 
-**Approccio A (consigliato): symlink verso il linker EnlilOS nativo**
-```
-/lib/ld-linux-aarch64.so.1 → /lib/ld-enlilos.so  (M11-03)
-```
-Funziona se il linker EnlilOS (M11-03) rispetta l'interfaccia `PT_INTERP` standard,
-che è identica tra Linux e EnlilOS (stesso ELF ABI AArch64).
+**Deliverable chiusi nella v1:**
 
-**Approccio B: ld-linux-musl passthrough**
-`musl-libc` fornisce `ld-musl-aarch64.so.1` che può essere rinominato/symlinkato
-come `ld-linux-aarch64.so.1`. I binari compilati con musl su Linux girano direttamente.
-Per binari glibc: musl implementa una compatibilità sufficiente per la maggior parte dei casi.
+- **Interpreter alias resolution** in `kernel/elf_loader.c`: `elf_linux_interp_resolve()`
+  controlla se `PT_INTERP` è un nome Linux-compat noto; se il file non esiste nel VFS,
+  riscrive il path verso `/LD-ENLIL.SO`
+- Alias riconosciuti: `/lib/ld-linux-aarch64.so.1`, `/lib/ld-musl-aarch64.so.1`,
+  `/lib64/ld-linux-aarch64.so.1`
+- **DT_NEEDED search paths** in `elf_load_vfs_object_searched()`: fallback automatico
+  da path originale verso `/lib/aarch64-linux-gnu/<basename>`, `/usr/lib/<basename>`,
+  `/usr/lib/aarch64-linux-gnu/<basename>`; usato sia dal loader ELF principale sia da
+  `dlopen()`
+- **VFS**: nuovo mount `/lib/aarch64-linux-gnu` → bindfs → `/sysroot/lib/aarch64-linux-gnu`
+  per layout Debian/Ubuntu multiarch quando `linux-compat-stage` è popolato
+- **`LDINTDEMO.ELF`**: PIE identico a `DYNDEMO.ELF` ma compilato con
+  `--dynamic-linker=/lib/ld-linux-aarch64.so.1`; embedded nell'initrd come test
+- **Selftest `linux-ld-shim`**: carica ed esegue `LDINTDEMO.ELF`, verifica exit 0
+- Boot command interattivo: `ldintdemo`
+- Suite: **55/55**
 
-**Procedura al boot:**
+**Processo al boot (con linux-compat-stage popolato):**
 ```
-/lib/
-    ld-linux-aarch64.so.1  → ld-musl-aarch64.so.1  (symlink)
-    ld-musl-aarch64.so.1   (musl dynamic linker da M11-03)
-    libc.so.6              → libmusl.so  (symlink — glibc name compat)
-    libm.so.6              → libmusl.so  (math è parte di musl)
-    libpthread.so.0        → libmusl.so  (pthread è parte di musl)
-    libdl.so.2             → libmusl.so  (dlopen è parte di musl)
+/lib/                          → bindfs → /sysroot/lib/
+    ld-linux-aarch64.so.1      (file reale dal root Linux stagingato)
+    aarch64-linux-gnu/         → bindfs → /sysroot/lib/aarch64-linux-gnu/
+        libc.so.6
+        libm.so.6
+        libpthread.so.0
+        libdl.so.2
 ```
+
+**Processo al boot (senza linux-compat-stage — default):**
+```
+PT_INTERP = /lib/ld-linux-aarch64.so.1  →  ELF loader prova il path
+                                         →  file assente → usa /LD-ENLIL.SO
+DT_NEEDED = libc.so.6                   →  cerca /lib/, /lib/aarch64-linux-gnu/,
+                                            /usr/lib/, /usr/lib/aarch64-linux-gnu/
+```
+
+**Limiti onesti v1:**
+- i binari Linux dinamici glibc-linked che dipendono da `libc.so.6` funzionano solo
+  se `linux-compat-stage` è popolato con le librerie reali; senza staging, il loader
+  trova l'interprete ma non trova `libc.so.6`
+- glibc symbol versioning (`read@@GLIBC_2.17`) non ancora gestito: rinviato a `M11-05g`
+- `ld-linux-aarch64.so.1` reale dal root Linux non viene ancora copiato automaticamente
+  nell'initrd; lo staging usa il file del root come-is via ext4/bindfs
 
 ---
 
@@ -3327,7 +3352,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c v1`: suite `selftest` a `53/53`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d v1`: suite `selftest` a `55/55`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3336,7 +3361,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
 - ✅ **BSD socket API v1**: `M10-03` (`AF_INET` loopback-only, TCP/UDP, selftest `socket-api`)
-- ✅ **Linux compat v1**: `M11-05a` con ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA e `bash-linux` statico funzionante
+- ✅ **Linux compat v1**: `M11-05a/b/c/d` — ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC, `ld-linux-aarch64.so.1` shim
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
 - ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`, TCP/IP `netd`, BSD socket loopback `v1`
@@ -3347,7 +3372,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05d/e/f/g** hardening Linux compatibility layer | `M11-05a/b/c + M11-03 + M10-03 + M14-01` | Il vertical slice shell/tool ora c'e'; il passo successivo e' completare glibc shims, PTY e fs Linux-like |
+| 3 | **M11-05e/f/g** hardening Linux compatibility layer | `M11-05a/b/c/d + M11-03 + M10-03 + M14-01` | Interpreter shim chiuso; il passo successivo e' PTY, fs Linux-like e glibc shims |
 | 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
 
 ### 3. Sequenza raccomandata per dipendenze
@@ -3388,7 +3413,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05d/e/f/g`
+3. `M11-05e/f/g`
 4. `M12-01`
 5. `M12-02`
 6. `M13-02`
