@@ -46,6 +46,7 @@ typedef struct {
 #define SIGTSTP     20
 #define SIGTTIN     21
 #define SIGTTOU     22
+#define SIGWINCH    28
 
 #define SA_RESTART   (1U << 0)
 #define SA_NODEFER   (1U << 1)

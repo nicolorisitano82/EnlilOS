@@ -32,6 +32,7 @@
 #include "vfs.h"
 #include "cap.h"
 #include "vmm.h"
+#include "pty.h"
 #include "shutdown.h"
 
 /* Banner ASCII art per la console seriale */
@@ -2546,6 +2547,10 @@ void kernel_main(void)
     /* === Capability System (M9-01) === */
     cap_init();
     uart_puts("[CAP] Capability system inizializzato\n");
+
+    /* === PTY subsystem (M11-05f) === */
+    pty_init();
+    uart_puts("[PTY] Pseudo-terminal subsystem inizializzato\n");
 
     /* === Virtual Memory Area manager (M8-02) === */
     vmm_init();

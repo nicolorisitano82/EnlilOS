@@ -35,6 +35,7 @@
 #include "types.h"
 #include "blk.h"
 #include "blk_ipc.h"
+#include "pty.h"
 #include "vfs.h"
 #include "vfs_ipc.h"
 #include "vmm.h"
@@ -75,6 +76,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define DEV_NODE_STDOUT     5U
 #define DEV_NODE_STDERR     6U
 #define DEV_NODE_NULL       7U
+/* PTY nodes: PTMX=11, PTS_BASE=12..19, PTS_DIR=20 (from pty.h) */
 
 typedef struct {
     uint8_t  in_use;
@@ -1096,9 +1098,30 @@ static int fd_is_tty_object(const fd_object_t *obj)
         return 0;
 
     node_id = obj->file.node_id;
-    return node_id == DEV_NODE_CONSOLE || node_id == DEV_NODE_TTY ||
-           node_id == DEV_NODE_STDIN || node_id == DEV_NODE_STDOUT ||
-           node_id == DEV_NODE_STDERR;
+    if (node_id == DEV_NODE_CONSOLE || node_id == DEV_NODE_TTY ||
+        node_id == DEV_NODE_STDIN   || node_id == DEV_NODE_STDOUT ||
+        node_id == DEV_NODE_STDERR)
+        return 1;
+    /* PTY slave nodes: isatty() ritorna 1 per lo slave */
+    if (node_id >= DEV_NODE_PTS_BASE &&
+        node_id <  DEV_NODE_PTS_BASE + PTY_MAX)
+        return 1;
+    return 0;
+}
+
+/* Ritorna il pty_t associato all'fd se e' un nodo PTY (master o slave). */
+static pty_t *fd_get_pty(const fd_object_t *obj)
+{
+    uint32_t nid;
+    if (!obj || (obj->type != FD_TYPE_VFS && obj->type != FD_TYPE_VFSD) || !obj->file.mount)
+        return (pty_t *)0;
+    if (!obj->file.mount->path || !syscall_streq(obj->file.mount->path, "/dev"))
+        return (pty_t *)0;
+    nid = obj->file.node_id;
+    if (nid == DEV_NODE_PTMX ||
+        (nid >= DEV_NODE_PTS_BASE && nid < DEV_NODE_PTS_BASE + PTY_MAX))
+        return pty_get((uint32_t)obj->file.cookie);
+    return (pty_t *)0;
 }
 
 static ssize_t fd_pipe_read(fd_object_t *obj, void *buf, size_t count)
@@ -1957,6 +1980,27 @@ static void fd_split_open_flags(uint16_t in_flags, uint16_t *file_flags,
 }
 
 /*
+ * is_pty_path — true se path è /dev/ptmx o /dev/pts/<N>
+ * PTY device vanno aperti via kernel-direct VFS (non vfsd): ogni open di
+ * /dev/ptmx alloca un nuovo slot PTY, quindi passarli per vfsd e poi
+ * aprire il shadow kernel-side produrrebbe due slot distinti (vfsd-lato e
+ * shadow-lato) con conseguente mismatch slave_open e -EIO in write.
+ */
+static int is_pty_path(const char *p)
+{
+    if (!p || p[0] != '/') return 0;
+    /* /dev/ptmx */
+    if (p[1]=='d' && p[2]=='e' && p[3]=='v' && p[4]=='/' &&
+        p[5]=='p' && p[6]=='t' && p[7]=='m' && p[8]=='x' && p[9]=='\0')
+        return 1;
+    /* /dev/pts/<N> */
+    if (p[1]=='d' && p[2]=='e' && p[3]=='v' && p[4]=='/' &&
+        p[5]=='p' && p[6]=='t' && p[7]=='s' && p[8]=='/')
+        return 1;
+    return 0;
+}
+
+/*
  * is_proc_self_path — true se path è /proc/self o /proc/self/...
  * Queste path DEVONO essere aperte in contesto del chiamante (non vfsd)
  * affinché procfs usi current_task corretto per self_pid e fd table.
@@ -2006,7 +2050,7 @@ static int fd_open_path_current(const char *path, uint16_t file_flags,
      * così current_task rimane il task chiamante e procfs restituisce
      * i dati corretti (exec_path, fd table, ecc.).
      */
-    if (vfsd_proxy_available() && !is_proc_self_path(path)) {
+    if (vfsd_proxy_available() && !is_proc_self_path(path) && !is_pty_path(path)) {
         rc = vfsd_proxy_open(path, file_flags, &remote_handle);
         if (rc < 0)
             return rc;
@@ -3609,9 +3653,19 @@ static uint64_t sys_ioctl(uint64_t args[6])
     }
     case TIOCGWINSZ: {
         winsize_t ws;
+        pty_t    *pty_obj;
 
         if (!arg_uva)
             return ERR(EFAULT);
+
+        /* PTY master o slave: usa winsize per-PTY */
+        pty_obj = fd_get_pty(obj);
+        if (pty_obj) {
+            (void)pty_get_winsize(pty_obj, &ws);
+            rc = user_store_bytes(arg_uva, &ws, sizeof(ws));
+            return (rc < 0) ? ERR(-rc) : 0ULL;
+        }
+
         if (!fd_is_tty_object(obj))
             return ERR(ENOTTY);
         ws.ws_row = 25U;
@@ -3620,6 +3674,49 @@ static uint64_t sys_ioctl(uint64_t args[6])
         ws.ws_ypixel = 0U;
         rc = user_store_bytes(arg_uva, &ws, sizeof(ws));
         return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCSWINSZ: {
+        winsize_t ws;
+        pty_t    *pty_obj;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        rc = user_copy_bytes(arg_uva, &ws, sizeof(ws));
+        if (rc < 0)
+            return ERR(-rc);
+        pty_obj = fd_get_pty(obj);
+        if (!pty_obj)
+            return ERR(ENOTTY);
+        rc = pty_set_winsize(pty_obj, &ws);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCGPTN: {
+        uint32_t  n;
+        pty_t    *pty_obj;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        pty_obj = fd_get_pty(obj);
+        if (!pty_obj)
+            return ERR(ENOTTY);
+        n = pty_obj->idx;
+        rc = user_store_bytes(arg_uva, &n, sizeof(n));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCSPTLCK: {
+        uint32_t  lock_val;
+        pty_t    *pty_obj;
+
+        if (!arg_uva)
+            return ERR(EFAULT);
+        rc = user_copy_bytes(arg_uva, &lock_val, sizeof(lock_val));
+        if (rc < 0)
+            return ERR(-rc);
+        pty_obj = fd_get_pty(obj);
+        if (!pty_obj)
+            return ERR(ENOTTY);
+        pty_obj->locked = (lock_val != 0U) ? 1U : 0U;
+        return 0ULL;
     }
     case FIONBIO: {
         uint32_t enable = 0U;
@@ -4871,16 +4968,28 @@ static uint64_t sys_dup2(uint64_t args[6])
 
 static uint64_t sys_tcgetattr(uint64_t args[6])
 {
-    int        fd = (int)args[0];
-    uintptr_t  term_uva = (uintptr_t)args[1];
-    termios_t  term;
-    int        rc;
+    int          fd       = (int)args[0];
+    uintptr_t    term_uva = (uintptr_t)args[1];
+    termios_t    term;
+    int          rc;
+    fd_object_t *obj;
+    pty_t       *pty_obj;
 
     if (!term_uva)
         return ERR(EFAULT);
-    if (!fd_is_tty_object(fd_get(fd)))
-        return ERR(ENOTTY);
+    obj = fd_get(fd);
 
+    /* PTY slave/master: usa termios per-PTY */
+    pty_obj = fd_get_pty(obj);
+    if (pty_obj) {
+        rc = pty_tcgetattr(pty_obj, &term);
+        if (rc < 0) return ERR(-rc);
+        rc = user_store_bytes(term_uva, &term, sizeof(term));
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
+    if (!fd_is_tty_object(obj))
+        return ERR(ENOTTY);
     rc = tty_tcgetattr(&term);
     if (rc < 0)
         return ERR(-rc);
@@ -4892,20 +5001,29 @@ static uint64_t sys_tcgetattr(uint64_t args[6])
 
 static uint64_t sys_tcsetattr(uint64_t args[6])
 {
-    int        fd = (int)args[0];
-    int        action = (int)args[1];
-    uintptr_t  term_uva = (uintptr_t)args[2];
-    termios_t  term;
-    int        rc;
+    int          fd       = (int)args[0];
+    int          action   = (int)args[1];
+    uintptr_t    term_uva = (uintptr_t)args[2];
+    termios_t    term;
+    int          rc;
+    fd_object_t *obj;
+    pty_t       *pty_obj;
 
     if (!term_uva)
         return ERR(EFAULT);
-    if (!fd_is_tty_object(fd_get(fd)))
-        return ERR(ENOTTY);
-
+    obj = fd_get(fd);
     rc = user_copy_bytes(term_uva, &term, sizeof(term));
-    if (rc < 0)
-        return ERR(-rc);
+    if (rc < 0) return ERR(-rc);
+
+    /* PTY slave/master: usa termios per-PTY */
+    pty_obj = fd_get_pty(obj);
+    if (pty_obj) {
+        rc = pty_tcsetattr(pty_obj, action, &term);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+
+    if (!fd_is_tty_object(obj))
+        return ERR(ENOTTY);
     rc = tty_tcsetattr(action, &term);
     return (rc < 0) ? ERR(-rc) : 0;
 }

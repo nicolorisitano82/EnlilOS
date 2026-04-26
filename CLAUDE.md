@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=56 pass=56 fail=0`
+- Stato validato: `SUMMARY total=57 pass=57 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -447,7 +447,7 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 
 **File**: [kernel/selftest.c](kernel/selftest.c)
 
-47 test case in ordine:
+57 test case in ordine:
 1. `vfs-rootfs` — mount initrd, readdir, stat file
 2. `vfs-devfs` — devfs /dev/stdin /dev/stdout
 3. `ext4-core` — mount rw ext4, journal replay
@@ -457,46 +457,54 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 7. `net-stack` — TCP/IP stack user-space (GARP inviato, tx_packets > 0)
 8. `elf-loader` — carica ELF statico in EL0
 9. `init-elf` — parse INIT.ELF
-8. `nsh-elf` — parse NSH.ELF
-9. `execve` — execve() completo
-10. `exec-target` — target execve con EXEC2.ELF
-11. `elf-dynamic` — carica ELF PIE con ld_enlil.so
-12. `fork-cow` — fork() + COW + output su file ext4
-13. `signal-core` — sigaction/sigreturn/kill
-14. `jobctl-core` — process groups/sessioni/TTY job control
-15. `posix-ux` — pipe/dup/cwd/env/termios
-16. `musl-abi-core` — ABI minima musl + auxv
-17. `vfs-namespace` — mount namespace + pivot_root
-18. `mreact-core` — reactive subscriptions
-19. `cap-core` — capability alloc/query/derive/revoke
-20. `ksem-core` — semafori RT + priority inheritance
-21. `kmon-core` — monitor + PI ceiling
-22. `ipc-sync` — IPC sincrono + priority donation
-23. `kdebug-core` — crash reporter + ksymtab
-24. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
-25. `procfs-core` — mount /proc + snapshot base
-26. `mmap-file` — mmap/msync/munmap file-backed
-27. `tls-tp` — preservazione `TPIDR_EL0`
-28. `crt-startup` — ctor/env/auxv/dtor
-29. `musl-hello` — smoke `write/open/close`
-30. `musl-stdio` — smoke `printf/snprintf`
-31. `musl-malloc` — smoke `malloc/calloc/realloc`
-32. `musl-forkexec` — smoke `fork/execve/waitpid`
-33. `musl-pipe` — smoke `pipe/dup2/termios`
-34. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
-35. `musl-pipe` — smoke `pipe/dup2/termios`
-36. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
-37. `musl-dlfcn` — `dlopen/dlsym/dlclose/dlerror`
-38. `arksh-toolchain` — smoke toolchain/CMake per port hosted
-39. `arksh-login` — login shell bridge e layout `/home`
-40. `kbd-layout` — layout tastiera `us/it` e persistenza
-41. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
-42. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
-43. `futex-core` — `FUTEX_WAIT/WAKE/REQUEUE/CMP_REQUEUE` + join base
-44. `musl-pthread` — bootstrap `pthread` sopra `clone/futex`
-45. `musl-sem` — `sem_t` bootstrap sopra `ksem`
-46. `tls-mt` — TLS statico multi-thread per `__thread`
-47. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
+10. `nsh-elf` — parse NSH.ELF
+11. `execve` — execve() completo
+12. `exec-target` — target execve con EXEC2.ELF
+13. `elf-dynamic` — carica ELF PIE con ld_enlil.so
+14. `fork-cow` — fork() + COW + output su file ext4
+15. `signal-core` — sigaction/sigreturn/kill
+16. `jobctl-core` — process groups/sessioni/TTY job control
+17. `posix-ux` — pipe/dup/cwd/env/termios
+18. `musl-abi-core` — ABI minima musl + auxv
+19. `clone-thread` — `clone()` thread-oriented + `tgid/gettid`
+20. `thread-lifecycle` — `set_tid_address/tgkill/exit_group/clear_child_tid`
+21. `futex-core` — `FUTEX_WAIT/WAKE/REQUEUE/CMP_REQUEUE` + join base
+22. `musl-pthread` — bootstrap `pthread` sopra `clone/futex`
+23. `musl-sem` — `sem_t` bootstrap sopra `ksem`
+24. `tls-mt` — TLS statico multi-thread per `__thread`
+25. `arksh-toolchain` — smoke toolchain/CMake per port hosted
+26. `arksh-login` — login shell bridge e layout `/home`
+27. `vfs-namespace` — mount namespace + pivot_root
+28. `mreact-core` — reactive subscriptions
+29. `cap-core` — capability alloc/query/derive/revoke
+30. `ksem-core` — semafori RT + priority inheritance
+31. `kmon-core` — monitor + PI ceiling
+32. `ipc-sync` — IPC sincrono + priority donation
+33. `kdebug-core` — crash reporter + ksymtab
+34. `gpu-stack` — VirtIO-GPU scanout + renderer 2D
+35. `procfs-core` — mount /proc + snapshot base
+36. `linux-proc-dev-etc` — /proc/<pid>/{status,cmdline,...}, /dev/fd, /etc stub
+37. `linux-fs-env` — /proc/sys, /etc/locale.conf, /etc/ld.so.cache, /etc/localtime
+38. `linux-at-paths` — AT_FDCWD, openat, fstatat, symlinkat, readlinkat, utimensat
+39. `sysv-ipc` — shmget/shmat/semget/semop
+40. `mmap-file` — mmap/msync/munmap file-backed
+41. `tls-tp` — preservazione `TPIDR_EL0`
+42. `crt-startup` — ctor/env/auxv/dtor
+43. `musl-hello` — smoke `write/open/close`
+44. `musl-stdio` — smoke `printf/snprintf`
+45. `musl-malloc` — smoke `malloc/calloc/realloc`
+46. `musl-forkexec` — smoke `fork/execve/waitpid`
+47. `musl-pipe` — smoke `pipe/dup2/termios`
+48. `musl-glob` — smoke `glob()/fnmatch()` sopra VFS
+49. `musl-dlfcn` — `dlopen/dlsym/dlclose/dlerror`
+50. `gnu-ls` — binario GNU ls statico tramite linux-compat
+51. `bash-linux-fork` — bash-linux fork+execve child
+52. `linux-ld-shim` — PT_INTERP /lib/ld-linux-aarch64.so.1 alias
+53. `epoll-core` — epoll_create1/ctl/pwait
+54. `kbd-layout` — layout tastiera `us/it` e persistenza
+55. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
+56. `pty-core` — PTY master/slave lifecycle, termios, TIOCGWINSZ/TIOCSWINSZ
+57. `mmu-user-va` — mmu_read_user/write_user/remap_user_region kernel-side
 
 ### Helper macro
 ```c
@@ -511,20 +519,20 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-24)
+## Milestone completate (stato 2026-04-25)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f` e `M8-08d/e/f/g` completi in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=56 pass=56 fail=0
+SUMMARY total=57 pass=57 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
 2. **M8-08h** — i18n / localizzazione stringhe
-3. **M11-05f/g** — hardening Linux compat residuo (PTY, glibc shims)
+3. **M11-05g** — hardening Linux compat residuo (glibc shims)
 4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
 5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 6. **M13-02** — SMP bootstrap
@@ -538,6 +546,27 @@ SUMMARY total=56 pass=56 fail=0
 - **`/etc/ld.so.cache`**: stub binario minimo in initrd (magic glibc-ld.so.cache1.1, 0 entries).
 - **`/etc/localtime`**: TZif2 UTC copiato da host macOS (`/usr/share/zoneinfo/UTC`, 114 B).
 - Selftest: `linux-fs-env`. Suite: `56/56`.
+
+### Stato operativo M11-05f / PTY (Pseudo-Terminal)
+
+**File**: [include/pty.h](include/pty.h), [kernel/pty.c](kernel/pty.c),
+[toolchain/enlilos-musl/src/pty.c](toolchain/enlilos-musl/src/pty.c),
+[toolchain/enlilos-musl/include/pty.h](toolchain/enlilos-musl/include/pty.h),
+[toolchain/smoke/pty_demo.c](toolchain/smoke/pty_demo.c)
+
+- `M11-05f` chiusa in `v1`.
+- PTY pool statico 8 slot (`PTY_MAX=8`), ring buffer m2s/s2m da 4096 B, edit buffer canonico 256 B.
+- devfs integration: `DEV_NODE_PTMX=11`, `DEV_NODE_PTS_BASE=12..19`, `DEV_NODE_PTS_DIR=20`.
+- Apertura master: `open("/dev/ptmx")` → `pty_alloc()`, `locked=1`. Slave apribile solo dopo `unlockpt` (TIOCSPTLCK ioctl con value 0).
+- Apertura slave: `open("/dev/pts/N")` → `pty_get(N)`, check `!locked`, `pty_open_slave()`.
+- Line discipline (`pty_ld_byte`): ICRNL, ISIG (^C→SIGINT, ^Z→SIGTSTP), ICANON (edit buffer, commit su '\n', VERASE, VKILL, VEOF), ECHO/ECHOE. In raw mode: bypass LD, byte diretti in m2s.
+- Slave write: OPOST+ONLCR espande '\n' → '\r\n' verso s2m.
+- `pty_slave_read` aggiorna `slave_pgid` da `current_task` a ogni call (come `tty_adopt_current_session`).
+- `TIOCSWINSZ` su master: aggiorna `winsize` e invia `SIGWINCH` a `slave_pgid`.
+- `SIGWINCH=28` default action = **ignore** (POSIX). Critico: mancanza nella lista `signal_default_ignore` causava terminazione del processo demo invece del semplice notify.
+- musl bootstrap: `posix_openpt` (via `openat("/dev/ptmx")`), `grantpt` (no-op), `unlockpt` (TIOCSPTLCK), `ptsname_r` (TIOCGPTN + snprintf), `ptsname` (buffer statico), `openpty`.
+- **Bug critico risolto: double PTY alloc via vfsd+shadow**. Quando vfsd è disponibile, `fd_open_path_current` usa `vfsd_proxy_open` (alloca PTY slot A lato vfsd) E poi `fd_bind_remote_shadow` → `vfs_open` (alloca PTY slot B lato kernel). Le ioctls usano il cookie del shadow (slot B), la slave viene aperta su B, ma `write(master_fd)` usa `vfsd_proxy_write` su slot A che ha `slave_open=0` → -EIO. **Fix**: aggiunta `is_pty_path()` in `kernel/syscall.c`; `/dev/ptmx` e `/dev/pts/*` aprono sempre via kernel-direct VFS, bypassando vfsd.
+- Selftest: `pty-core` con `PTYDEMO.ELF`. Suite: `57/57`.
 
 ### Stato operativo M11-05d / ld-linux shim + library search paths
 

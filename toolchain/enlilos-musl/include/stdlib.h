@@ -25,4 +25,11 @@ int       unsetenv(const char *name);
 void      qsort(void *base, size_t nmemb, size_t size,
                 int (*compar)(const void *, const void *));
 
+/* PTY POSIX API */
+int       posix_openpt(int flags);
+int       grantpt(int fd);
+int       unlockpt(int fd);
+char     *ptsname(int fd);
+int       ptsname_r(int fd, char *buf, size_t len);
+
 #endif

@@ -13,6 +13,7 @@
 #include "ext4.h"
 #include "initrd.h"
 #include "procfs.h"
+#include "pty.h"
 #include "term80.h"
 #include "tty.h"
 #include "uart.h"
@@ -29,6 +30,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define DEV_NODE_ZERO       8U
 #define DEV_NODE_URANDOM    9U
 #define DEV_NODE_RANDOM     10U
+/* DEV_NODE_PTMX = 11, DEV_NODE_PTS_BASE = 12..19, DEV_NODE_PTS_DIR = 20 defined in pty.h */
 
 #define PLACE_NODE_DIR      1U
 #define PLACE_NODE_README   2U
@@ -671,21 +673,81 @@ static int devfs_open(const vfs_mount_t *mount, const char *relpath,
         return 0;
     }
 
+    /* /dev/ptmx: crea coppia PTY, ritorna master fd */
+    if (vfs_streq(name, "ptmx")) {
+        uint32_t idx = 0U;
+        pty_t *p = pty_alloc(&idx);
+        if (!p) return -ENOMEM;
+        file_reset(out, mount, DEV_NODE_PTMX, flags);
+        out->cookie = (uintptr_t)idx;
+        return 0;
+    }
+
+    /* /dev/pts: directory degli slave PTY */
+    if (vfs_streq(name, "pts")) {
+        file_reset(out, mount, DEV_NODE_PTS_DIR, flags);
+        out->cookie = 0U;
+        return 0;
+    }
+
+    /* /dev/pts/N: apre slave PTY (solo se unlockpt() e' stato chiamato) */
+    if (name[0] == 'p' && name[1] == 't' && name[2] == 's' && name[3] == '/') {
+        const char *np = name + 4U;
+        uint32_t    n  = 0U;
+        pty_t      *p;
+
+        if (*np == '\0') {
+            /* open("/dev/pts") as directory */
+            file_reset(out, mount, DEV_NODE_PTS_DIR, flags);
+            out->cookie = 0U;
+            return 0;
+        }
+        while (*np >= '0' && *np <= '9') {
+            n = n * 10U + (uint32_t)(*np - '0');
+            np++;
+        }
+        if (*np != '\0' || n >= PTY_MAX) return -ENOENT;
+        p = pty_get(n);
+        if (!p)         return -ENOENT;
+        if (p->locked)  return -EIO;   /* slave non ancora unlockato */
+        pty_open_slave(p, 0U);         /* slave_pgid aggiornato alla prima read */
+        file_reset(out, mount, DEV_NODE_PTS_BASE + n, flags);
+        out->cookie = (uintptr_t)n;
+        return 0;
+    }
+
     return -ENOENT;
 }
 
 static ssize_t devfs_read(vfs_file_t *file, void *buf, size_t count)
 {
-    if (file->node_id == DEV_NODE_DIR)
+    uint32_t nid = file->node_id;
+    pty_t   *p;
+
+    if (nid == DEV_NODE_DIR || nid == DEV_NODE_PTS_DIR)
         return -EISDIR;
     if (!buf) return -EFAULT;
-    if (file->node_id == DEV_NODE_NULL)
+
+    /* PTY master read */
+    if (nid == DEV_NODE_PTMX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (!p) return -EIO;
+        return pty_master_read(p, buf, count, file->flags);
+    }
+    /* PTY slave read */
+    if (nid >= DEV_NODE_PTS_BASE && nid < DEV_NODE_PTS_BASE + PTY_MAX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (!p) return -EIO;
+        return pty_slave_read(p, buf, count, file->flags);
+    }
+
+    if (nid == DEV_NODE_NULL)
         return 0;
-    if (file->node_id == DEV_NODE_ZERO) {
+    if (nid == DEV_NODE_ZERO) {
         vfs_memset(buf, 0U, count);
         return (ssize_t)count;
     }
-    if (file->node_id == DEV_NODE_URANDOM || file->node_id == DEV_NODE_RANDOM) {
+    if (nid == DEV_NODE_URANDOM || nid == DEV_NODE_RANDOM) {
         uint8_t *dst = (uint8_t *)buf;
         size_t   pos = 0U;
 
@@ -703,11 +765,27 @@ static ssize_t devfs_read(vfs_file_t *file, void *buf, size_t count)
 static ssize_t devfs_write(vfs_file_t *file, const void *buf, size_t count)
 {
     const char *bytes = (const char *)buf;
+    uint32_t    nid   = file->node_id;
+    pty_t      *p;
 
-    if (file->node_id == DEV_NODE_DIR)
+    if (nid == DEV_NODE_DIR || nid == DEV_NODE_PTS_DIR)
         return -EISDIR;
     if (!buf) return -EFAULT;
-    if (file->node_id == DEV_NODE_NULL)
+
+    /* PTY master write */
+    if (nid == DEV_NODE_PTMX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (!p) return -EIO;
+        return pty_master_write(p, buf, count, file->flags);
+    }
+    /* PTY slave write */
+    if (nid >= DEV_NODE_PTS_BASE && nid < DEV_NODE_PTS_BASE + PTY_MAX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (!p) return -EIO;
+        return pty_slave_write(p, buf, count, file->flags);
+    }
+
+    if (nid == DEV_NODE_NULL)
         return (ssize_t)count;
     if (tty_check_output_current() < 0)
         return -EINTR;
@@ -724,23 +802,55 @@ static int devfs_readdir(vfs_file_t *file, vfs_dirent_t *out)
 {
     static const char *const names[] = {
         "console", "tty", "stdin", "stdout", "stderr", "null",
-        "zero", "urandom", "random"
+        "zero", "urandom", "random", "ptmx", "pts"
     };
+    uint32_t nid = file->node_id;
 
-    if (file->node_id != DEV_NODE_DIR)
+    /* /dev/pts directory: elenca slave PTY aperti */
+    if (nid == DEV_NODE_PTS_DIR) {
+        char name_buf[4];
+        uint32_t idx;
+
+        for (idx = file->dir_index; idx < PTY_MAX; idx++) {
+            pty_t *p = pty_get(idx);
+            if (p && p->slave_open) {
+                file->dir_index = idx + 1U;
+                name_buf[0] = (char)('0' + (char)idx);
+                name_buf[1] = '\0';
+                return dirent_fill(out, name_buf,
+                                   S_IFCHR | S_IRUSR | S_IWUSR |
+                                   S_IRGRP | S_IWGRP |
+                                   S_IROTH | S_IWOTH);
+            }
+            file->dir_index = idx + 1U;
+        }
+        return -ENOENT;
+    }
+
+    if (nid != DEV_NODE_DIR)
         return -ENOTDIR;
     if (file->dir_index >= (uint32_t)(sizeof(names) / sizeof(names[0])))
         return -ENOENT;
 
-    return dirent_fill(out, names[file->dir_index++],
-                       S_IFCHR | S_IRUSR | S_IWUSR |
-                       S_IRGRP | S_IWGRP |
-                       S_IROTH | S_IWOTH);
+    /* "pts" entry in /dev: report as directory */
+    {
+        uint32_t    i    = file->dir_index++;
+        uint32_t    mode = (vfs_streq(names[i], "pts"))
+                          ? (uint32_t)(S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR |
+                                       S_IRGRP | S_IXGRP |
+                                       S_IROTH | S_IXOTH)
+                          : (uint32_t)(S_IFCHR | S_IRUSR | S_IWUSR |
+                                       S_IRGRP | S_IWGRP |
+                                       S_IROTH | S_IWOTH);
+        return dirent_fill(out, names[i], mode);
+    }
 }
 
 static int devfs_stat(vfs_file_t *file, stat_t *out)
 {
-    if (file->node_id == DEV_NODE_DIR)
+    uint32_t nid = file->node_id;
+
+    if (nid == DEV_NODE_DIR || nid == DEV_NODE_PTS_DIR)
         return file_stat_dir(out);
 
     stat_fill(out, S_IFCHR | S_IRUSR | S_IWUSR |
@@ -751,7 +861,16 @@ static int devfs_stat(vfs_file_t *file, stat_t *out)
 
 static int devfs_close(vfs_file_t *file)
 {
-    (void)file;
+    uint32_t nid = file->node_id;
+    pty_t   *p;
+
+    if (nid == DEV_NODE_PTMX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (p) pty_close_master(p);
+    } else if (nid >= DEV_NODE_PTS_BASE && nid < DEV_NODE_PTS_BASE + PTY_MAX) {
+        p = pty_get((uint32_t)file->cookie);
+        if (p) pty_close_slave(p);
+    }
     return 0;
 }
 

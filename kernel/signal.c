@@ -110,7 +110,8 @@ static uint64_t signal_strip_unmaskable(uint64_t mask)
 
 static int signal_default_ignore(int sig)
 {
-    return sig == SIGCHLD;
+    /* POSIX: SIGCHLD e SIGWINCH hanno default action = ignore */
+    return sig == SIGCHLD || sig == SIGWINCH;
 }
 
 static int signal_default_stop(int sig)
