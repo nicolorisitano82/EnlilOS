@@ -18,15 +18,18 @@ Le milestone completate oggi coprono:
 - **M8**: `fork()` con Copy-on-Write, `mmap()` file-backed con `msync()/munmap()`, signal handling, process groups/sessioni/job control, `pipe/dup/dup2`, `getcwd/chdir`, `termios/isatty`, `glob()/fnmatch()` bootstrap user-space, build/toolchain CMake `v1` per `arksh`, integrazione login shell `v1` con `/bin/arksh`, binario reale esterno `/bin/arksh.real` quando disponibile, fallback `/bin/nsh`, `mreact`, `ksem`, `kmon` e layout tastiera multipli `us`/`it` con `loadkeys`, `kbdlayout` e persistenza via `vconsole.conf`.
 - **M9**: capability kernel-side, `vfsd` e `blkd` user-space bootstrap via IPC, mount dinamico, namespace privati, bind mount e `pivot_root()`.
 - **M10**: driver `virtio-net` MMIO `v1`, `netd` bootstrap con stack IPv4/ARP/ICMP/UDP/TCP minimale e BSD socket API `v1` (`AF_INET`, `SOCK_STREAM`/`SOCK_DGRAM`) loopback-only su `127.0.0.1`.
-- **M11-05a/b/c**: compat Linux AArch64 `v1` già operativa, con tabella syscall separata, mount compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`), supporto `ET_EXEC` low-VA tramite alias user-space, `bash-linux` statico funzionante da `/data/bash-linux`, `epoll_create1/ctl/pwait` bounded e System V IPC `v1` (`shmget/shmat/shmdt/shmctl`, `semget/semop/semctl`) per il profilo shell/tool Linux.
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
-- **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
 - **M11-02a/b/c/d/e**: profilo multi-thread `v1` chiuso, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond`, TLS statico multi-thread per `__thread`, `errno` thread-local e smoke `musl-pthread` + `musl-sem` + `tls-mt`.
+- **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
+- **M11-05a/b/c**: compat Linux AArch64 `v1` con tabella syscall separata, mount compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`), supporto `ET_EXEC` low-VA tramite alias user-space, `bash-linux` statico funzionante da `/data/bash-linux`, `epoll_create1/ctl/pwait` bounded e System V IPC `v1` (`shmget/shmat/shmdt/shmctl`, `semget/semop/semctl`).
+- **M11-05d**: shim `PT_INTERP` — `ld-linux-aarch64.so.1` risolto automaticamente come alias verso `/LD-ENLIL.SO` quando il file non esiste nel VFS; search path `DT_NEEDED` esteso a `/lib/aarch64-linux-gnu`, `/usr/lib`.
+- **M11-05e**: Linux filesystem environment — `/proc/sys` subtree, `/etc/locale.conf`, `/etc/ld.so.cache` stub, `/etc/localtime` TZif2 UTC, `/proc/<pid>/maps` stub.
+- **M11-05f**: PTY pseudo-terminal `v1` — `posix_openpt/grantpt/unlockpt/ptsname_r`, `/dev/ptmx` e `/dev/pts/N`, line discipline completa (ICANON, ECHO, ISIG, ICRNL, OPOST/ONLCR), `TIOCGWINSZ/TIOCSWINSZ`, `SIGWINCH` (default ignore POSIX), musl bootstrap con `openpty`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
-ha gia' diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=53 pass=53 fail=0`.
+ha diverse milestone reali implementate. Il selftest QEMU corrente passa con
+`SUMMARY total=57 pass=57 fail=0`.
 
 ---
 
@@ -64,67 +67,34 @@ Nota pratica: il progetto oggi e' ancora in una fase di bootstrap ibrida. Alcuni
 Al boot, la mount table osservabile oggi e':
 
 - `/` -> `initrd-cpio` read-only embedded nel kernel
-- `/dev` -> `devfs`
+- `/dev` -> `devfs` (include `/dev/ptmx`, `/dev/pts/N`)
 - `/proc` -> `procfs` read-only
 - `/data` -> `ext4` su `virtio-blk` quando il disco e' presente
 - `/sysroot` -> `ext4` su `virtio-blk` quando il disco e' presente
 
 L'`initrd` e' generato a build-time e contiene almeno:
 
-- `README.TXT`
-- `BOOT.TXT`
-- `dev/`
-- `data/`
-- `sysroot/`
-- `INIT.ELF`
+- `README.TXT`, `BOOT.TXT`
+- `dev/`, `data/`, `sysroot/`
+- `INIT.ELF`, `NSH.ELF`
 - `ARKSHBOOT.ELF`
-- `bin/arksh`
-- `bin/arksh.real` (se build esterna `arksh` presente)
-- `bin/nsh`
-- `usr/bin/loadkeys`
-- `usr/bin/kbdlayout`
-- `etc/arkshrc`
-- `etc/vconsole.conf`
+- `bin/arksh`, `bin/arksh.real` (se build esterna presente), `bin/nsh`
+- `usr/bin/loadkeys`, `usr/bin/kbdlayout`
+- `etc/arkshrc`, `etc/vconsole.conf`, `etc/locale.conf`, `etc/localtime`, `etc/ld.so.cache`
 - `home/user/.config/arksh/arkshrc`
-- `usr/share/kbd/keymaps/us.map`
-- `usr/share/kbd/keymaps/it.map`
-- `NSH.ELF`
-- `DEMO.ELF`
-- `EXEC1.ELF`
-- `EXEC2.ELF`
-- `DYNDEMO.ELF`
-- `FORKDEMO.ELF`
-- `SIGDEMO.ELF`
-- `MREACTDEMO.ELF`
-- `CAPDEMO.ELF`
-- `VFSD.ELF`
-- `BLKD.ELF`
-- `NETD.ELF`
-- `SOCKDEMO.ELF`
-- `MMAPDEMO.ELF`
-- `JOBDEMO.ELF`
-- `NSDEMO.ELF`
-- `POSIXDEMO.ELF`
-- `MUSLABI.ELF`
-- `TLSDEMO.ELF`
-- `CRTDEMO.ELF`
-- `MUSLHELLO.ELF`
-- `MUSLSTDIO.ELF`
-- `MUSLMALLOC.ELF`
-- `MUSLFORK.ELF`
-- `MUSLPIPE.ELF`
-- `MUSLGLOB.ELF`
-- `CLONEDEMO.ELF`
-- `THREADLIFE.ELF`
-- `FUTEXDEMO.ELF`
-- `PTHREADDEMO.ELF`
-- `SEMDEMO.ELF`
-- `TLSMTDEMO.ELF`
-- `EPOLLDEMO.ELF`
-- `SYSVIPC.ELF`
-- `ARKSHSMK.ELF`
-- `libdyn.so`
-- `LD-ENLIL.SO`
+- `usr/share/kbd/keymaps/us.map`, `usr/share/kbd/keymaps/it.map`
+- ELF demo: `DEMO.ELF`, `EXEC1.ELF`, `EXEC2.ELF`, `DYNDEMO.ELF`, `LDINTDEMO.ELF`
+- ELF demo: `FORKDEMO.ELF`, `SIGDEMO.ELF`, `MREACTDEMO.ELF`, `CAPDEMO.ELF`
+- ELF demo: `JOBDEMO.ELF`, `NSDEMO.ELF`, `POSIXDEMO.ELF`, `MMAPDEMO.ELF`
+- ELF demo: `MUSLABI.ELF`, `TLSDEMO.ELF`, `CRTDEMO.ELF`
+- ELF demo: `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`, `MUSLGLOB.ELF`
+- ELF demo: `MUSLDL.ELF`
+- ELF demo: `CLONEDEMO.ELF`, `THREADLIFE.ELF`, `FUTEXDEMO.ELF`, `PTHREADDEMO.ELF`, `SEMDEMO.ELF`, `TLSMTDEMO.ELF`
+- ELF demo: `EPOLLDEMO.ELF`, `SYSVIPC.ELF`, `SOCKDEMO.ELF`, `PTYDEMO.ELF`
+- ELF demo: `ARKSHSMK.ELF`
+- ELF server: `VFSD.ELF`, `BLKD.ELF`, `NETD.ELF`
+- ELF linux-compat: `LS.ELF`
+- `libdyn.so`, `LD-ENLIL.SO`
 
 Questa scelta permette un bootstrap completamente in RAM e accessi O(1) ai file iniziali, utile per configurazione iniziale, recovery, avvio dei server user-space e validazione dei demo EL0.
 
@@ -207,6 +177,12 @@ la bootstrap libc espone gia' `<pthread.h>`, `<signal.h>` e `<semaphore.h>`, con
 - `errno` thread-local
 - smoke `PTHREADDEMO.ELF`, `SEMDEMO.ELF` e `TLSMTDEMO.ELF`
 
+Da `M11-05f` la libc bootstrap espone anche `<pty.h>` con:
+
+- `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`, `ptsname_r`
+- `openpty`
+- smoke `PTYDEMO.ELF`
+
 Fuori scope della `v1` restano soprattutto `FUTEX_LOCK_PI`, robust futex list,
 `pthread_cancel`, affinity e gli attributi scheduler completi.
 
@@ -250,40 +226,25 @@ Target utili per il disco:
 La boot console supporta sia seriale sia modalita' grafica. Alcuni comandi utili:
 
 - `help`
-- `pwd`
-- `cd /data`
-- `ls`
-- `cat /BOOT.TXT`
+- `pwd`, `cd /data`, `ls`, `cat /BOOT.TXT`
 - `write`, `append`, `truncate`, `sync`, `fsync`
 - `mkdir`, `rm`, `mv`
-- `elfdemo`, `execdemo`, `dyndemo`, `forkdemo`, `sigdemo`, `mreactdemo`
-- `jobdemo`
-- `nsdemo`
-- `posixdemo`
-- `muslabi`
-- `muslglob`
+- `elfdemo`, `execdemo`, `dyndemo`, `forkdemo`, `sigdemo`
+- `mreactdemo`, `jobdemo`, `nsdemo`, `posixdemo`
+- `muslabi`, `muslglob`, `musldl`
 - `arkshsmoke`
-- `clonedemo`
-- `threadlife`
-- `futexdemo`
-- `pthreaddemo`
-- `semdemo`
-- `tlsmtdemo`
+- `clonedemo`, `threadlife`, `futexdemo`
+- `pthreaddemo`, `semdemo`, `tlsmtdemo`
+- `ptydemo`
 - `arksh`
-- `net`
-- `socketdemo`
-- `kbdlayout`
-- `loadkeys it`
+- `net`, `socketdemo`
+- `epolldemo`, `sysvipcdemo`
+- `ldintdemo`
+- `kbdlayout`, `loadkeys it`
 - `runelf /MUSLHELLO.ELF`
-- `runelf /MUSLSTDIO.ELF`
-- `runelf /MUSLMALLOC.ELF`
-- `runelf /MUSLFORK.ELF`
-- `runelf /MUSLPIPE.ELF`
-- `runelf /MUSLGLOB.ELF`
-- `epolldemo`
-- `sysvipcdemo`
 - `runelf PATH`
 - `nsh`
+- `poweroff`, `reboot`, `halt`
 - `selftest`, `selftest [nome]`
 
 Al boot il sistema prova ad avviare `/bin/arksh` come login shell di default. Il
@@ -305,38 +266,33 @@ BSD socket API `v1` per task EL0: `AF_INET`, `SOCK_STREAM` e `SOCK_DGRAM`,
 solo loopback `127.0.0.1` per ora. Il comando `socketdemo` lancia
 `/SOCKDEMO.ELF` e verifica echo TCP, UDP loopback e `setsockopt/getsockopt`.
 
+Da `M11-05f` e' disponibile il PTY subsystem: `posix_openpt/grantpt/unlockpt/ptsname_r`,
+apertura slave via `/dev/pts/N`, line discipline completa, `TIOCGWINSZ/TIOCSWINSZ` e
+`SIGWINCH`. Il comando `ptydemo` lancia `PTYDEMO.ELF` che verifica l'intero ciclo.
+
 `NSH` e' una shell EL0 minimale integrata nel rootfs bootstrap. Al momento espone:
 
-- `ls`
-- `cat`
-- `echo`
-- `exec`
-- `clear`
-- `top`
-- `cd`
-- `pwd`
-- `help`
-- `exit`
+- `ls`, `cat`, `echo`, `exec`, `clear`, `top`, `cd`, `pwd`, `help`, `exit`
 
 ---
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 53 casi:
+Esiste una suite di self-test kernel-side che oggi copre 57 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`, `net-core`, `net-stack`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
-- `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`, `vfs-namespace`, `mreact-core`, `cap-core`
-- `ksem-core`, `kmon-core`, `ipc-sync`
-- `kdebug-core`, `gpu-stack`, `procfs-core`, `linux-proc-dev-etc`, `linux-at-paths`, `mmap-file`, `tls-tp`, `crt-startup`
-- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`
-- `musl-dlfcn`
-- `epoll-core`
-- `sysv-ipc`
-- `arksh-toolchain`, `arksh-login`
-- `kbd-layout`, `gnu-ls`, `mmu-user-va`
+- `fork-cow`, `signal-core`, `jobctl-core`, `posix-ux`, `musl-abi-core`
 - `clone-thread`, `thread-lifecycle`, `futex-core`, `musl-pthread`, `musl-sem`, `tls-mt`
-- `socket-api`
+- `arksh-toolchain`, `arksh-login`, `vfs-namespace`, `mreact-core`, `cap-core`
+- `ksem-core`, `kmon-core`, `ipc-sync`
+- `kdebug-core`, `gpu-stack`, `procfs-core`
+- `linux-proc-dev-etc`, `linux-fs-env`, `linux-at-paths`
+- `sysv-ipc`, `mmap-file`, `tls-tp`, `crt-startup`
+- `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`, `musl-dlfcn`
+- `gnu-ls`, `bash-linux-fork`, `linux-ld-shim`
+- `epoll-core`, `kbd-layout`, `socket-api`
+- `pty-core`, `mmu-user-va`
 
 La build dedicata e':
 
@@ -345,14 +301,14 @@ make test-build
 make test
 ```
 
-`make test` ora esegue l'autorun della suite e poi spegne automaticamente la VM
-QEMU tramite `shutdown_system(SHUTDOWN_POWEROFF)`, quindi non resta piu' aperta
+`make test` esegue l'autorun della suite e poi spegne automaticamente la VM
+QEMU tramite `shutdown_system(SHUTDOWN_POWEROFF)`, quindi non resta aperta
 in halt dopo il summary finale.
 
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=53 pass=53 fail=0
+SUMMARY total=57 pass=57 fail=0
 ```
 
 Nota: se il selftest si blocca prima del poweroff, conviene leggere il log seriale
@@ -385,13 +341,15 @@ EnlilOS/
 │   ├── elf_loader.c      # ELF64 static/dynamic loader
 │   ├── microkernel.c     # IPC / ports / task model
 │   ├── sched.c           # scheduler FPP
-│   ├── tty.c             # line discipline
+│   ├── pty.c             # PTY subsystem (M11-05f)
+│   ├── tty.c             # line discipline console
 │   ├── term80.c          # terminale testuale 80x25
 │   └── selftest.c        # suite integrata
 ├── tools/
 │   └── mkinitrd.py       # builder host-side dell'archivio CPIO
 ├── toolchain/            # sysroot/bootstrap libc/wrapper musl v1
 │   ├── cmake-smoke/      # smoke project CMake per M8-08e
+│   └── smoke/            # demo musl statici (incluso pty_demo.c)
 ├── user/                 # ELF userspace statici e dinamici
 ├── BACKLOG.md            # roadmap principale
 └── BACKLOG2.md           # roadmap estesa / extra milestone
@@ -419,5 +377,6 @@ Se guardi il backlog principale, il nucleo del sistema e' gia' oltre il bring-up
 - storage e rootfs bootstrap sono presenti
 - userspace EL0 con loader dinamico, `fork()`, `mmap()` file-backed e `execve()` e' presente
 - shell `NSH`, capability, `vfsd`, `blkd`, `procfs` e IPC sincrono sono presenti
+- compat Linux AArch64 attiva con `bash-linux`, `epoll`, SysV IPC, PTY e shim `ld-linux`
 
 Il path core descritto in [BACKLOG.md](BACKLOG.md) e' completato; il lavoro successivo continua nella roadmap estesa in [BACKLOG2.md](BACKLOG2.md).
