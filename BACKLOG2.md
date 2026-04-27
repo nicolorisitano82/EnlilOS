@@ -581,11 +581,11 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 > `nsh` rimane disponibile come shell di recovery (initrd, modalità single-user)
 > perché non ha dipendenze esterne. arksh è la shell normale dell'utente.
 
-**Stato attuale:** `M8-08a/b/c/d/e/f` completate `v1`. Il bootstrap shell-side e'
+**Stato attuale:** `M8-08a/b/c/d/e/f/g` completate `v1`. Il bootstrap shell-side e'
 chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config,
-fallback `/bin/nsh` e binario reale esterno `/bin/arksh.real` sono reali. Restano
-aperti i pezzi post-bootstrap piu' avanzati (plugin `.so`, UX/history avanzata e
-hardening del port hosted).
+fallback `/bin/nsh`, binario reale esterno `/bin/arksh.real` e layout tastiera `us`/`it`
+sono reali. Restano aperti i pezzi post-bootstrap piu' avanzati (plugin `.so`, UX/history
+avanzata e hardening del port hosted).
 
 **Perché arksh invece di bash/dash:**
 - Zero dipendenze esterne a runtime — solo libc (musl M11-01)
@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=56 pass=56 fail=0`
+- suite runtime piu' recente: `SUMMARY total=58 pass=58 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -877,9 +877,8 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 
 ---
 
-#### M8-08g · Layout Tastiera Multipli (`us`, `it`)
-
-- **Stato attuale:** completata `v1`
+#### ✅ M8-08g · Layout Tastiera Multipli (`us`, `it`)
+**Stato attuale:** **chiusa `v1`**
 
 Necessario per rendere la console e la shell usabili in scenari reali non-US.
 La roadmap deve prevedere almeno layout **US** e **Italiano** (`it`) fin dalla
@@ -1302,7 +1301,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=56 pass=56 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=58 pass=58 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1728,21 +1727,19 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 
 ---
 
-### ⏳ M11-05 · Linux AArch64 Compatibility Layer
+### ✅ M11-05 · Linux AArch64 Compatibility Layer
 **Priorità:** ALTA
 
-> **Stato reale attuale:** la base Linux compat è già avviata.
-> EnlilOS ha oggi:
-> 1. una tabella syscall Linux AArch64 separata da quella nativa
-> 2. selezione ABI per-task (`ENLILOS` vs `LINUX`)
-> 3. primo layer filesystem compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`)
-> 4. un subset ampio di syscall Linux già funzionanti
+> **Stato:** **chiusa `v1`** — tutte le sotto-milestone `a/b/c/d/e/f/g` completate.
+> Suite: `SUMMARY total=58 pass=58 fail=0`
 >
-> Il lavoro residuo non è più “iniziare la compatibilità”, ma proseguire dopo
-> la chiusura `v1` di `M11-05a/b/c/d` con:
-> - l'hardening semantico residuo del vertical slice Linux compat
-> - PTY completo (`M11-05f`)
-> - hardening Linux compat residuo e shim glibc più completi (`M11-05f/g`)
+> EnlilOS esegue oggi:
+> 1. tabella syscall Linux AArch64 separata da quella nativa, selezione ABI per-task
+> 2. `bash-linux` statico interattivo con fork/execve/waitpid/job control
+> 3. layer filesystem compat completo: `/proc`, `/dev`, `/dev/pts`, `/etc`, `/lib`, `/usr`
+> 4. PTY master/slave con line discipline, termios, TIOCGWINSZ/TIOCSWINSZ
+> 5. glibc shim (`GLIBC-COMPAT.SO`) con `DT_GNU_HASH`, alias `libc.so.6`
+> 6. epoll, System V IPC, `ld-linux-aarch64.so.1` shim
 
 **Target:** binari ELF AArch64 compilati per Linux con glibc o musl.
 Casi d'uso tipici: `bash`, `python3`, `gcc`, `git`, `curl`, strumenti GNU coreutils.
@@ -1789,7 +1786,7 @@ tabella compat, quindi qui sotto teniamo separati:
 - `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
 - `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
 - smoke reale: `/data/bash-linux -c 'echo ok'`
-- suite selftest piu' recente: `55/55`
+- suite selftest piu' recente: `58/58`
 
 **Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
@@ -1846,7 +1843,7 @@ Linux compat shell/tool.
 - scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=56 pass=56 fail=0`
+- selftest completo più recente: `SUMMARY total=58 pass=58 fail=0`
 - `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
@@ -1884,7 +1881,7 @@ set di semafori, sufficiente per il vertical slice Linux compat attuale.
 - i timestamp e metadati avanzati IPC non sono ancora esportati in una forma Linux completa
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=56 pass=56 fail=0`
+- selftest completo più recente: `SUMMARY total=58 pass=58 fail=0`
 - `sysv-ipc` verifica binding Linux minimi (`shm*`, `sem*`) e smoke end-to-end via `/SYSVIPC.ELF`
 
 ---
@@ -1915,7 +1912,7 @@ usato direttamente via bindfs `/lib` → `/sysroot/lib`.
   `--dynamic-linker=/lib/ld-linux-aarch64.so.1`; embedded nell'initrd come test
 - **Selftest `linux-ld-shim`**: carica ed esegue `LDINTDEMO.ELF`, verifica exit 0
 - Boot command interattivo: `ldintdemo`
-- Suite: **55/55** (56/56 dopo M11-05e)
+- Suite: **55/55** (58/58 dopo M11-05e/f/g)
 
 **Processo al boot (con linux-compat-stage popolato):**
 ```
@@ -1974,54 +1971,54 @@ DT_NEEDED = libc.so.6                   →  cerca /lib/, /lib/aarch64-linux-gnu
 
 ---
 
-#### M11-05f · Pseudo-Terminal (pty)
+#### ✅ M11-05f · Pseudo-Terminal (pty)
+**Stato:** **chiusa `v1`**
 
-Necessario per `ssh`, terminali grafici, `tmux`, `screen`.
-
-- `posix_openpt()` / `grantpt()` / `unlockpt()` / `ptsname()` — API POSIX
-- Syscall `openat("/dev/ptmx")` → crea coppia master/slave pty
-- Master (`/dev/ptm`) + slave (`/dev/pts/N`): ogni write master → read slave e vice versa
-- Slave si comporta come UART con termios completo (M8-08c)
-- `ioctl(fd, TIOCGWINSZ/TIOCSWINSZ)` — dimensioni finestra terminale
-- Integrazione con arksh (M8-08): arksh usa pty come terminale virtuale per i sotto-processi
+- Pool statico 8 PTY (`PTY_MAX=8`), ring buffer master↔slave da 4096 B, edit buffer canonico 256 B
+- `open("/dev/ptmx")` → `pty_alloc()`, master locked; slave apribile solo dopo `unlockpt` (TIOCSPTLCK=0)
+- `open("/dev/pts/N")` → `pty_get(N)`, check `!locked`, `pty_open_slave()`
+- Line discipline: ICRNL, ISIG (^C→SIGINT, ^Z→SIGTSTP), ICANON, ECHO/ECHOE; raw mode bypass
+- Slave write: OPOST+ONLCR espande `\n`→`\r\n` verso master
+- `TIOCSWINSZ` su master: aggiorna `winsize` + invia `SIGWINCH` a `slave_pgid`
+- `SIGWINCH=28` default action = ignore (aggiunto a `signal_default_ignore`)
+- musl bootstrap: `posix_openpt`, `grantpt`, `unlockpt`, `ptsname_r`, `ptsname`, `openpty`
+- Bug critico risolto: double PTY alloc via vfsd+shadow → fix `is_pty_path()` in `kernel/syscall.c`
+  bypassa vfsd per `/dev/ptmx` e `/dev/pts/*`
+- Demo: `PTYDEMO.ELF`; selftest: `pty-core`
+- Suite: **57/57**
 
 ---
 
-#### M11-05g · glibc Compatibility Shims
+#### ✅ M11-05g · glibc Compatibility Shims
+**Stato:** **chiusa `v1`**
 
-Alcuni simboli glibc non sono in musl o hanno semantica leggermente diversa.
-Libreria shim `libglibc-compat.so` (piccola, ~200 righe):
+**`GLIBC-COMPAT.SO`** (`user/glibc_compat.c`) — PIC shared library senza libc:
 
-```c
-/* Simboli glibc che musl non esporta o esporta diversamente */
+| Simbolo | Implementazione |
+|---|---|
+| `gnu_get_libc_version` | ritorna `"2.38"` |
+| `gnu_get_libc_release` | ritorna `"stable"` |
+| `__libc_start_main` | chiama `main(argc, argv, envp)` con init/fini callbacks |
+| `pthread_atfork` / `__register_atfork` | stub no-op |
+| `__cxa_thread_atexit_impl` | stub no-op (distruttori TLS C++) |
+| `__stack_chk_guard` | data symbol con valore `0xdeadbeefcafebabe` |
+| `__stack_chk_fail` | loop WFE (abort senza libc) |
 
-/* __libc_start_main — entry point glibc, diverso da musl */
-int __libc_start_main(int (*main)(int,char**,char**),
-                      int argc, char **argv, ...) {
-    /* chiama musl __libc_start_main con la stessa firma */
-}
+**ELF loader: `DT_GNU_HASH` support** (`kernel/elf_loader.c`):
+- Tag `0x6ffffef5` parsato in `elf_parse_dynamic` → `gnu_hash_va`
+- Metadata check accetta `gnu_hash_va != 0` come alternativa a `hash_va`
+- `sym_count` da GNU hash: scan bucket max → walk chain con bit0=1 come terminatore
+- Sblocca `.so` glibc moderni che hanno solo `DT_GNU_HASH` (nessun `DT_HASH` classico)
 
-/* gnu_get_libc_version — ritorna versione glibc fittizia */
-const char *gnu_get_libc_version(void) { return "2.38"; }
+**`libc.so.6` alias** (`elf_load_vfs_object_searched`):
+quando ricerca fallisce per `libc.so.6`, `libpthread.so.0`, `libm.so.6`, `libdl.so.2`,
+`librt.so.1`, `libresolv.so.2` → fallback automatico a `/GLIBC-COMPAT.SO`
 
-/* __cxa_thread_atexit_impl — C++ thread-local destructors */
-/* → rimappato su musl __cxa_thread_atexit */
+**Symbol versioning:** versioned symbols (`read@@GLIBC_2.17`) già gestiti da `M11-03`
+ignorando la versione e risolvendo solo per nome.
 
-/* pthread_atfork — glibc lo esporta, musl lo nasconde */
-int pthread_atfork(void (*prepare)(void), void (*parent)(void),
-                   void (*child)(void));
-
-/* __stack_chk_fail, __stack_chk_guard — stack protector */
-/* → already in musl, ma alcuni binari li linkano esplicitamente */
-
-/* versioned symbols: read@@GLIBC_2.17 → read */
-/* Il linker risolve tramite .gnu.version_d section */
-```
-
-**Symbol versioning:**
-glibc usa versioned symbols (`read@@GLIBC_2.17`). Il dynamic linker (M11-03) esteso
-per ignorare la versione e risolvere solo per nome — sufficiente per la maggior parte
-dei binari.
+- Demo: `GLIBCCOMPAT.ELF`; comando boot: `glibccompat`; selftest: `glibc-compat`
+- Suite: **58/58**
 
 ---
 
@@ -3330,7 +3327,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e v1`: suite `selftest` a `56/56`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1`: suite `selftest` a `58/58`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3339,41 +3336,41 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ **Rete bootstrap v1**: `M10-01` (`virtio-net` + `netd` + selftest `net-core`)
 - ✅ **TCP/IP stack v1**: `M10-02` (ARP/IPv4/ICMP/UDP/TCP in `netd`, selftest `net-stack`)
 - ✅ **BSD socket API v1**: `M10-03` (`AF_INET` loopback-only, TCP/UDP, selftest `socket-api`)
-- ✅ **Linux compat v1**: `M11-05a/b/c/d/e` — ABI Linux separata, mount compat, path `*at`, `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC, `ld-linux-aarch64.so.1` shim, `/proc/sys` subtree, `/etc/locale.conf` + `localtime` + `ld.so.cache`
+- ✅ **Linux compat v1 completa**: `M11-05a/b/c/d/e/f/g` — ABI Linux separata, mount compat, path `*at`,
+  `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC,
+  `ld-linux-aarch64.so.1` shim, `/proc/sys` subtree, `/etc/locale.conf` + `localtime` + `ld.so.cache`,
+  PTY master/slave (`/dev/ptmx`, `/dev/pts/N`), `GLIBC-COMPAT.SO` con `DT_GNU_HASH`, alias `libc.so.6`
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: processi, namespace VFS, `musl` bootstrap, `pthread`, `sem_t`, `futex`, TLS multi-thread, `errno` thread-local, rete raw `virtio-net`, TCP/IP `netd`, BSD socket loopback `v1`
+- ✅ **Stato validato**: `SUMMARY total=58 pass=58 fail=0`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M8-08 plugin** | `M11-03` | Ora che `libdl` c'e', i plugin dinamici della shell diventano finalmente sensati |
-| 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita che la UX shell/desktop resti solo `en_US`/hardcoded dopo aver chiuso i layout |
-| 3 | **M11-05f/g** hardening Linux compatibility layer | `M11-05e + M11-03 + M10-03` | fs env chiusa; il passo successivo e' PTY (`M11-05f`) e glibc shims (`M11-05g`) |
-| 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Dopo socket e GPU diventa credibile aprire il primo desktop userspace |
+| 1 | **M8-08 plugin** | `M11-03` | `libdl` stabile; plugin dinamici shell finalmente sensati |
+| 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
+| 3 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
+| 4 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
+| 5 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
 
 ### 3. Sequenza raccomandata per dipendenze
 
 1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 2. **Migliorare l'usabilita' shell/input**: `M8-08h`
-3. **Usare rete + runtime per compatibilita' e desktop**:
-   `M11-05` dipende da `M11-03 + M10-03 + M14-01`
-   `M12-01` dipende da `M11-01 + M9-02 + M10-03`
-4. **Scalare su multicore e RT avanzato**:
-   `M13-02 -> M13-03`
-   `M13-01` e `M13-04` possono procedere in parallelo dopo il core SMP
-   `M13-05` chiude l'integrazione EDF+NAS
+3. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
+4. **Container e isolamento**: `M11-07`
+5. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
 
 ### 4. Tracce che si aprono subito dopo i prossimi blocchi
-
-- **Compatibilita' Linux reale**: `M11-05`
-  Dipende da `M11-03 + M10-03 + M14-01`
-  Effetto: porta `bash`, `python3`, `git`, `gcc` in modo molto piu' credibile
 
 - **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
   Dipende in pratica da rete/socket, `vfsd` e GPU gia' disponibile
   Effetto: porta Wayland, WM e compositor GPU
+
+- **Container**: `M11-07`
+  Dipende da `M11-05 + M9-04 + M10-01`
+  Effetto: namespace net/pid/uts, cgroups v1 minimali, `pivot_root` hardening
 
 - **SMP e scheduler avanzati**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
   Effetto: throughput multicore, metriche WCET e scheduling RT piu' forte
@@ -3384,20 +3381,20 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ### 5. Punti aperti ma non bloccanti subito
 
 - `M14-01` e' **completata v1**, ma resta da estendere `sysfs` e alcuni export avanzati
-- `M11-01`, `M11-02` e `M11-03` sono **chiuse v1**; il salto qualitativo successivo ormai sta in plugin shell, networking e compat piu' ampia
-- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere shell reale + linking dinamico + networking**
+- `M11-01`, `M11-02`, `M11-03`, `M11-05` sono tutte **chiuse v1**; il salto qualitativo sta in plugin shell, desktop e container
+- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere shell dinamica reale + desktop + isolamento container**
 
 ### 6. Ordine operativo consigliato da qui
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M11-05f/g`
-4. `M12-01`
-5. `M12-02`
+3. `M12-01`
+4. `M12-02`
+5. `M11-07`
 6. `M13-02`
 7. `M13-03`
 8. `M13-05`
 
 Se serve un principio guida unico: **prima rendere EnlilOS piu' usabile da shell reale e
-tooling dinamico, poi sfruttare quella base per compatibilita' Linux e desktop, e solo dopo
+tooling dinamico, poi sfruttare quella base per desktop e container, e solo dopo
 spingere forte su multicore e scheduling RT avanzato.**
