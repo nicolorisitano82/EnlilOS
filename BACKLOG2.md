@@ -2340,7 +2340,7 @@ entry point, versione e capability richieste).
 
 ```
 NomeApp.enlil/
-├── manifest            — metadata (testo, formato key=value)
+├── manifest.toon       — metadata in formato TOON (Token-Oriented Object Notation)
 ├── bin/
 │   └── nomeapp         — eseguibile principale (ELF statico o dinamico)
 ├── lib/
@@ -2349,16 +2349,42 @@ NomeApp.enlil/
     └── *               — risorse: icone, font, dati, config (opzionale)
 ```
 
-**`manifest`** — formato `KEY=value`, una per riga:
+**`manifest.toon`** — formato [TOON v3.0](https://github.com/toon-format/spec/blob/main/SPEC.md)
+(Token-Oriented Object Notation: line-oriented, indentation-based, JSON data model,
+minimal quoting, no comments, UTF-8 + LF):
 
+```toon
+name: NomeApp
+version: 1.0.0
+entry: bin/nomeapp
+arch: aarch64
+min_os: 0.11
+caps[2]: net,gpu
 ```
-NAME=NomeApp
-VERSION=1.0.0
-ENTRY=bin/nomeapp
-ARCH=aarch64
-MIN_OS=0.11
-CAPS=net,gpu              # capability richieste (opzionale)
+
+Esempio con metadati estesi e dipendenze dichiarate:
+
+```toon
+name: MyEditor
+version: 2.3.1
+entry: bin/myeditor
+arch: aarch64
+min_os: 0.11
+caps[3]: net,gpu,pty
+deps[2]: libfoo.so,libbar.so
+author: Acme Corp
+description: A text editor for EnlilOS
 ```
+
+Regole TOON rilevanti per il manifest:
+- Scalari: `key: value` (no quotes se stringa semplice)
+- Array primitivi: `key[N]: v1,v2,...` (N obbligatorio, strict mode verifica conteggio)
+- Valori booleani: `enabled: true`, `debug: false`
+- Numeri: `min_os: 0.11` (forma decimale canonica)
+- Quoting obbligatorio solo se il valore contiene `:`, `"`, `\`, delimitatore attivo,
+  spazi leading/trailing, o è `true`/`false`/`null` (§7.2)
+- Nessun commento (TOON non supporta commenti — §1 "Out of scope")
+- Indentazione: 2 spazi, strict mode, nessun tab per indent
 
 ---
 
@@ -2368,7 +2394,7 @@ CAPS=net,gpu              # capability richieste (opzionale)
 - `NomeApp.enlil` è una directory normale sul VFS; nessun tipo filesystem speciale
 - Il kernel non ha nozione di "bundle": è una convenzione di path e loader
 - Shell/launcher riconoscono il suffisso `.enlil` e invocano `enlil-run NomeApp.enlil`
-- `enlil-run` legge `manifest`, risolve `ENTRY`, chiama `execve` con ambiente corretto
+- `enlil-run` legge `manifest.toon`, risolve `entry`, chiama `execve` con ambiente corretto
 
 **ELF loader — library search order bundled:**
 Quando l'eseguibile principale viene caricato da `NomeApp.enlil/bin/nomeapp`,
@@ -2379,13 +2405,50 @@ di ricerca per `DT_NEEDED`, prima del search path globale
   fino alla directory con suffisso `.enlil`, poi prepend su `dyn_search_paths[]`
 - Se `lib/` non esiste o il `.so` non è lì, fallthrough al search path globale normale
 
+**Parser TOON — `toolchain/enlilos-musl/src/toon.c`:**
+
+Parser C freestanding, TOON Core Profile (§19 della spec), subset sufficiente per manifest:
+- Oggetto radice flat + array primitivi (nessun nesting profondo necessario per v1)
+- Comma come unico delimiter (default TOON)
+- Strict mode: verifica conteggio array `[N]`, indentazione multipla di 2, nessun tab indent
+- Nessuna allocazione dinamica: buffer statici, output in `toon_doc_t` compatto
+- Quoting: unquote `\\`, `\"`, `\n`, `\r`, `\t`; qualsiasi altro escape → errore
+- Tipi unquoted: `true`/`false`/`null` → booleano/null, numerico → number, else → string
+- Strict mode errori (§14): count mismatch, colon mancante, escape invalido, indentazione errata
+
+```c
+// API pubblica (toolchain/enlilos-musl/include/toon.h)
+typedef struct { const char *key; const char *value; } toon_kv_t;
+typedef struct { const char *key; const char **items; int count; } toon_arr_t;
+typedef struct {
+    toon_kv_t  scalars[32];  int nscalars;
+    toon_arr_t arrays[8];    int narrays;
+    char       error[128];
+} toon_doc_t;
+
+int  toon_parse(const char *src, size_t len, toon_doc_t *out);
+int  toon_parse_file(const char *path, toon_doc_t *out);
+const char  *toon_get_string(const toon_doc_t *, const char *key);
+int          toon_get_bool  (const toon_doc_t *, const char *key, int def);
+const char **toon_get_array (const toon_doc_t *, const char *key, int *count_out);
+```
+
+Vincoli implementativi:
+- Nessun `malloc`: storage interno al `toon_doc_t`, puntatori dentro il buffer `src` (zero-copy)
+- `src` deve restare valido per tutta la vita di `toon_doc_t`
+- Limite statico: 32 scalari, 8 array, 64 item totali per array — sufficiente per manifest bundle
+- `toon_parse_file` legge il file in buffer stack-allocated da 4KB; manifest più grandi → errore
+
 **`enlil-run` user-space tool (bootstrap musl):**
 ```c
 // pseudocodice
-manifest = parse_manifest("NomeApp.enlil/manifest");
-entry    = join("NomeApp.enlil", manifest.ENTRY);
+toon_doc_t doc;
+toon_parse_file("NomeApp.enlil/manifest.toon", &doc);   // TOON Core Profile
+const char *entry = toon_get_string(&doc, "entry");      // → "bin/nomeapp"
+char full_entry[PATH_MAX];
+join(full_entry, "NomeApp.enlil", entry);
 setenv("ENLIL_BUNDLE_ROOT", "NomeApp.enlil", 1);
-execve(entry, argv+1, environ);
+execve(full_entry, argv+1, environ);
 ```
 - Installato in `/usr/bin/enlil-run`
 - ELF statico musl-linked, nessuna dipendenza runtime
@@ -2409,7 +2472,7 @@ enlil-pack \
   --out   MyApp.enlil
 ```
 
-Genera `manifest` automaticamente, copia file nelle directory corrette.
+Genera `manifest.toon` automaticamente in formato TOON, copia file nelle directory corrette.
 Non è necessario al boot: il runtime non dipende da esso.
 
 ---
@@ -2418,13 +2481,14 @@ Non è necessario al boot: il runtime non dipende da esso.
 
 | # | Deliverable | Note |
 |---|---|---|
-| 1 | Spec formato `manifest` | `KEY=value`, estensibile |
-| 2 | `enlil-run` tool | musl statico, legge manifest + execve |
-| 3 | ELF loader: `bundle_lib_path` prepend | ricerca `../lib` relativa all'eseguibile |
-| 4 | `ENLIL_BUNDLE_ROOT` env var | propagata a processi figli |
-| 5 | Boot command `runbundle` | test interattivo |
-| 6 | Demo bundle `hello.enlil` | contiene `HELLODYN.ELF` + lib bundled |
-| 7 | Selftest `enlil-bundle` | verifica lib bundled, `ENLIL_BUNDLE_ROOT`, exit 0 |
+| 1 | Parser TOON C freestanding | `toolchain/enlilos-musl/src/toon.c` + `include/toon.h`; Core Profile, zero-alloc |
+| 2 | Spec formato `manifest.toon` | TOON v3.0, campi `name/version/entry/arch/min_os/caps/deps` |
+| 3 | `enlil-run` tool | musl statico, `toon_parse_file` + execve |
+| 4 | ELF loader: `bundle_lib_path` prepend | ricerca `../lib` relativa all'eseguibile |
+| 5 | `ENLIL_BUNDLE_ROOT` env var | propagata a processi figli |
+| 6 | Boot command `runbundle` | test interattivo |
+| 7 | Demo bundle `hello.enlil` | contiene `HELLODYN.ELF` + `manifest.toon` + lib bundled |
+| 8 | Selftest `enlil-bundle` | verifica lib bundled, `ENLIL_BUNDLE_ROOT`, exit 0 |
 
 ---
 
@@ -2432,7 +2496,7 @@ Non è necessario al boot: il runtime non dipende da esso.
 
 - Nessun sandboxing: il bundle gira con le stesse capability del processo padre.
   Isolamento capability-based rinviato a M11-07 (namespace) o futura `M11-08b`.
-- `manifest` non è firmato né verificato crittograficamente in v1.
+- `manifest.toon` non è firmato né verificato crittograficamente in v1.
 - Aggiornamenti atomici (swap `NomeApp.enlil` → `NomeApp.enlil.new` + rename)
   non hanno ancora primitive dedicate; rinviati.
 - Nessun bundle nested: `ENLIL_BUNDLE_ROOT` non è transitivo tra bundle multipli
