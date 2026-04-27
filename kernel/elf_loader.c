@@ -32,6 +32,7 @@ extern void *memset(void *dst, int value, size_t n);
 #define DT_NULL            0ULL
 #define DT_NEEDED          1ULL
 #define DT_HASH            4ULL
+#define DT_GNU_HASH        0x6ffffef5ULL   /* M11-05g: GNU hash table */
 #define DT_STRTAB          5ULL
 #define DT_SYMTAB          6ULL
 #define DT_RELA            7ULL
@@ -125,6 +126,7 @@ typedef struct {
     uintptr_t dynsym_va;
     uintptr_t dynstr_va;
     uintptr_t hash_va;
+    uintptr_t gnu_hash_va;  /* M11-05g: DT_GNU_HASH (modern glibc libs) */
     uintptr_t rela_va;
     uintptr_t jmprel_va;
     size_t    relac;
@@ -1358,6 +1360,9 @@ static int elf_parse_dynamic(mm_space_t *space, elf_object_t *obj)
         case DT_HASH:
             obj->dyn.hash_va = obj->bias + (uintptr_t)dyn->d_val;
             break;
+        case DT_GNU_HASH:  /* M11-05g */
+            obj->dyn.gnu_hash_va = obj->bias + (uintptr_t)dyn->d_val;
+            break;
         case DT_STRTAB:
             obj->dyn.dynstr_va = obj->bias + (uintptr_t)dyn->d_val;
             break;
@@ -1408,7 +1413,8 @@ static int elf_parse_dynamic(mm_space_t *space, elf_object_t *obj)
 
     obj->dyn.has_dynamic = 1U;
     if (obj->dyn.dynsym_va == 0ULL || obj->dyn.dynstr_va == 0ULL ||
-        obj->dyn.hash_va == 0ULL || obj->dyn.strsz == 0ULL) {
+        (obj->dyn.hash_va == 0ULL && obj->dyn.gnu_hash_va == 0ULL) ||
+        obj->dyn.strsz == 0ULL) {
         elf_set_error("dynamic metadata incompleta");
         return -1;
     }
@@ -1417,14 +1423,62 @@ static int elf_parse_dynamic(mm_space_t *space, elf_object_t *obj)
         return -1;
     }
 
-    {
-        uint32_t *hash = (uint32_t *)mmu_space_resolve_ptr(space, obj->dyn.hash_va,
-                                                           2U * sizeof(uint32_t));
+    /* M11-05g: derive sym_count from DT_HASH or DT_GNU_HASH */
+    if (obj->dyn.hash_va != 0ULL) {
+        /* Classic SysV hash: header = [nbucket, nchain]; nchain = total syms */
+        uint32_t *hash = (uint32_t *)mmu_space_resolve_ptr(
+            space, obj->dyn.hash_va, 2U * sizeof(uint32_t));
         if (!hash) {
             elf_set_error("DT_HASH non leggibile");
             return -1;
         }
         obj->dyn.sym_count = hash[1];
+    } else {
+        /*
+         * GNU hash only (modern glibc .so).  Structure:
+         *   uint32 nbuckets, symoffset, bloom_size, bloom_shift
+         *   uint64 bloom[bloom_size]
+         *   uint32 buckets[nbuckets]
+         *   uint32 chain[]   -- indexed from symoffset
+         *
+         * sym_count = highest symbol index in any chain + 1.
+         * Find max non-zero bucket value, walk its chain until
+         * last-entry bit (bit 0) set.
+         */
+        uint32_t *hdr = (uint32_t *)mmu_space_resolve_ptr(
+            space, obj->dyn.gnu_hash_va, 4U * sizeof(uint32_t));
+        if (!hdr) {
+            elf_set_error("DT_GNU_HASH non leggibile");
+            return -1;
+        }
+        uint32_t nbuckets   = hdr[0];
+        uint32_t symoffset  = hdr[1];
+        uint32_t bloom_size = hdr[2];
+        /* buckets start after 16-byte header + bloom_size * 8 bytes */
+        uintptr_t buckets_va = obj->dyn.gnu_hash_va + 16U +
+                               (uintptr_t)bloom_size * 8U;
+        uintptr_t chain_va   = buckets_va + (uintptr_t)nbuckets * 4U;
+
+        uint32_t max_sym = symoffset;
+        for (uint32_t b = 0U; b < nbuckets; b++) {
+            uint32_t *bkt = (uint32_t *)mmu_space_resolve_ptr(
+                space, buckets_va + (uintptr_t)b * 4U, 4U);
+            if (bkt && *bkt > max_sym)
+                max_sym = *bkt;
+        }
+        /* walk chain from max_sym bucket until last-entry bit */
+        uint32_t sym = max_sym;
+        if (sym >= symoffset) {
+            for (;;) {
+                uint32_t cidx = sym - symoffset;
+                uint32_t *ce = (uint32_t *)mmu_space_resolve_ptr(
+                    space, chain_va + (uintptr_t)cidx * 4U, 4U);
+                if (!ce || (sym - symoffset) > 65535U) break;
+                if (*ce & 1U) { sym++; break; }
+                sym++;
+            }
+        }
+        obj->dyn.sym_count = sym;
     }
 
     for (uint32_t i = 0U; i < needed_count; i++) {
@@ -1563,6 +1617,27 @@ static int elf_load_vfs_object_searched(mm_space_t *space, const char *path,
                     sizeof(search_path) - dlen);
         if (elf_load_vfs_object(space, search_path, next_dyn_base, obj) == 0)
             return 0;
+    }
+
+    /*
+     * M11-05g: glibc library alias.
+     * Common glibc shared objects map to GLIBC-COMPAT.SO when the real
+     * library is absent (linux-compat-stage not populated).
+     */
+    {
+        static const char * const glibc_libs[] = {
+            "libc.so.6", "libpthread.so.0", "libm.so.6",
+            "libdl.so.2", "librt.so.1", "libresolv.so.2", NULL
+        };
+        const char *bn = path + base_off;
+        for (uint32_t g = 0U; glibc_libs[g]; g++) {
+            if (elf_streq(bn, glibc_libs[g])) {
+                if (elf_load_vfs_object(space, "/GLIBC-COMPAT.SO",
+                                        next_dyn_base, obj) == 0)
+                    return 0;
+                break;
+            }
+        }
     }
 
     elf_set_error("libreria ELF non trovata");

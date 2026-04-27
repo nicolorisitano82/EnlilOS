@@ -2761,6 +2761,23 @@ static int selftest_case_pty_core(void)
                                "pty-demo-ok\n", 1);
 }
 
+/* ── glibc-compat: verifica glibc shim via GLIBCCOMPAT.ELF ──────── */
+
+static int selftest_case_glibc_compat(void)
+{
+    static const char case_name[] = "glibc-compat";
+    int rc;
+
+    rc = vfs_unlink("/data/GLIBCCOMPAT.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup GLIBCCOMPAT.TXT fallita");
+
+    if (st_run_user_path(case_name, "/GLIBCCOMPAT.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/GLIBCCOMPAT.TXT",
+                               "glibc-compat-ok\n", 1);
+}
+
 /* ── mmu-user-va: test kernel-side mmu_read_user / mmu_write_user /
  *                mmu_remap_user_region ──────────────────────────────
  *
@@ -2944,8 +2961,9 @@ static const selftest_case_t selftest_cases[] = {
     { "epoll-core",      selftest_case_epoll_core },
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
-    { "pty-core",    selftest_case_pty_core   },
-    { "mmu-user-va", selftest_case_mmu_user_va },
+    { "pty-core",     selftest_case_pty_core   },
+    { "glibc-compat", selftest_case_glibc_compat },
+    { "mmu-user-va",  selftest_case_mmu_user_va },
 };
 
 int selftest_run_named(const char *name)

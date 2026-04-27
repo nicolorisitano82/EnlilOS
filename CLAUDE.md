@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=57 pass=57 fail=0`
+- Stato validato: `SUMMARY total=58 pass=58 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -447,7 +447,7 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 
 **File**: [kernel/selftest.c](kernel/selftest.c)
 
-57 test case in ordine:
+58 test case in ordine:
 1. `vfs-rootfs` — mount initrd, readdir, stat file
 2. `vfs-devfs` — devfs /dev/stdin /dev/stdout
 3. `ext4-core` — mount rw ext4, journal replay
@@ -504,7 +504,8 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 54. `kbd-layout` — layout tastiera `us/it` e persistenza
 55. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
 56. `pty-core` — PTY master/slave lifecycle, termios, TIOCGWINSZ/TIOCSWINSZ
-57. `mmu-user-va` — mmu_read_user/write_user/remap_user_region kernel-side
+57. `glibc-compat` — glibc shim dlopen: gnu_get_libc_version, __libc_start_main, __stack_chk_guard
+58. `mmu-user-va` — mmu_read_user/write_user/remap_user_region kernel-side
 
 ### Helper macro
 ```c
@@ -519,23 +520,22 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-25)
+## Milestone completate (stato 2026-04-27)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f/g` e `M8-08d/e/f/g` completi in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=57 pass=57 fail=0
+SUMMARY total=58 pass=58 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
 2. **M8-08h** — i18n / localizzazione stringhe
-3. **M11-05g** — hardening Linux compat residuo (glibc shims)
-4. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
-5. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
-6. **M13-02** — SMP bootstrap
+3. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
+4. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
+5. **M13-02** — SMP bootstrap
 7. **M13-03** — scheduler multicore
 ### Stato operativo M11-05e / Linux filesystem environment
 
@@ -567,6 +567,29 @@ SUMMARY total=57 pass=57 fail=0
 - musl bootstrap: `posix_openpt` (via `openat("/dev/ptmx")`), `grantpt` (no-op), `unlockpt` (TIOCSPTLCK), `ptsname_r` (TIOCGPTN + snprintf), `ptsname` (buffer statico), `openpty`.
 - **Bug critico risolto: double PTY alloc via vfsd+shadow**. Quando vfsd è disponibile, `fd_open_path_current` usa `vfsd_proxy_open` (alloca PTY slot A lato vfsd) E poi `fd_bind_remote_shadow` → `vfs_open` (alloca PTY slot B lato kernel). Le ioctls usano il cookie del shadow (slot B), la slave viene aperta su B, ma `write(master_fd)` usa `vfsd_proxy_write` su slot A che ha `slave_open=0` → -EIO. **Fix**: aggiunta `is_pty_path()` in `kernel/syscall.c`; `/dev/ptmx` e `/dev/pts/*` aprono sempre via kernel-direct VFS, bypassando vfsd.
 - Selftest: `pty-core` con `PTYDEMO.ELF`. Suite: `57/57`.
+
+### Stato operativo M11-05g / glibc Compatibility Shims
+
+**File**: [user/glibc_compat.c](user/glibc_compat.c),
+[kernel/elf_loader.c](kernel/elf_loader.c),
+[toolchain/smoke/glibc_compat_demo.c](toolchain/smoke/glibc_compat_demo.c)
+
+- `M11-05g` chiusa in `v1`.
+- `GLIBC-COMPAT.SO` (`user/glibc_compat.c`): shared library PIC senza libc, esporta:
+  - `__libc_start_main` — entry point glibc-style (chiama main + init/fini callbacks)
+  - `gnu_get_libc_version` → `"2.38"`, `gnu_get_libc_release` → `"stable"`
+  - `pthread_atfork` / `__register_atfork` — stub no-op (fork multi-thread non supportato)
+  - `__cxa_thread_atexit_impl` — stub per distruttori TLS C++ (no-op)
+  - `__stack_chk_guard` — canary data symbol con valore `0xdeadbeefcafebabe`
+  - `__stack_chk_fail` — loop WFE (equivalente di abort senza libc)
+- **ELF loader: `DT_GNU_HASH` support** (`kernel/elf_loader.c`):
+  - aggiunto `gnu_hash_va` in `elf_dyn_info_t`; `DT_GNU_HASH = 0x6ffffef5` parsato in `elf_parse_dynamic`
+  - check metadata accetta `gnu_hash_va != 0` come alternativa a `hash_va`
+  - `sym_count` derivato da GNU hash quando `DT_HASH` assente: scan bucket max → walk chain fino a bit0=1
+  - Sblocca caricamento `.so` glibc moderni che hanno solo `DT_GNU_HASH`
+- **`libc.so.6` alias** (`elf_load_vfs_object_searched`): quando ricerca fallisce per librerie glibc note (`libc.so.6`, `libpthread.so.0`, `libm.so.6`, `libdl.so.2`, `librt.so.1`, `libresolv.so.2`), tenta `/GLIBC-COMPAT.SO` come fallback
+- Demo: `GLIBCCOMPAT.ELF` via `glibccompat` comando boot
+- Selftest: `glibc-compat`. Suite: `58/58`.
 
 ### Stato operativo M11-05d / ld-linux shim + library search paths
 

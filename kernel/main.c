@@ -2049,6 +2049,18 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "glibccompat")) {
+        /* M11-05g: glibc compat shim smoke test */
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/GLIBCCOMPAT.ELF", "/GLIBCCOMPAT.ELF",
+                             PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "glibc-compat demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "clonedemo")) {
         uint32_t pid = 0U;
         if (elf64_spawn_path("/CLONEDEMO.ELF", "/CLONEDEMO.ELF", PRIO_KERNEL, &pid) < 0) {

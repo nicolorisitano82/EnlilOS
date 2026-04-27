@@ -110,7 +110,7 @@ USER_DYNAPP_SRCS      = user/dynamic_demo.c user/linux_interp_demo.c
 USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
 USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
 USER_DYNAPP_EMBEDOBJS = $(USER_DYNAPP_ELFS:.elf=.embed.o)
-USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c
+USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c user/glibc_compat.c
 USER_SHARED_PICOBJS   = $(USER_SHARED_SRCS:.c=.pic.o)
 USER_SHARED_LIBS      = $(USER_SHARED_SRCS:.c=.so)
 USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
@@ -215,7 +215,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/net_outbound.c \
                         toolchain/smoke/epoll_demo.c \
                         toolchain/smoke/poweroff.c \
-                        toolchain/smoke/pty_demo.c
+                        toolchain/smoke/pty_demo.c \
+                        toolchain/smoke/glibc_compat_demo.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -511,6 +512,8 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		EPOLLDEMO.ELF=toolchain/smoke/epoll_demo.elf \
 		POWEROFF.ELF=toolchain/smoke/poweroff.elf \
 		PTYDEMO.ELF=toolchain/smoke/pty_demo.elf \
+		GLIBCCOMPAT.ELF=toolchain/smoke/glibc_compat_demo.elf \
+		GLIBC-COMPAT.SO=user/glibc_compat.so \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
