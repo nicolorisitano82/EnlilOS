@@ -2315,7 +2315,133 @@ servizi (ogni server di sistema in un namespace separato — security hardening 
 
 ---
 
-## Dipendenze aggiornate (M11-06 e M11-07)
+### ⬜ M11-08 · Application Bundle (`.enlil`)
+**Priorità:** MEDIA
+**Dipende da:** M11-03 (dynamic linker), M9-02 (vfsd), M11-05 (Linux compat layer)
+**Sblocca:** distribuzione self-contained di applicazioni, desktop launcher (M12-01/M12-02),
+packaging di porting Linux senza dipendenze di sistema, tool di terze parti
+
+---
+
+#### Motivazione
+
+Packaging stile macOS `.app`: una directory con tutto il necessario per eseguire
+un'applicazione — eseguibile, librerie, risorse, metadata — senza dipendenze
+implicite da percorsi di sistema globali.
+
+Un bundle `.enlil` è opaco per l'utente (si vede e si copia come un singolo oggetto),
+auto-contenuto per il runtime (il loader cerca le librerie dentro il bundle prima
+del search path globale), e dichiarativo per il sistema (un manifest descrive
+entry point, versione e capability richieste).
+
+---
+
+#### Struttura del bundle
+
+```
+NomeApp.enlil/
+├── manifest            — metadata (testo, formato key=value)
+├── bin/
+│   └── nomeapp         — eseguibile principale (ELF statico o dinamico)
+├── lib/
+│   └── *.so            — librerie bundled (opzionale)
+└── res/
+    └── *               — risorse: icone, font, dati, config (opzionale)
+```
+
+**`manifest`** — formato `KEY=value`, una per riga:
+
+```
+NAME=NomeApp
+VERSION=1.0.0
+ENTRY=bin/nomeapp
+ARCH=aarch64
+MIN_OS=0.11
+CAPS=net,gpu              # capability richieste (opzionale)
+```
+
+---
+
+#### Integrazione runtime
+
+**VFS / shell:**
+- `NomeApp.enlil` è una directory normale sul VFS; nessun tipo filesystem speciale
+- Il kernel non ha nozione di "bundle": è una convenzione di path e loader
+- Shell/launcher riconoscono il suffisso `.enlil` e invocano `enlil-run NomeApp.enlil`
+- `enlil-run` legge `manifest`, risolve `ENTRY`, chiama `execve` con ambiente corretto
+
+**ELF loader — library search order bundled:**
+Quando l'eseguibile principale viene caricato da `NomeApp.enlil/bin/nomeapp`,
+il loader aggiunge automaticamente `NomeApp.enlil/lib/` come prima directory
+di ricerca per `DT_NEEDED`, prima del search path globale
+(`/lib/aarch64-linux-gnu`, `/usr/lib`, `/GLIBC-COMPAT.SO` fallback).
+- Meccanismo: `elf_load_common` calcola `bundle_lib_path` risalendo da `argv[0]`
+  fino alla directory con suffisso `.enlil`, poi prepend su `dyn_search_paths[]`
+- Se `lib/` non esiste o il `.so` non è lì, fallthrough al search path globale normale
+
+**`enlil-run` user-space tool (bootstrap musl):**
+```c
+// pseudocodice
+manifest = parse_manifest("NomeApp.enlil/manifest");
+entry    = join("NomeApp.enlil", manifest.ENTRY);
+setenv("ENLIL_BUNDLE_ROOT", "NomeApp.enlil", 1);
+execve(entry, argv+1, environ);
+```
+- Installato in `/usr/bin/enlil-run`
+- ELF statico musl-linked, nessuna dipendenza runtime
+- `ENLIL_BUNDLE_ROOT` esposto a processi figli (utile per risorse relative)
+
+**Boot command interattivo:** `runbundle NomeApp.enlil`
+
+---
+
+#### Packaging tool — `enlil-pack` (host-side, opzionale)
+
+Script o binario host-side che crea un bundle da un ELF + set di `.so`:
+
+```sh
+enlil-pack \
+  --name "MyApp" \
+  --entry bin/myapp \
+  --bin   build/myapp.elf \
+  --lib   build/libfoo.so \
+  --res   assets/ \
+  --out   MyApp.enlil
+```
+
+Genera `manifest` automaticamente, copia file nelle directory corrette.
+Non è necessario al boot: il runtime non dipende da esso.
+
+---
+
+#### Deliverable
+
+| # | Deliverable | Note |
+|---|---|---|
+| 1 | Spec formato `manifest` | `KEY=value`, estensibile |
+| 2 | `enlil-run` tool | musl statico, legge manifest + execve |
+| 3 | ELF loader: `bundle_lib_path` prepend | ricerca `../lib` relativa all'eseguibile |
+| 4 | `ENLIL_BUNDLE_ROOT` env var | propagata a processi figli |
+| 5 | Boot command `runbundle` | test interattivo |
+| 6 | Demo bundle `hello.enlil` | contiene `HELLODYN.ELF` + lib bundled |
+| 7 | Selftest `enlil-bundle` | verifica lib bundled, `ENLIL_BUNDLE_ROOT`, exit 0 |
+
+---
+
+#### Limitazioni dichiarate v1
+
+- Nessun sandboxing: il bundle gira con le stesse capability del processo padre.
+  Isolamento capability-based rinviato a M11-07 (namespace) o futura `M11-08b`.
+- `manifest` non è firmato né verificato crittograficamente in v1.
+- Aggiornamenti atomici (swap `NomeApp.enlil` → `NomeApp.enlil.new` + rename)
+  non hanno ancora primitive dedicate; rinviati.
+- Nessun bundle nested: `ENLIL_BUNDLE_ROOT` non è transitivo tra bundle multipli
+  eseguiti in cascata.
+- `enlil-pack` host-side opzionale, non incluso nell'initrd.
+
+---
+
+## Dipendenze aggiornate (M11-06, M11-07, M11-08)
 
 > **Principio:** il server grafico è un processo user-space a priorità media-alta.
 > Il compositor opera su un deadline vsync (16.67ms a 60Hz, 6.94ms a 144Hz).
@@ -3038,6 +3164,7 @@ M6-01 + M11-01 + M11-03 + M8-08a + M8-08b + M8-06 + M14-01 → M11-05 (Linux com
 M11-05 + M10-03 + M5-03 → M11-06 (io_uring — bassa priorità)
 M11-05 + M9-04 + M10-01 → M11-07 (namespace + container — bassa priorità)
 M11-07 → M11-07e (OverlayFS) → M11-07f (cgroup v2)
+M11-03 + M9-02 → M11-08 (application bundle .enlil)
 M11-01 + M9-02 → M12-01 (wld wayland server)
 M12-01 → M12-02 (wm) → M12-03 (GPU shader compositor)
 M2-03 → M13-01 (EDF scheduler)
@@ -3350,19 +3477,25 @@ FASE 10 ──► container + io_uring + power (opzionale)
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08 plugin** | `M11-03` | `libdl` stabile; plugin dinamici shell finalmente sensati |
 | 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
-| 3 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
-| 4 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
-| 5 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
+| 3 | **M11-08** Application Bundle `.enlil` | `M11-03 + M9-02` | Packaging self-contained; abilita distribuzione app e launcher desktop |
+| 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
+| 5 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
+| 6 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
 
 ### 3. Sequenza raccomandata per dipendenze
 
 1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
 2. **Migliorare l'usabilita' shell/input**: `M8-08h`
-3. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
-4. **Container e isolamento**: `M11-07`
-5. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
+3. **Packaging applicazioni**: `M11-08` — bundle `.enlil`, `enlil-run`, library search bundled
+4. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
+5. **Container e isolamento**: `M11-07`
+6. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
 
 ### 4. Tracce che si aprono subito dopo i prossimi blocchi
+
+- **Packaging applicazioni**: `M11-08`
+  Dipende da `M11-03 + M9-02`
+  Effetto: distribuzione self-contained `.enlil`; abilita launcher desktop e app di terze parti
 
 - **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
   Dipende in pratica da rete/socket, `vfsd` e GPU gia' disponibile
@@ -3388,12 +3521,13 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 1. `M8-08 plugin`
 2. `M8-08h`
-3. `M12-01`
-4. `M12-02`
-5. `M11-07`
-6. `M13-02`
-7. `M13-03`
-8. `M13-05`
+3. `M11-08`
+4. `M12-01`
+5. `M12-02`
+6. `M11-07`
+7. `M13-02`
+8. `M13-03`
+9. `M13-05`
 
 Se serve un principio guida unico: **prima rendere EnlilOS piu' usabile da shell reale e
 tooling dinamico, poi sfruttare quella base per desktop e container, e solo dopo
