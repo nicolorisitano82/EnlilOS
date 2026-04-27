@@ -106,11 +106,11 @@ USER_CRT_C_SRCS       = user/crt1.c user/crt_demo.c
 USER_CRT_OBJS         = $(USER_CRT_ASM_SRCS:.S=.o) $(USER_CRT_C_SRCS:.c=.o)
 USER_CRT_ELFS         = user/crt_demo.elf
 USER_CRT_EMBEDOBJS    = $(USER_CRT_ELFS:.elf=.embed.o)
-USER_DYNAPP_SRCS      = user/dynamic_demo.c user/linux_interp_demo.c
+USER_DYNAPP_SRCS      = user/dynamic_demo.c user/linux_interp_demo.c user/enlil_bundle_demo.c
 USER_DYNAPP_PIEOBJS   = $(USER_DYNAPP_SRCS:.c=.pie.o)
 USER_DYNAPP_ELFS      = $(USER_DYNAPP_SRCS:.c=.elf)
 USER_DYNAPP_EMBEDOBJS = $(USER_DYNAPP_ELFS:.elf=.embed.o)
-USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c user/glibc_compat.c
+USER_SHARED_SRCS      = user/libdyn.c user/bundle_dyn.c user/ld_enlil.c user/glibc_compat.c
 USER_SHARED_PICOBJS   = $(USER_SHARED_SRCS:.c=.pic.o)
 USER_SHARED_LIBS      = $(USER_SHARED_SRCS:.c=.so)
 USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
@@ -158,6 +158,7 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/string.h \
                         $(MUSL_ROOT)/include/time.h \
                         $(MUSL_ROOT)/include/termios.h \
+                        $(MUSL_ROOT)/include/toon.h \
                         $(MUSL_ROOT)/include/unistd.h \
                         $(MUSL_ROOT)/include/sys/ioctl.h \
                         $(MUSL_ROOT)/include/sys/resource.h \
@@ -189,6 +190,7 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/stdlib.c \
                         $(MUSL_ROOT)/src/syscall.c \
                         $(MUSL_ROOT)/src/time.c \
+                        $(MUSL_ROOT)/src/toon.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c \
                         $(MUSL_ROOT)/src/socket.c \
@@ -216,6 +218,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/socket_demo.c \
                         toolchain/smoke/net_outbound.c \
                         toolchain/smoke/epoll_demo.c \
+                        toolchain/smoke/enlil_run.c \
                         toolchain/smoke/poweroff.c \
                         toolchain/smoke/pty_demo.c \
                         toolchain/smoke/glibc_compat_demo.c \
@@ -451,12 +454,17 @@ user/linux_interp_demo.elf: user/linux_interp_demo.pie.o user/user_dyn.ld user/l
 	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
 	      -Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1 -Luser -ldyn -o $@ $<
 
+user/enlil_bundle_demo.elf: user/enlil_bundle_demo_start.o user/enlil_bundle_demo.pie.o user/user_dyn.ld user/libdyn.so
+	$(CC) -pie -nostdlib -Wl,-T,user/user_dyn.ld \
+	      -Wl,--dynamic-linker=/LD-ENLIL.SO -Luser -ldyn -o $@ user/enlil_bundle_demo_start.o user/enlil_bundle_demo.pie.o
+
 $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
                 initrd/vconsole.conf initrd/arkshrc initrd/arksh_user_rc \
                 initrd/us.map initrd/it.map initrd/hostname initrd/hosts \
                 initrd/passwd initrd/group initrd/os-release \
                 initrd/nsswitch.conf initrd/ld.so.conf initrd/resolv.conf \
                 initrd/locale.conf initrd/ld_so_cache initrd/localtime \
+                initrd/hello_manifest.toon \
                 $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) \
                 $(ARKSH_SMOKE_ELF) $(ARKSH_SELFTEST_ELF) \
                 $(wildcard $(ARKSH_REAL_ELF)) $(wildcard $(LINUX_COMPAT_STAGE_MARK))
@@ -474,6 +482,10 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		dir:home/user/.local \
 		dir:home/user/.local/state \
 		dir:home/user/.local/state/arksh \
+		dir:hello.enlil \
+		dir:hello.enlil/bin \
+		dir:hello.enlil/lib \
+		dir:hello.enlil/res \
 		dir:tmp \
 		dir:var \
 		dir:sysroot \
@@ -531,6 +543,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		SOCKDEMO.ELF=toolchain/smoke/socket_demo.elf \
 		NETOUT.ELF=toolchain/smoke/net_outbound.elf \
 		EPOLLDEMO.ELF=toolchain/smoke/epoll_demo.elf \
+		ENLILRUN.ELF=toolchain/smoke/enlil_run.elf \
 		POWEROFF.ELF=toolchain/smoke/poweroff.elf \
 		PTYDEMO.ELF=toolchain/smoke/pty_demo.elf \
 		GLIBCCOMPAT.ELF=toolchain/smoke/glibc_compat_demo.elf \
@@ -540,6 +553,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
+		bin/enlil-run=toolchain/smoke/enlil_run.elf \
 		bin/nsh=user/nsh.elf \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
 		$(ARKSH_REAL_INITRD) \
@@ -568,6 +582,9 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		etc/localtime=initrd/localtime \
 		etc/resolv.conf=initrd/resolv.conf \
 		etc/arkshrc=initrd/arkshrc \
+		hello.enlil/manifest.toon=initrd/hello_manifest.toon \
+		hello.enlil/bin/hello=user/enlil_bundle_demo.elf \
+		hello.enlil/lib/libdyn.so=user/bundle_dyn.so \
 		home/user/.config/arksh/arkshrc=initrd/arksh_user_rc \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \

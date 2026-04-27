@@ -21,6 +21,7 @@ Le milestone completate oggi coprono:
 - **M11-01**: bootstrap musl/toolchain `v1` con ABI minima (`getpid/getppid/gettimeofday/nanosleep`, uid/gid stub, `lseek`, `readv/writev`, `fcntl`, `openat`, `fstatat`, `ioctl`, `uname`), TLS statico (`PT_TLS`, `TPIDR_EL0`, `AT_RANDOM`/uid/gid), runtime `crt1/crti/crtn`, sysroot `usr/include` + `libc.a`, wrapper `aarch64-enlilos-musl-*` e smoke test `hello`, `stdio`, `malloc`, `fork-exec`, `pipe-termios`.
 - **M11-02a/b/c/d/e**: profilo multi-thread `v1` chiuso, con `tgid/gettid`, `clone()` subset thread-oriented, stato processo condiviso (`mm/files/sighand/fs`) via `proc_slot`, `set_tid_address()`, `exit_group()`, `tgkill()`, `futex` (`WAIT/WAKE/REQUEUE/CMP_REQUEUE`), wake su `clear_child_tid`, wrapper musl `pthread`/`sem_t`, `pthread_mutex/cond`, TLS statico multi-thread per `__thread`, `errno` thread-local e smoke `musl-pthread` + `musl-sem` + `tls-mt`.
 - **M11-03**: dynamic linking `v1` con `dlopen/dlsym/dlclose/dlerror`, load runtime di `ET_DYN`, risoluzione `DT_NEEDED` e smoke `musl-dlfcn`.
+- **M11-08**: application bundle `.enlil` `v1` con parser TOON bootstrap, launcher `/bin/enlil-run`, `ENLIL_BUNDLE_ROOT`, ricerca librerie bundle-local e demo `hello.enlil`.
 - **M11-05a/b/c**: compat Linux AArch64 `v1` con tabella syscall separata, mount compat (`/lib`, `/usr`, `/bin/sh`, `/proc`, `/dev`, `/etc`), supporto `ET_EXEC` low-VA tramite alias user-space, `bash-linux` statico funzionante da `/data/bash-linux`, `epoll_create1/ctl/pwait` bounded e System V IPC `v1` (`shmget/shmat/shmdt/shmctl`, `semget/semop/semctl`).
 - **M11-05d**: shim `PT_INTERP` — `ld-linux-aarch64.so.1` risolto automaticamente come alias verso `/LD-ENLIL.SO` quando il file non esiste nel VFS; search path `DT_NEEDED` esteso a `/lib/aarch64-linux-gnu`, `/usr/lib`.
 - **M11-05e**: Linux filesystem environment — `/proc/sys` subtree, `/etc/locale.conf`, `/etc/ld.so.cache` stub, `/etc/localtime` TZif2 UTC, `/proc/<pid>/maps` stub.
@@ -29,7 +30,7 @@ Le milestone completate oggi coprono:
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=59 pass=59 fail=0`.
+`SUMMARY total=60 pass=60 fail=0`.
 
 ---
 
@@ -78,8 +79,10 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - `dev/`, `data/`, `sysroot/`
 - `INIT.ELF`, `NSH.ELF`
 - `ARKSHBOOT.ELF`
+- `ENLILRUN.ELF`
 - `ARKSHPLUGIN.ELF`
 - `bin/arksh`, `bin/arksh.real` (se build esterna presente), `bin/nsh`
+- `bin/enlil-run`
 - `usr/lib/arksh/plugins/enlil.so`
 - `usr/bin/loadkeys`, `usr/bin/kbdlayout`
 - `etc/arkshrc`, `etc/vconsole.conf`, `etc/locale.conf`, `etc/localtime`, `etc/ld.so.cache`
@@ -94,6 +97,7 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - ELF demo: `CLONEDEMO.ELF`, `THREADLIFE.ELF`, `FUTEXDEMO.ELF`, `PTHREADDEMO.ELF`, `SEMDEMO.ELF`, `TLSMTDEMO.ELF`
 - ELF demo: `EPOLLDEMO.ELF`, `SYSVIPC.ELF`, `SOCKDEMO.ELF`, `PTYDEMO.ELF`
 - ELF demo: `ARKSHSMK.ELF`
+- bundle demo: `hello.enlil/manifest.toon`, `hello.enlil/bin/hello`, `hello.enlil/lib/libdyn.so`
 - ELF server: `VFSD.ELF`, `BLKD.ELF`, `NETD.ELF`
 - ELF linux-compat: `LS.ELF`
 - `libdyn.so`, `LD-ENLIL.SO`
@@ -313,7 +317,7 @@ in halt dopo il summary finale.
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=59 pass=59 fail=0
+SUMMARY total=60 pass=60 fail=0
 ```
 
 Nota: se il selftest si blocca prima del poweroff, conviene leggere il log seriale

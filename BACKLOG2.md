@@ -2316,7 +2316,8 @@ servizi (ogni server di sistema in un namespace separato — security hardening 
 
 ---
 
-### ⬜ M11-08 · Application Bundle (`.enlil`)
+### ✅ M11-08 · Application Bundle (`.enlil`)
+**Stato:** **chiusa `v1`**
 **Priorità:** MEDIA
 **Dipende da:** M11-03 (dynamic linker), M9-02 (vfsd), M11-05 (Linux compat layer)
 **Sblocca:** distribuzione self-contained di applicazioni, desktop launcher (M12-01/M12-02),
@@ -2451,7 +2452,7 @@ join(full_entry, "NomeApp.enlil", entry);
 setenv("ENLIL_BUNDLE_ROOT", "NomeApp.enlil", 1);
 execve(full_entry, argv+1, environ);
 ```
-- Installato in `/usr/bin/enlil-run`
+- Installato in `/bin/enlil-run` e come ELF diretto `/ENLILRUN.ELF`
 - ELF statico musl-linked, nessuna dipendenza runtime
 - `ENLIL_BUNDLE_ROOT` esposto a processi figli (utile per risorse relative)
 
@@ -2488,7 +2489,7 @@ Non è necessario al boot: il runtime non dipende da esso.
 | 4 | ELF loader: `bundle_lib_path` prepend | ricerca `../lib` relativa all'eseguibile |
 | 5 | `ENLIL_BUNDLE_ROOT` env var | propagata a processi figli |
 | 6 | Boot command `runbundle` | test interattivo |
-| 7 | Demo bundle `hello.enlil` | contiene `HELLODYN.ELF` + `manifest.toon` + lib bundled |
+| 7 | Demo bundle `hello.enlil` | contiene `bin/hello` + `manifest.toon` + `lib/libdyn.so` bundled |
 | 8 | Selftest `enlil-bundle` | verifica lib bundled, `ENLIL_BUNDLE_ROOT`, exit 0 |
 
 ---
@@ -2503,6 +2504,8 @@ Non è necessario al boot: il runtime non dipende da esso.
 - Nessun bundle nested: `ENLIL_BUNDLE_ROOT` non è transitivo tra bundle multipli
   eseguiti in cascata.
 - `enlil-pack` host-side opzionale, non incluso nell'initrd.
+- `enlil-run` vive in `/bin` e non in `/usr/bin`, per evitare che il mount
+  `linux_compat` su `/usr` forzi l'ABI Linux anche per il launcher nativo.
 
 ---
 
@@ -3512,14 +3515,14 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** `M8-08h` i18n, poi `M11-08`, poi `M12-01`
+- **Prossimo step:** `M8-08h` i18n, poi `M12-01`, poi `M11-07`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1` e di `M8-08 plugin`: suite `selftest` a `59/59`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1`, `M8-08 plugin` e `M11-08`: suite `selftest` a `60/60`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3532,34 +3535,30 @@ FASE 10 ──► container + io_uring + power (opzionale)
   `flock v1`, supporto `ET_EXEC` low-VA, `bash-linux` statico funzionante, `epoll`, System V IPC,
   `ld-linux-aarch64.so.1` shim, `/proc/sys` subtree, `/etc/locale.conf` + `localtime` + `ld.so.cache`,
   PTY master/slave (`/dev/ptmx`, `/dev/pts/N`), `GLIBC-COMPAT.SO` con `DT_GNU_HASH`, alias `libc.so.6`
+- ✅ **Application bundle `.enlil` v1**: `M11-08` — parser TOON bootstrap, launcher `/bin/enlil-run`,
+  `ENLIL_BUNDLE_ROOT`, bundle demo `hello.enlil`, ricerca librerie bundled con priorità su `<bundle>/lib`
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Shell dinamica v1**: `M8-08 plugin` — `arksh` carica plugin `.so` nativi via `dlopen()`, con path runtime `/usr/lib/arksh/plugins/`, smoke `ARKSHPLUGIN.ELF` e selftest `arksh-plugin`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: `SUMMARY total=59 pass=59 fail=0`
+- ✅ **Stato validato**: `SUMMARY total=60 pass=60 fail=0`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
-| 2 | **M11-08** Application Bundle `.enlil` | `M11-03 + M9-02` | Packaging self-contained; abilita distribuzione app e launcher desktop |
-| 3 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
-| 4 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
-| 5 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
+| 2 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
+| 3 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
+| 4 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
 
 ### 3. Sequenza raccomandata per dipendenze
 
 1. **Migliorare l'usabilita' shell/input**: `M8-08h`
-2. **Packaging applicazioni**: `M11-08` — bundle `.enlil`, `enlil-run`, library search bundled
-3. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
-4. **Container e isolamento**: `M11-07`
-5. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
+2. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
+3. **Container e isolamento**: `M11-07`
+4. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
 
 ### 4. Tracce che si aprono subito dopo i prossimi blocchi
-
-- **Packaging applicazioni**: `M11-08`
-  Dipende da `M11-03 + M9-02`
-  Effetto: distribuzione self-contained `.enlil`; abilita launcher desktop e app di terze parti
 
 - **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
   Dipende in pratica da rete/socket, `vfsd` e GPU gia' disponibile
@@ -3579,18 +3578,17 @@ FASE 10 ──► container + io_uring + power (opzionale)
 
 - `M14-01` e' **completata v1**, ma resta da estendere `sysfs` e alcuni export avanzati
 - `M11-01`, `M11-02`, `M11-03`, `M11-05` e `M8-08 plugin` sono tutte **chiuse v1**; il salto qualitativo sta ora in UX shell, packaging app, desktop e container
-- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere i18n, packaging applicazioni, desktop e isolamento container**
+- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere i18n, desktop e isolamento container**
 
 ### 6. Ordine operativo consigliato da qui
 
 1. `M8-08h`
-2. `M11-08`
-3. `M12-01`
-4. `M12-02`
-5. `M11-07`
-6. `M13-02`
-7. `M13-03`
-8. `M13-05`
+2. `M12-01`
+3. `M12-02`
+4. `M11-07`
+5. `M13-02`
+6. `M13-03`
+7. `M13-05`
 
 Se serve un principio guida unico: **prima rendere EnlilOS piu' usabile da shell reale e
 tooling dinamico, poi sfruttare quella base per desktop e container, e solo dopo

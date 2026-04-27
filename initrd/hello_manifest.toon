@@ -1,0 +1,6 @@
+name: HelloBundle
+version: 1.0.0
+entry: bin/hello
+arch: aarch64
+min_os: 0.11
+caps[1]: dl

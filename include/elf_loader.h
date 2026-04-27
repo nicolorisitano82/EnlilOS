@@ -57,6 +57,8 @@ typedef struct {
     uintptr_t   stack_base;
     uintptr_t   stack_top;
     uintptr_t   tpidr_el0;  /* initial thread pointer (0 if no PT_TLS) — M11-01b */
+    char        bundle_root[64];
+    char        bundle_lib_path[64];
     uint64_t    argc;
     uint16_t    phentsize;
     uint16_t    phnum;

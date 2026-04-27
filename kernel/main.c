@@ -35,6 +35,8 @@
 #include "pty.h"
 #include "shutdown.h"
 
+extern void *memcpy(void *dst, const void *src, size_t n);
+
 /* Banner ASCII art per la console seriale */
 static void print_banner(void)
 {
@@ -1545,7 +1547,7 @@ static void bootcli_render(void)
                       "socketdemo clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 172U,
-                      "crtdemo epolldemo sysvipcdemo | net mostra MAC/link/counter virtio-net e stato del bootstrap",
+                      "crtdemo epolldemo sysvipcdemo runbundle | net mostra MAC/link/counter virtio-net e stato del bootstrap",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1710,6 +1712,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("arkshplugin dlopen enlil.so, query+init plugin M8-08");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
+        bootcli_push_line("runbundle B [ARG] lancia /bin/enlil-run su un bundle .enlil");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
         bootcli_push_line("echo TXT  ristampa il testo scritto");
         bootcli_push_line("keyboard  conferma che l'input arriva");
@@ -2171,6 +2174,55 @@ static void bootcli_execute_command(void)
         } else {
             bootcli_launch_shell(resolved, bootcli_input + 7, bootcli_input + 7, 1);
         }
+    } else if (bootcli_startswith(bootcli_input, "runbundle ")) {
+        const char *arg = bootcli_input + 10;
+        char        bundle[BOOTCLI_PATH_MAX + 1];
+        const char *argv[4];
+        uint32_t    pid = 0U;
+
+        while (*arg == ' ')
+            arg++;
+        if (*arg == '\0') {
+            bootcli_push_line("Uso: runbundle PATH_BUNDLE[.enlil] [arg]");
+        } else {
+            const char *bundle_end = arg;
+
+            while (*bundle_end != '\0' && *bundle_end != ' ')
+                bundle_end++;
+            if ((uint32_t)(bundle_end - arg) >= sizeof(bundle)) {
+                bootcli_push_line("runbundle: path bundle troppo lungo.");
+            } else {
+                char extra[BOOTCLI_INPUT_MAX + 1];
+
+                bootcli_copy_trunc(extra, bundle_end, sizeof(extra));
+                memcpy(bundle, arg, (size_t)(bundle_end - arg));
+                bundle[bundle_end - arg] = '\0';
+                if (!bootcli_resolve_path(bundle, bundle, sizeof(bundle))) {
+                    bootcli_push_line("runbundle: path troppo lungo o non valido.");
+                } else {
+                    const char *extra_arg = extra;
+
+                    while (*extra_arg == ' ')
+                        extra_arg++;
+                    argv[0] = "/bin/enlil-run";
+                    argv[1] = bundle;
+                    argv[2] = (*extra_arg != '\0') ? extra_arg : NULL;
+                    argv[3] = NULL;
+                    if (argv[2] && argv[2][0] == '\0')
+                        argv[2] = NULL;
+                    if (elf64_spawn_path_argv("/ENLILRUN.ELF", argv,
+                                              argv[2] ? 3U : 2U,
+                                              PRIO_KERNEL, &pid) < 0) {
+                        bootcli_push_line(elf64_last_error());
+                    } else {
+                        line[0] = '\0';
+                        bootcli_buf_append(line, sizeof(line), "bundle lanciato, pid=");
+                        bootcli_buf_append_u32(line, sizeof(line), pid);
+                        bootcli_push_line(line);
+                    }
+                }
+            }
+        }
     } else if (bootcli_streq(bootcli_input, "mouse")) {
         if (!bootcli_mouse_ready) {
             bootcli_push_line("Mouse: nessun puntatore guest attivo.");
@@ -2367,6 +2419,7 @@ static void bootcli_init(void)
     }
     bootcli_push_line("M5-04: write/append/create/mkdir/rm/mv/fsync/truncate/sync su ext4.");
     bootcli_push_line("M6-03: elfdemo, execdemo, dyndemo e runelf PATH per ELF64 a EL0.");
+    bootcli_push_line("M11-08: prova 'runbundle /hello.enlil' per bundle app con lib/ locale.");
     bootcli_push_line("M8-04: prova 'jobdemo' per process group, sessione e waitpid(WUNTRACED).");
     bootcli_push_line("M8-08a/b/c: prova 'posixdemo' per pipe, dup/dup2, cwd ed echo/raw termios.");
     bootcli_push_line("M11-01b: prova 'crtdemo' per crt1, costruttori, distruttori e TLS statico.");

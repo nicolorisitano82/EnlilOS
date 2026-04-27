@@ -258,7 +258,19 @@ static int st_expect_text_file(const char *case_name, const char *path,
     n = vfs_read(&file, buf, sizeof(buf) - 1U);
     ST_CHECK(case_name, n > 0, "read file attesa fallita");
     buf[(size_t)n] = '\0';
-    ST_CHECK(case_name, st_streq(buf, expected), "contenuto file inatteso");
+    if (!st_streq(buf, expected)) {
+        uart_puts("[SELFTEST] ");
+        uart_puts(case_name);
+        uart_puts(": contenuto atteso file inatteso\n");
+        uart_puts("[SELFTEST]   path     = ");
+        uart_puts(path);
+        uart_puts("\n[SELFTEST]   expected = ");
+        uart_puts(expected);
+        uart_puts("[SELFTEST]   got      = ");
+        uart_puts(buf);
+        uart_puts("\n");
+        return -1;
+    }
     (void)vfs_close(&file);
 
     if (remove_after) {
@@ -2778,6 +2790,40 @@ static int selftest_case_glibc_compat(void)
                                "glibc-compat-ok\n", 1);
 }
 
+static int selftest_case_enlil_bundle(void)
+{
+    static const char  case_name[] = "enlil-bundle";
+    static const char  expected[] =
+        "bundle-root=/hello.enlil\n"
+        "bundle-lib-ok\n";
+    static const char *argv[] = {
+        "/bin/enlil-run",
+        "/hello.enlil",
+        NULL
+    };
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    int          rc;
+
+    rc = vfs_unlink("/data/ENLILBUNDLE.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup ENLILBUNDLE.TXT fallita");
+
+    if (elf64_spawn_path_argv("/ENLILRUN.ELF", argv, 2U, PRIO_KERNEL, &pid) < 0) {
+        st_log_fail(case_name, elf64_last_error());
+        return -1;
+    }
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 5000ULL);
+    ST_CHECK(case_name, task != NULL, "ENLILRUN.ELF non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa ENLILRUN.ELF");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "ENLILRUN exit code non e' 0");
+
+    return st_expect_text_file(case_name, "/data/ENLILBUNDLE.TXT", expected, 1);
+}
+
 /* ── arksh-plugin: carica enlil.so via ARKSHPLUGIN.ELF ─────────────
  *
  * Verifica che il plugin arksh M8-08 si carichi e possa essere
@@ -2988,6 +3034,7 @@ static const selftest_case_t selftest_cases[] = {
     { "socket-api",  selftest_case_socket_api },
     { "pty-core",     selftest_case_pty_core   },
     { "glibc-compat",  selftest_case_glibc_compat },
+    { "enlil-bundle",  selftest_case_enlil_bundle },
     { "arksh-plugin",  selftest_case_arksh_plugin },
     { "mmu-user-va",   selftest_case_mmu_user_va },
 };

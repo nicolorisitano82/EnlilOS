@@ -52,6 +52,7 @@ typedef struct {
 
 static bindfs_handle_t bindfs_handles[BINDFS_HANDLE_MAX];
 static uint64_t        devfs_rand_state = 0xA5A55A5AF00DFACEULL;
+static const vfs_ops_t bindfs_ops;
 
 static int path_matches_mount(const char *path, const char *mount_path);
 static const char *relpath_from_mount(const vfs_mount_t *mount, const char *path);
@@ -518,12 +519,18 @@ static const vfs_mount_t *find_mount_excluding(const char *path,
 {
     const vfs_mount_t *best = NULL;
     size_t             best_len = 0U;
+    int                skip_bindfs = 0;
+
+    if (exclude && exclude->ops == &bindfs_ops)
+        skip_bindfs = 1;
 
     for (size_t i = 0; i < vfs_mount_count; i++) {
         const vfs_mount_t *mount = &vfs_mounts[i];
         size_t             len;
 
         if (!mount->active || mount == exclude)
+            continue;
+        if (skip_bindfs && mount->ops == &bindfs_ops)
             continue;
         if (!path_matches_mount(path, mount->path))
             continue;

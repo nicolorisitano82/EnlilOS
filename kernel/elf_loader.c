@@ -176,6 +176,7 @@ static char elf_last_error[96];
 static elf_dl_proc_state_t elf_dl_proc_state[SCHED_MAX_TASKS];
 
 static uintptr_t elf_align_up(uintptr_t v);
+static int elf_normalize_path(const char *name, char *dst, size_t cap);
 
 static uint64_t elf_dl_irq_save(void)
 {
@@ -494,6 +495,64 @@ static uint32_t elf_basename_off(const char *path)
         i++;
     }
     return last;
+}
+
+static int elf_component_has_bundle_suffix(const char *start, uint32_t len)
+{
+    static const char suffix[] = ".enlil";
+    uint32_t          slen = sizeof(suffix) - 1U;
+    uint32_t          i;
+
+    if (!start || len <= slen)
+        return 0;
+    for (i = 0U; i < slen; i++) {
+        if (start[len - slen + i] != suffix[i])
+            return 0;
+    }
+    return 1;
+}
+
+static int elf_bundle_paths_from_exec(const char *path,
+                                      char *bundle_root, size_t bundle_root_cap,
+                                      char *bundle_lib, size_t bundle_lib_cap)
+{
+    char     norm[ELF64_NAME_MAX];
+    uint32_t start = 1U;
+    uint32_t i;
+
+    if (!path)
+        return -1;
+    if (elf_normalize_path(path, norm, sizeof(norm)) < 0)
+        return -1;
+
+    for (i = 1U; ; i++) {
+        if (norm[i] != '/' && norm[i] != '\0')
+            continue;
+
+        if (elf_component_has_bundle_suffix(norm + start, i - start)) {
+            if (bundle_root && bundle_root_cap > 0U) {
+                uint32_t root_len = i;
+                if (root_len + 1U > bundle_root_cap)
+                    return -1;
+                memcpy(bundle_root, norm, root_len);
+                bundle_root[root_len] = '\0';
+            }
+            if (bundle_lib && bundle_lib_cap > 0U) {
+                if ((size_t)i + sizeof("/lib/") > bundle_lib_cap)
+                    return -1;
+                memcpy(bundle_lib, norm, i);
+                bundle_lib[i] = '\0';
+                elf_strlcpy(bundle_lib + i, "/lib/", bundle_lib_cap - (size_t)i);
+            }
+            return 0;
+        }
+
+        if (norm[i] == '\0')
+            break;
+        start = i + 1U;
+    }
+
+    return -1;
 }
 
 static uint8_t elf_detect_abi_mode(const elf64_ehdr_t *ehdr,
@@ -1058,6 +1117,12 @@ static int elf_prefault_object(mm_space_t *space, const elf_object_t *obj)
     return elf_prefault_loaded_image(space, &obj->ehdr, obj->phdrs, obj->bias);
 }
 
+static int elf_path_exists(const char *path)
+{
+    stat_t st;
+    return (path && vfs_lstat(path, &st) == 0) ? 1 : 0;
+}
+
 static int elf_plan_object(const elf64_ehdr_t *ehdr,
                            const elf64_phdr_t phdrs[ELF64_MAX_PHDRS],
                            uintptr_t *next_dyn_base,
@@ -1589,8 +1654,9 @@ static int elf_load_vfs_object(mm_space_t *space, const char *path,
  * provides libraries under /lib/aarch64-linux-gnu or /usr/lib).
  */
 static int elf_load_vfs_object_searched(mm_space_t *space, const char *path,
-                                         uintptr_t *next_dyn_base,
-                                         elf_object_t *obj)
+                                        const char *bundle_lib_path,
+                                        uintptr_t *next_dyn_base,
+                                        elf_object_t *obj)
 {
     static const char * const search_dirs[] = {
         "/lib/aarch64-linux-gnu/",
@@ -1599,14 +1665,43 @@ static int elf_load_vfs_object_searched(mm_space_t *space, const char *path,
         NULL
     };
     char     search_path[ELF64_NAME_MAX];
+    char     absolute_path[ELF64_NAME_MAX];
     uint32_t base_off;
     uint32_t blen;
+    int      path_is_absolute;
 
-    if (elf_load_vfs_object(space, path, next_dyn_base, obj) == 0)
-        return 0;
+    path_is_absolute = (path && path[0] == '/') ? 1 : 0;
+    absolute_path[0] = '\0';
 
     base_off = elf_basename_off(path);
     blen     = elf_strlen(path + base_off);
+
+    if (!path_is_absolute && bundle_lib_path && bundle_lib_path[0] != '\0') {
+        uint32_t dlen = elf_strlen(bundle_lib_path);
+
+        if (dlen + blen + 1U <= sizeof(search_path)) {
+            elf_strlcpy(search_path, bundle_lib_path, sizeof(search_path));
+            elf_strlcpy(search_path + dlen, path + base_off,
+                        sizeof(search_path) - dlen);
+            if (elf_load_vfs_object(space, search_path, next_dyn_base, obj) == 0)
+                return 0;
+            if (elf_path_exists(search_path))
+                return -1;
+        }
+    }
+
+    if (path_is_absolute) {
+        if (elf_load_vfs_object(space, path, next_dyn_base, obj) == 0)
+            return 0;
+        if (elf_path_exists(path))
+            return -1;
+    } else {
+        if (elf_normalize_path(path, absolute_path, sizeof(absolute_path)) == 0 &&
+            elf_load_vfs_object(space, absolute_path, next_dyn_base, obj) == 0)
+            return 0;
+        if (absolute_path[0] != '\0' && elf_path_exists(absolute_path))
+            return -1;
+    }
 
     for (uint32_t i = 0U; search_dirs[i]; i++) {
         uint32_t dlen = elf_strlen(search_dirs[i]);
@@ -1617,6 +1712,8 @@ static int elf_load_vfs_object_searched(mm_space_t *space, const char *path,
                     sizeof(search_path) - dlen);
         if (elf_load_vfs_object(space, search_path, next_dyn_base, obj) == 0)
             return 0;
+        if (elf_path_exists(search_path))
+            return -1;
     }
 
     /*
@@ -1811,6 +1908,7 @@ static int elf_load_path_exec_dynamic(const char *path,
     int          interp_idx = -1;
     uint64_t     objects_pa = 0ULL;
     uint32_t     objects_order = 0U;
+    char         bundle_lib_path[ELF64_NAME_MAX];
 
     if (!path || path[0] == '\0') {
         elf_set_error("path ELF vuoto");
@@ -1827,6 +1925,10 @@ static int elf_load_path_exec_dynamic(const char *path,
     }
 
     memset(&image, 0, sizeof(image));
+    bundle_lib_path[0] = '\0';
+    if (elf_bundle_paths_from_exec(path, image.bundle_root, sizeof(image.bundle_root),
+                                   bundle_lib_path, sizeof(bundle_lib_path)) == 0)
+        elf_strlcpy(image.bundle_lib_path, bundle_lib_path, sizeof(image.bundle_lib_path));
     objects_order = elf_order_for_size(sizeof(elf_object_t) * ELF64_MAX_OBJECTS);
     objects_pa = phys_alloc_pages(objects_order);
     if (objects_pa == 0ULL) {
@@ -1892,10 +1994,13 @@ static int elf_load_path_exec_dynamic(const char *path,
 
     for (uint32_t idx = 0U; idx < object_count; idx++) {
         for (uint32_t n = 0U; n < objects[idx].dyn.needed_count; n++) {
+            const char *needed_name = objects[idx].dyn.needed[n];
             char needed_path[ELF64_NAME_MAX];
 
-            if (elf_normalize_path(objects[idx].dyn.needed[n],
-                                   needed_path, sizeof(needed_path)) < 0) {
+            if (needed_name[0] == '/')
+                elf_strlcpy(needed_path, needed_name, sizeof(needed_path));
+            else if (elf_normalize_path(needed_name,
+                                        needed_path, sizeof(needed_path)) < 0) {
                 elf_set_error("DT_NEEDED troppo lungo");
                 goto fail;
             }
@@ -1906,7 +2011,7 @@ static int elf_load_path_exec_dynamic(const char *path,
                 goto fail;
             }
             /* M11-05d: use searched loader for DT_NEEDED resolution */
-            if (elf_load_vfs_object_searched(space, needed_path, &next_dyn_base,
+            if (elf_load_vfs_object_searched(space, needed_name, bundle_lib_path, &next_dyn_base,
                                              &objects[object_count]) < 0)
                 goto fail;
             if (objects[object_count].image_hi > max_hi)
@@ -2012,6 +2117,7 @@ static int elf_dl_current_context(mm_space_t **space_out,
 
 static int elf_dl_load_module(mm_space_t *space,
                               elf_dl_proc_state_t *state,
+                              const char *bundle_lib_path,
                               const char *path,
                               elf_dl_module_t *mod)
 {
@@ -2026,16 +2132,20 @@ static int elf_dl_load_module(mm_space_t *space,
     elf_strlcpy(mod->root_path, path, sizeof(mod->root_path));
     next_dyn_base = elf_dl_next_runtime_base(state);
 
-    if (elf_load_vfs_object(space, path, &next_dyn_base, &mod->objects[0]) < 0)
+    if (elf_load_vfs_object_searched(space, path, bundle_lib_path, &next_dyn_base,
+                                     &mod->objects[0]) < 0)
         return -EIO;
     mod->object_count = 1U;
 
     for (uint32_t idx = 0U; idx < mod->object_count; idx++) {
         for (uint32_t n = 0U; n < mod->objects[idx].dyn.needed_count; n++) {
+            const char *needed_name = mod->objects[idx].dyn.needed[n];
             char needed_path[ELF64_NAME_MAX];
 
-            if (elf_normalize_path(mod->objects[idx].dyn.needed[n],
-                                   needed_path, sizeof(needed_path)) < 0) {
+            if (needed_name[0] == '/')
+                elf_strlcpy(needed_path, needed_name, sizeof(needed_path));
+            else if (elf_normalize_path(needed_name,
+                                        needed_path, sizeof(needed_path)) < 0) {
                 elf_set_error("DT_NEEDED troppo lungo");
                 return -EINVAL;
             }
@@ -2047,7 +2157,7 @@ static int elf_dl_load_module(mm_space_t *space,
                 return -ENOMEM;
             }
             /* M11-05d: use searched loader */
-            if (elf_load_vfs_object_searched(space, needed_path, &next_dyn_base,
+            if (elf_load_vfs_object_searched(space, needed_name, bundle_lib_path, &next_dyn_base,
                                               &mod->objects[mod->object_count]) < 0)
                 return -EIO;
             mod->object_count++;
@@ -2078,6 +2188,7 @@ int elf64_dlopen_current(const char *path, uint32_t flags, uintptr_t *handle_out
     mm_space_t         *space = NULL;
     elf_dl_proc_state_t *state = NULL;
     char                norm_path[ELF64_NAME_MAX];
+    char                bundle_lib_path[ELF64_NAME_MAX];
     int                 rc;
     int                 idx;
 
@@ -2089,6 +2200,15 @@ int elf64_dlopen_current(const char *path, uint32_t flags, uintptr_t *handle_out
     rc = elf_dl_current_context(&space, NULL, &state);
     if (rc < 0)
         return rc;
+
+    bundle_lib_path[0] = '\0';
+    if (current_task) {
+        const char *exec_path = sched_task_exec_path(current_task);
+
+        if (exec_path)
+            (void)elf_bundle_paths_from_exec(exec_path, NULL, 0U,
+                                             bundle_lib_path, sizeof(bundle_lib_path));
+    }
 
     elf_dl_lock(state);
     elf_dl_set_proc_error(state, "");
@@ -2122,7 +2242,8 @@ int elf64_dlopen_current(const char *path, uint32_t flags, uintptr_t *handle_out
         return -ENFILE;
     }
 
-    rc = elf_dl_load_module(space, state, norm_path, &state->modules[idx]);
+    rc = elf_dl_load_module(space, state, bundle_lib_path,
+                            norm_path, &state->modules[idx]);
     if (rc < 0) {
         elf_dl_copy_global_error(state);
         memset(&state->modules[idx], 0, sizeof(state->modules[idx]));
