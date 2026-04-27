@@ -999,7 +999,12 @@ static ssize_t bindfs_read(vfs_file_t *file, void *buf, size_t count)
 
     if (!handle)
         return -EBADF;
-    return vfs_read(&handle->file, buf, count);
+    handle->file.pos = file->pos;
+    {
+        ssize_t rc = vfs_read(&handle->file, buf, count);
+        file->pos = handle->file.pos;
+        return rc;
+    }
 }
 
 static ssize_t bindfs_write(vfs_file_t *file, const void *buf, size_t count)
@@ -1008,7 +1013,12 @@ static ssize_t bindfs_write(vfs_file_t *file, const void *buf, size_t count)
 
     if (!handle)
         return -EBADF;
-    return vfs_write(&handle->file, buf, count);
+    handle->file.pos = file->pos;
+    {
+        ssize_t rc = vfs_write(&handle->file, buf, count);
+        file->pos = handle->file.pos;
+        return rc;
+    }
 }
 
 static int bindfs_readdir(vfs_file_t *file, vfs_dirent_t *out)

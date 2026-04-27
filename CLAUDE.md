@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=58 pass=58 fail=0`
+- Stato validato: `SUMMARY total=59 pass=59 fail=0`
 - `make test` lancia QEMU senza wrapper timeout: dopo `SUMMARY ... PASS/FAIL` kernel entra in halt, QEMU resta aperto finché non terminato.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -522,21 +522,20 @@ Per task ausiliari (holder/hog/waiter):
 
 ## Milestone completate (stato 2026-04-27)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f/g` e `M8-08d/e/f/g` completi in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f/g` e `M8-08d/e/f/g` completi in v1, piu' `M8-08 plugin` chiusa in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=58 pass=58 fail=0
+SUMMARY total=59 pass=59 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
-1. **M8-08 plugin** — plugin `.so` per arksh ora che `libdl` e' stabile
-2. **M8-08h** — i18n / localizzazione stringhe
-3. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
-4. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
-5. **M13-02** — SMP bootstrap
-7. **M13-03** — scheduler multicore
+1. **M8-08h** — i18n / localizzazione stringhe
+2. **M12-01** — Wayland server minimale (Weston-lite sopra VirtIO-GPU)
+3. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
+4. **M13-02** — SMP bootstrap
+5. **M13-03** — scheduler multicore
 ### Stato operativo M11-05e / Linux filesystem environment
 
 - `M11-05e` e' chiusa in `v1`.

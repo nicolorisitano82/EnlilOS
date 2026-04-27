@@ -2778,6 +2778,31 @@ static int selftest_case_glibc_compat(void)
                                "glibc-compat-ok\n", 1);
 }
 
+/* ── arksh-plugin: carica enlil.so via ARKSHPLUGIN.ELF ─────────────
+ *
+ * Verifica che il plugin arksh M8-08 si carichi e possa essere
+ * interrogato correttamente:
+ *   1. dlopen /usr/lib/arksh/plugins/enlil.so
+ *   2. arksh_plugin_query → abi_major corretto, name non vuoto
+ *   3. arksh_plugin_init  → ritorna 0 con host stub
+ *   4. dlclose OK
+ * ─────────────────────────────────────────────────────────────────── */
+
+static int selftest_case_arksh_plugin(void)
+{
+    static const char case_name[] = "arksh-plugin";
+    int rc;
+
+    rc = vfs_unlink("/data/ARKSHPLUGIN.TXT");
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup ARKSHPLUGIN.TXT fallita");
+
+    if (st_run_user_path(case_name, "/ARKSHPLUGIN.ELF", 5000ULL) < 0)
+        return -1;
+    return st_expect_text_file(case_name, "/data/ARKSHPLUGIN.TXT",
+                               "arksh-plugin-ok\n", 1);
+}
+
 /* ── mmu-user-va: test kernel-side mmu_read_user / mmu_write_user /
  *                mmu_remap_user_region ──────────────────────────────
  *
@@ -2962,8 +2987,9 @@ static const selftest_case_t selftest_cases[] = {
     { "kbd-layout",  selftest_case_kbd_layout },
     { "socket-api",  selftest_case_socket_api },
     { "pty-core",     selftest_case_pty_core   },
-    { "glibc-compat", selftest_case_glibc_compat },
-    { "mmu-user-va",  selftest_case_mmu_user_va },
+    { "glibc-compat",  selftest_case_glibc_compat },
+    { "arksh-plugin",  selftest_case_arksh_plugin },
+    { "mmu-user-va",   selftest_case_mmu_user_va },
 };
 
 int selftest_run_named(const char *name)

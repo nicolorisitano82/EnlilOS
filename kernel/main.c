@@ -1539,7 +1539,7 @@ static void bootcli_render(void)
                       "append mkdir truncate rm mv fsync sync kbdlayout loadkeys arksh login nsh",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 132U,
-                      "mreactdemo jobdemo nsdemo posixdemo muslabi muslglob musldl arkshsmoke",
+                      "mreactdemo jobdemo nsdemo posixdemo muslabi muslglob musldl arkshsmoke arkshplugin",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 152U,
                       "socketdemo clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo",
@@ -1707,6 +1707,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("tlsmtdemo lancia un ELF che verifica __thread + errno per-thread");
         bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("sysvipcdemo lancia un ELF che verifica shmget/shmat/semget/semop");
+        bootcli_push_line("arkshplugin dlopen enlil.so, query+init plugin M8-08");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
         bootcli_push_line("mouse     mostra stato del puntatore guest");
@@ -2058,6 +2059,18 @@ static void bootcli_execute_command(void)
         } else {
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "glibc-compat demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "arkshplugin")) {
+        /* M8-08 plugin: smoke test arksh plugin enlil.so */
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/ARKSHPLUGIN.ELF", "/ARKSHPLUGIN.ELF",
+                             PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "arksh plugin demo lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }

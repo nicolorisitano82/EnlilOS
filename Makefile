@@ -114,8 +114,10 @@ USER_SHARED_SRCS      = user/libdyn.c user/ld_enlil.c user/glibc_compat.c
 USER_SHARED_PICOBJS   = $(USER_SHARED_SRCS:.c=.pic.o)
 USER_SHARED_LIBS      = $(USER_SHARED_SRCS:.c=.so)
 USER_SHARED_EMBEDOBJS = $(USER_SHARED_LIBS:%=%.embed.o)
+# M8-08 plugin: built separately with musl wrapper (needs stdio.h/string.h + arksh headers)
+ARKSH_PLUGIN_SO       = user/arksh_plugin_enlil.so
 USER_OBJS             = $(USER_STATIC_OBJS) $(USER_CRT_OBJS) $(USER_DYNAPP_PIEOBJS) $(USER_SHARED_PICOBJS)
-USER_ELFS             = $(USER_STATIC_ELFS) $(USER_CRT_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS)
+USER_ELFS             = $(USER_STATIC_ELFS) $(USER_CRT_ELFS) $(USER_DYNAPP_ELFS) $(USER_SHARED_LIBS) $(ARKSH_PLUGIN_SO)
 USER_EMBEDOBJS        = $(USER_STATIC_EMBEDOBJS) $(USER_CRT_EMBEDOBJS) $(USER_DYNAPP_EMBEDOBJS) $(USER_SHARED_EMBEDOBJS)
 MUSL_ROOT             = toolchain/enlilos-musl
 MUSL_BUILD            = toolchain/build/musl
@@ -216,12 +218,13 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/epoll_demo.c \
                         toolchain/smoke/poweroff.c \
                         toolchain/smoke/pty_demo.c \
-                        toolchain/smoke/glibc_compat_demo.c
+                        toolchain/smoke/glibc_compat_demo.c \
+                        toolchain/smoke/arksh_plugin_demo.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
                         -DARKSH_STATIC=ON \
-                        -DARKSH_PLUGINS=OFF \
+                        -DARKSH_PLUGINS=ON \
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),bin/arksh.real=$(ARKSH_REAL_ELF),)
 LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
@@ -348,6 +351,24 @@ musl-sysroot: $(MUSL_SYSROOT_STAMP)
 
 toolchain/smoke/%.elf: toolchain/smoke/%.c $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
 	$(MUSL_WRAPPER_GCC) -O2 -o $@ $<
+
+# M8-08 plugin demo: needs arksh/include headers
+toolchain/smoke/arksh_plugin_demo.elf: toolchain/smoke/arksh_plugin_demo.c \
+                                        $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC) Makefile
+	$(MUSL_WRAPPER_GCC) -O2 -I$(ARKSH_DIR)/include -o $@ $<
+
+# M8-08 plugin .so: fully freestanding — no libc symbols (static musl does not export
+# .dynsym so symbols would not resolve at dlopen-time in a static host binary).
+# Link with -Bsymbolic to avoid self-PLT/JMPREL entries for exported plugin hooks:
+# our kernel-side dlopen path already handles simple ET_DYN well, while keeping the
+# plugin relocation-free makes the profile match libdyn.so and stay nicely bounded.
+# Compile directly with $(CC) to avoid the wrapper's -ffreestanding/-fno-builtin noise.
+user/arksh_plugin_enlil.pic.o: user/arksh_plugin_enlil.c \
+                                 $(MUSL_SYSROOT_STAMP) Makefile
+	$(CC) $(USER_PIC_CFLAGS) -I$(ARKSH_DIR)/include -c $< -o $@
+
+$(ARKSH_PLUGIN_SO): user/arksh_plugin_enlil.pic.o user/user_shared.ld Makefile
+	$(CC) -shared -nostdlib -Wl,-T,user/user_shared.ld -Wl,-Bsymbolic -o $@ $<
 
 $(ARKSH_SELFTEST_ELF): toolchain/smoke/arksh_boot.c $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
 	$(MUSL_WRAPPER_GCC) -O2 -DARKSH_BOOT_SELFTEST -o $@ $<
@@ -514,6 +535,8 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		PTYDEMO.ELF=toolchain/smoke/pty_demo.elf \
 		GLIBCCOMPAT.ELF=toolchain/smoke/glibc_compat_demo.elf \
 		GLIBC-COMPAT.SO=user/glibc_compat.so \
+		ARKSHPLUGIN.ELF=toolchain/smoke/arksh_plugin_demo.elf \
+		usr/lib/arksh/plugins/enlil.so=$(ARKSH_PLUGIN_SO) \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \

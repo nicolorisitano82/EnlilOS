@@ -868,12 +868,13 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=58 pass=58 fail=0`
+- suite runtime piu' recente: `SUMMARY total=59 pass=59 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
 - plugin arksh compilati come `.so` AArch64 con la toolchain musl
-- directory plugin gia' predisposta: `/usr/lib/arksh/plugins/`
+- plugin `enlil.so` impacchettato e validato in `/usr/lib/arksh/plugins/`
+- selftest dedicato `arksh-plugin`
 
 ---
 
@@ -3511,14 +3512,14 @@ FASE 10 ──► container + io_uring + power (opzionale)
 - ✅ M11-01 musl/toolchain bootstrap v1
 - ✅ M8-08e build/toolchain arksh v1
 - ✅ M8-08f integrazione shell/login v1
-- **Prossimo step:** `M8-08` plugin arksh, poi `M8-08h` i18n, poi `M11-05`
+- **Prossimo step:** `M8-08h` i18n, poi `M11-08`, poi `M12-01`
 
 ---
 
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1`: suite `selftest` a `58/58`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1` e di `M8-08 plugin`: suite `selftest` a `59/59`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3532,28 +3533,27 @@ FASE 10 ──► container + io_uring + power (opzionale)
   `ld-linux-aarch64.so.1` shim, `/proc/sys` subtree, `/etc/locale.conf` + `localtime` + `ld.so.cache`,
   PTY master/slave (`/dev/ptmx`, `/dev/pts/N`), `GLIBC-COMPAT.SO` con `DT_GNU_HASH`, alias `libc.so.6`
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
+- ✅ **Shell dinamica v1**: `M8-08 plugin` — `arksh` carica plugin `.so` nativi via `dlopen()`, con path runtime `/usr/lib/arksh/plugins/`, smoke `ARKSHPLUGIN.ELF` e selftest `arksh-plugin`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: `SUMMARY total=58 pass=58 fail=0`
+- ✅ **Stato validato**: `SUMMARY total=59 pass=59 fail=0`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
-| 1 | **M8-08 plugin** | `M11-03` | `libdl` stabile; plugin dinamici shell finalmente sensati |
-| 2 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
-| 3 | **M11-08** Application Bundle `.enlil` | `M11-03 + M9-02` | Packaging self-contained; abilita distribuzione app e launcher desktop |
-| 4 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
-| 5 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
-| 6 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
+| 1 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
+| 2 | **M11-08** Application Bundle `.enlil` | `M11-03 + M9-02` | Packaging self-contained; abilita distribuzione app e launcher desktop |
+| 3 | **M12-01** Wayland server minimale | `M10-03 + M9-02 + M5b` | Socket + GPU disponibili: primo desktop userspace credibile |
+| 4 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
+| 5 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
 
 ### 3. Sequenza raccomandata per dipendenze
 
-1. **Portare la shell oltre il bootstrap**: `M8-08 plugin`
-2. **Migliorare l'usabilita' shell/input**: `M8-08h`
-3. **Packaging applicazioni**: `M11-08` — bundle `.enlil`, `enlil-run`, library search bundled
-4. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
-5. **Container e isolamento**: `M11-07`
-6. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
+1. **Migliorare l'usabilita' shell/input**: `M8-08h`
+2. **Packaging applicazioni**: `M11-08` — bundle `.enlil`, `enlil-run`, library search bundled
+3. **Desktop grafico**: `M12-01 -> M12-02 -> M12-03`
+4. **Container e isolamento**: `M11-07`
+5. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
 
 ### 4. Tracce che si aprono subito dopo i prossimi blocchi
 
@@ -3578,20 +3578,19 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ### 5. Punti aperti ma non bloccanti subito
 
 - `M14-01` e' **completata v1**, ma resta da estendere `sysfs` e alcuni export avanzati
-- `M11-01`, `M11-02`, `M11-03`, `M11-05` sono tutte **chiuse v1**; il salto qualitativo sta in plugin shell, desktop e container
-- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere shell dinamica reale + desktop + isolamento container**
+- `M11-01`, `M11-02`, `M11-03`, `M11-05` e `M8-08 plugin` sono tutte **chiuse v1**; il salto qualitativo sta ora in UX shell, packaging app, desktop e container
+- La priorita' pratica non e' aggiungere altre primitive kernel isolate, ma **chiudere i18n, packaging applicazioni, desktop e isolamento container**
 
 ### 6. Ordine operativo consigliato da qui
 
-1. `M8-08 plugin`
-2. `M8-08h`
-3. `M11-08`
-4. `M12-01`
-5. `M12-02`
-6. `M11-07`
-7. `M13-02`
-8. `M13-03`
-9. `M13-05`
+1. `M8-08h`
+2. `M11-08`
+3. `M12-01`
+4. `M12-02`
+5. `M11-07`
+6. `M13-02`
+7. `M13-03`
+8. `M13-05`
 
 Se serve un principio guida unico: **prima rendere EnlilOS piu' usabile da shell reale e
 tooling dinamico, poi sfruttare quella base per desktop e container, e solo dopo
