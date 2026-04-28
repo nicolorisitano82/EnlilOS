@@ -4049,6 +4049,18 @@ static uint64_t sys_execve(uint64_t args[6])
         return ERR(-rc);
     }
 
+    {
+        /* Controlla esistenza file prima del load ELF: se non esiste
+         * ritorna ENOENT (non EIO) così la shell può cercare nel PATH. */
+        vfs_file_t _probe;
+        int _probe_rc = vfs_open(resolved_path, O_RDONLY, &_probe);
+        if (_probe_rc < 0) {
+            kdebug_watchdog_resume();
+            kfree(copy);
+            return ERR(-_probe_rc);  /* ENOENT → shell continua PATH search */
+        }
+        (void)vfs_close(&_probe);
+    }
     rc = elf64_load_from_path_exec(resolved_path,
                                    copy->argv, copy->argc,
                                    copy->envp, copy->envc,
@@ -4056,7 +4068,7 @@ static uint64_t sys_execve(uint64_t args[6])
     if (rc < 0) {
         kdebug_watchdog_resume();
         kfree(copy);
-        return ERR(EIO);
+        return ERR(EIO);  /* file esiste ma ELF invalido → ENOEXEC semantics */
     }
 
     fd_close_cloexec_in_slot(task_idx());

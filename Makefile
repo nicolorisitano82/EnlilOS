@@ -560,6 +560,9 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		usr/bin/epolldemo=toolchain/smoke/epoll_demo.elf \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
+		bin/poweroff=toolchain/smoke/poweroff.elf \
+		bin/reboot=toolchain/smoke/poweroff.elf \
+		bin/halt=toolchain/smoke/poweroff.elf \
 		sbin/poweroff=toolchain/smoke/poweroff.elf \
 		sbin/reboot=toolchain/smoke/poweroff.elf \
 		sbin/halt=toolchain/smoke/poweroff.elf \
