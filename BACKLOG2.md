@@ -2668,22 +2668,142 @@ Dominio NAS (soft-RT e aperiodici, best-effort):
 ### ⬜ M13-02 · Multi-Core SMP (AArch64)
 **Priorità:** ALTA — QEMU virt ha 4 core disponibili
 
-- **Spin-up core secondari** via `PSCI_CPU_ON` (PSCI 1.0 su QEMU):
-  core 1/2/3 entrano in `secondary_entry` in `vectors.S`, inizializzano MMU e GIC locali
-- **Percpu data**: `TPIDR_EL1` punta a `per_cpu_t { uint32_t cpu_id; sched_tcb_t *current; ... }`
-- **Run queue per-core**: ogni core ha la propria ready bitmap + run_queue[256] (M2-03 replicato)
-- **Load balancer**: ogni 10ms, il core idle con più task ha overbooking → migrazione singolo task
-- **Spinlock IPC-safe**: `spinlock_t` con `LDAXR/STLXR` (AArch64 exclusives); mai acquisiti con IRQ abilitati per più di 50 cicli
-- **IPI (Inter-Processor Interrupt)**: GIC SGI (Software Generated Interrupt) per reschedule remoto
-  - SGI #0: `IPI_RESCHED` — il core target ri-valuta `need_resched` alla prossima uscita da IRQ
-  - SGI #1: `IPI_CALL` — esegue una funzione su un core specifico (TLB invalidation)
-  - SGI #2: `IPI_STOP` — ferma un core (per panic o poweroff)
-- **TLB shootdown**: `tlb_flush_range(vaddr, size)` invia IPI a tutti i core prima di `TLBI`
+#### Infrastruttura esistente utilizzabile
 
-**Invarianti RT su SMP:**
-- Un task hard-RT è pinnato su un core dedicato (`TASK_PINNED_CPU`) — mai migrato
-- Le run queue per-core sono indipendenti: il balancer non tocca mai la core RT
-- Spinlock nei path critici: WCET spinlock bounded a `MAX_SPIN_CYCLES = 200`; se supera → panic
+| Componente | Stato |
+|---|---|
+| `gic_send_sgi(cpu, id)` | ✅ presente in `kernel/gic.c` |
+| `irq_save/restore` | ✅ presente (single-core) |
+| `psci_system_off/reset` | ✅ presente |
+| `PSCI_CPU_ON` | ❌ mancante |
+| `current_task` globale | ❌ da rendere per-cpu |
+| `ready_bitmap + rq_head/tail` globali | ❌ da replicare per-cpu |
+| `need_resched` globale | ❌ da rendere per-cpu |
+| `secondary_entry` | ❌ non esiste |
+| spinlock `LDAXR/STLXR` | ❌ non esiste |
+| QEMU `-smp 4` | ❌ non abilitato |
+
+#### Fasi implementazione (ordine dipendenze)
+
+**Fase 1 — Spinlock** (`include/spinlock.h`, ~50 righe)
+```c
+typedef struct { volatile uint32_t lock; } spinlock_t;
+spinlock_acquire(s)           // LDAXR/STLXR loop
+spinlock_release(s)           // STLR
+irq_spinlock_acquire(s, flags) // irq_save + acquire
+irq_spinlock_release(s, flags) // release + irq_restore
+```
+
+**Fase 2 — Per-cpu data** (`include/percpu.h`, `kernel/percpu.c`)
+```c
+typedef struct {
+    uint32_t       cpu_id;          // MPIDR_EL1 & 0xFF
+    sched_tcb_t   *current_task;    // rimpiazza globale
+    uint32_t       need_resched;    // rimpiazza globale
+    sched_tcb_t   *rq_head[256];
+    sched_tcb_t   *rq_tail[256];
+    uint64_t       ready_bitmap[4];
+    sched_tcb_t   *idle_task;
+    uint64_t       tick_count;
+    uint32_t       online;
+} per_cpu_t;
+
+static per_cpu_t cpu_data[4];      // statico, niente kmalloc
+// TPIDR_EL1 → &cpu_data[id]
+#define THIS_CPU()  ((per_cpu_t *)read_sysreg(tpidr_el1))
+#define current     (THIS_CPU()->current_task)
+```
+`current_task` globale → macro `current`. `need_resched` globale → `THIS_CPU()->need_resched`.
+
+**Fase 3 — `secondary_entry`** (`boot/vectors.S`, `kernel/smp.c`)
+```asm
+secondary_entry:
+    // stack pre-allocato in kernel/smp.c per cpu 1/2/3
+    // abilita MMU con page table già attive di cpu0
+    // gic_cpu_init()    ← solo GICC, GICD già fatto da cpu0
+    // timer_cpu_init()  ← abilita timer locale
+    // smp_cpu_online()  ← cpu_data[id].online = 1
+    // schedule()        ← avvia scheduling su questo core
+```
+
+**Fase 4 — `gic_cpu_init()`** (`kernel/gic.c`, ~20 righe)
+- Inizializza GICC per il core corrente (priorità, enable)
+- GICD già inizializzato da cpu0: non reinizializzare
+
+**Fase 5 — PSCI `cpu_on`** (`kernel/psci.c`)
+```c
+#define PSCI_CPU_ON  0x84000003U
+int psci_cpu_on(uint32_t mpidr, uintptr_t entry, uintptr_t ctx);
+// hvc #0: x0=CPU_ON x1=mpidr x2=entry x3=ctx
+```
+
+**Fase 6 — `smp_init()`** (`kernel/smp.c`) — chiamato da `kernel/main.c`
+```c
+void smp_init(void) {
+    for (cpu = 1; cpu <= 3; cpu++) {
+        // alloca stack secondario 16 KB
+        // psci_cpu_on(cpu_mpidr[cpu], &secondary_entry, 0)
+        // busy-wait su cpu_data[cpu].online (timeout 100ms)
+    }
+}
+```
+
+**Fase 7 — Scheduler SMP** (`kernel/sched.c` — refactor principale)
+- `schedule_locked`: usa `THIS_CPU()->rq_*` invece di globali
+- `sched_tick()`: aggiorna `THIS_CPU()->tick_count`
+- `rq_push/pop/remove`: operano su rq del cpu chiamante; `rq_lock[cpu]` spinlock per accesso cross-cpu dal load balancer
+
+**Fase 8 — IPI handlers** (`kernel/smp.c`, `boot/vectors.S`)
+```c
+#define IPI_RESCHED  0   // SGI 0
+#define IPI_STOP     2   // SGI 2
+
+// vettore IRQ: se irq < 16 → SGI → dispatch IPI
+static void ipi_handler(uint32_t sgi_id) {
+    if (sgi_id == IPI_RESCHED) THIS_CPU()->need_resched = 1;
+    if (sgi_id == IPI_STOP)    cpu_halt_self();
+}
+```
+
+**Fase 9 — Load balancer** (`kernel/sched.c`, ~80 righe)
+- Ogni 10ms (tick cpu0): scansiona `cpu_data[c].ready_bitmap`
+- Se `rq_len[src] > rq_len[dst]+1` e task non pinned → migra un task
+- Lock acquisiti nell'ordine `src_cpu < dst_cpu` (evita deadlock)
+- Mai migrare task `TCB_FLAG_RT | TASK_PINNED_CPU`
+
+**Fase 10 — `shutdown_system` SMP-aware** (`kernel/shutdown.c`)
+- Prima di PSCI: invia `IPI_STOP` a core 1/2/3
+- Aspetta `cpu_data[c].online == 0` (timeout 500ms)
+
+#### File nuovi / modificati
+
+| File | Azione |
+|---|---|
+| `include/spinlock.h` | nuovo |
+| `include/percpu.h` | nuovo |
+| `include/smp.h` | nuovo |
+| `kernel/percpu.c` | nuovo |
+| `kernel/smp.c` | nuovo |
+| `kernel/psci.c` | +`psci_cpu_on` |
+| `kernel/gic.c` | +`gic_cpu_init` |
+| `kernel/sched.c` | refactor globali → per-cpu (pezzo più grande) |
+| `kernel/shutdown.c` | +IPI_STOP loop |
+| `boot/vectors.S` | +`secondary_entry`, +SGI dispatch |
+| `Makefile` | +`-smp 4` a tutti i target QEMU |
+
+#### Invarianti RT su SMP
+- Task hard-RT pinnato su core dedicato (`TASK_PINNED_CPU`) — mai migrato
+- Run queue per-core indipendenti: balancer non tocca mai la rq RT
+- Spinlock bounded: `MAX_SPIN_CYCLES = 200`; se supera → panic
+
+#### Rischi principali
+1. **`sched.c` refactor** — `current_task` usato ~200 volte; pezzo più esteso
+2. **Ordering IRQ+spinlock** — ogni `irq_save` diventa `irq_spinlock_acquire` nei path condivisi
+3. **TLB shootdown** — flush locale + IPI; no window di mappatura condivisa in v1
+4. **QEMU `-smp 4 -accel tcg`** — TCG + SMP funziona ma lento; timeout test generosi
+
+#### Selftest proposto: `smp-boot`
+Verifica: tutti e 4 i core `online`, ogni core `tick_count > 0`, un task creato su cpu0 eseguito su core secondario entro 50ms.
 
 ---
 
