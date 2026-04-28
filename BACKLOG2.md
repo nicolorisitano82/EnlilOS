@@ -581,11 +581,11 @@ Correzioni e aggiunte apportate contestualmente alla stabilizzazione di M8-07:
 > `nsh` rimane disponibile come shell di recovery (initrd, modalità single-user)
 > perché non ha dipendenze esterne. arksh è la shell normale dell'utente.
 
-**Stato attuale:** `M8-08a/b/c/d/e/f/g` completate `v1`. Il bootstrap shell-side e'
+**Stato attuale:** `M8-08a/b/c/d/e/f/g` + **plugin** completate `v1`. Il bootstrap shell-side e'
 chiuso: toolchain, smoke CMake, login shell bridge `/bin/arksh`, layout home/config,
-fallback `/bin/nsh`, binario reale esterno `/bin/arksh.real` e layout tastiera `us`/`it`
-sono reali. Restano aperti i pezzi post-bootstrap piu' avanzati (plugin `.so`, UX/history
-avanzata e hardening del port hosted).
+fallback `/bin/nsh`, binario reale esterno `/bin/arksh.real`, layout tastiera `us`/`it`
+e plugin nativi via `dlopen()` (`enlil.so` in `/usr/lib/arksh/plugins/`) sono reali.
+Restano aperti i pezzi post-bootstrap avanzati (UX/history avanzata, M8-08h i18n).
 
 **Perché arksh invece di bash/dash:**
 - Zero dipendenze esterne a runtime — solo libc (musl M11-01)
@@ -868,7 +868,7 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 - selftest `arksh-login`
 - build host-side reale: `make arksh-build ARKSH_DIR=...`
 - packaging verificato: `boot/initrd.cpio` contiene `bin/arksh.real`
-- suite runtime piu' recente: `SUMMARY total=59 pass=59 fail=0`
+- suite runtime piu' recente: `SUMMARY total=60 pass=60 fail=0`
 
 **Plugin system (dopo `M11-03`):**
 - `dlopen`/`dlsym` disponibili dopo il dynamic linker
@@ -1302,7 +1302,7 @@ Porta di **musl libc** come C runtime standard per EnlilOS.
 - integrazione build con `make musl-sysroot` e `make musl-smoke`
 - smoke test statici embedded nell'initrd:
   `MUSLHELLO.ELF`, `MUSLSTDIO.ELF`, `MUSLMALLOC.ELF`, `MUSLFORK.ELF`, `MUSLPIPE.ELF`
-- validazione runtime piu' recente nel selftest completo `SUMMARY total=58 pass=58 fail=0`
+- validazione runtime piu' recente nel selftest completo `SUMMARY total=60 pass=60 fail=0`
 
 **Note v1:**
 - profilo static-only, single-thread, pensato per bootstrap e smoke test
@@ -1732,7 +1732,7 @@ M11-03 (dynamic linker ELF come riferimento architetturale)
 **Priorità:** ALTA
 
 > **Stato:** **chiusa `v1`** — tutte le sotto-milestone `a/b/c/d/e/f/g` completate.
-> Suite: `SUMMARY total=58 pass=58 fail=0`
+> Suite: `SUMMARY total=60 pass=60 fail=0`
 >
 > EnlilOS esegue oggi:
 > 1. tabella syscall Linux AArch64 separata da quella nativa, selezione ABI per-task
@@ -1787,7 +1787,7 @@ tabella compat, quindi qui sotto teniamo separati:
 - `execve()` Linux ABI corretto anche per `ET_EXEC` low-VA fuori dal window user canonico, via alias user-space
 - `brk()` reale con backing high-VA + alias low-VA, sufficiente per il profilo `malloc`/startup di `bash-linux`
 - smoke reale: `/data/bash-linux -c 'echo ok'`
-- suite selftest piu' recente: `58/58`
+- suite selftest piu' recente: `60/60`
 
 **Residuo che resta come hardening post-`v1`**
 - stub Linux espliciti e coerenti per:
@@ -1844,7 +1844,7 @@ Linux compat shell/tool.
 - scan path bounded ma non O(ready) puro: il costo resta proporzionale agli fd registrati
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=58 pass=58 fail=0`
+- selftest completo più recente: `SUMMARY total=60 pass=60 fail=0`
 - `epoll-core` verifica `epoll_create1`, `ADD/MOD/DEL`, `EPOLLET`, timeout `0` e timeout positivo su pipe
 
 ---
@@ -1882,7 +1882,7 @@ set di semafori, sufficiente per il vertical slice Linux compat attuale.
 - i timestamp e metadati avanzati IPC non sono ancora esportati in una forma Linux completa
 
 **Validazione runtime**
-- selftest completo più recente: `SUMMARY total=58 pass=58 fail=0`
+- selftest completo più recente: `SUMMARY total=60 pass=60 fail=0`
 - `sysv-ipc` verifica binding Linux minimi (`shm*`, `sem*`) e smoke end-to-end via `/SYSVIPC.ELF`
 
 ---
@@ -1913,7 +1913,7 @@ usato direttamente via bindfs `/lib` → `/sysroot/lib`.
   `--dynamic-linker=/lib/ld-linux-aarch64.so.1`; embedded nell'initrd come test
 - **Selftest `linux-ld-shim`**: carica ed esegue `LDINTDEMO.ELF`, verifica exit 0
 - Boot command interattivo: `ldintdemo`
-- Suite: **55/55** (58/58 dopo M11-05e/f/g)
+- Suite: **55/55** (58/58 dopo M11-05e/f/g, **60/60** corrente)
 
 **Processo al boot (con linux-compat-stage popolato):**
 ```
@@ -2019,7 +2019,7 @@ quando ricerca fallisce per `libc.so.6`, `libpthread.so.0`, `libm.so.6`, `libdl.
 ignorando la versione e risolvendo solo per nome.
 
 - Demo: `GLIBCCOMPAT.ELF`; comando boot: `glibccompat`; selftest: `glibc-compat`
-- Suite: **58/58**
+- Suite: **58/58** (60/60 corrente)
 
 ---
 
@@ -2745,14 +2745,24 @@ e la futura migrazione a un server `procfsd` restano lavoro successivo.
 
 ---
 
-### ⬜ M14-03 · Power Management (PSCI)
+### 🟨 M14-03 · Power Management (PSCI)
 **Priorità:** BASSA
 
-- `poweroff()` via PSCI `SYSTEM_OFF` (nr 0x84000008)
-- `reboot()` via PSCI `SYSTEM_RESET` (nr 0x84000009)
-- `cpu_suspend()` per mettere core secondari in low-power (M13-02)
-- Syscall nr 169 `reboot(magic, cmd)` — solo da processo privilegiato
-- Clock gating: `cpufreq` stub (no DVFS reale su QEMU; hook per M-series)
+**Stato attuale:** core poweroff/reboot **chiuso fuori-milestone** (`v1`). Restano aperti
+`cpu_suspend` (dipende da M13-02 SMP) e clock gating.
+
+**Chiuso v1 (implementato in `kernel/psci.c` + `kernel/shutdown.c`):**
+- `psci_system_off()` via `hvc #0` function ID `0x84000008`
+- `psci_system_reset()` via `hvc #0` function ID `0x84000009`
+- Sequenza graceful: `vfs_sync()` → `blk_flush_sync()` → SIGTERM → wait 2s → SIGKILL → PSCI
+- `SYS_REBOOT = 213`: `REBOOT_CMD_POWER_OFF` / `REBOOT_CMD_RESTART` / `REBOOT_CMD_HALT`
+- `/sbin/poweroff`, `/sbin/reboot`, `/sbin/halt` (ELF musl bootstrap)
+- Comandi boot: `poweroff`, `reboot`, `halt`
+- `make test` usa PSCI per shutdown automatico post-suite
+
+**Ancora aperto:**
+- `cpu_suspend()` per core secondari in low-power (blocca su M13-02)
+- Clock gating / `cpufreq` stub (no DVFS reale su QEMU; hook per M-series)
 
 ---
 

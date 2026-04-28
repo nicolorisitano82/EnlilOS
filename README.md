@@ -287,7 +287,7 @@ apertura slave via `/dev/pts/N`, line discipline completa, `TIOCGWINSZ/TIOCSWINS
 
 ## Test
 
-Esiste una suite di self-test kernel-side che oggi copre 57 casi:
+Esiste una suite di self-test kernel-side che oggi copre 60 casi:
 
 - `vfs-rootfs`, `vfs-devfs`, `ext4-core`, `vfsd-core`, `blkd-core`, `net-core`, `net-stack`
 - `elf-loader`, `init-elf`, `nsh-elf`, `execve`, `exec-target`, `elf-dynamic`
@@ -301,7 +301,7 @@ Esiste una suite di self-test kernel-side che oggi copre 57 casi:
 - `musl-hello`, `musl-stdio`, `musl-malloc`, `musl-forkexec`, `musl-pipe`, `musl-glob`, `musl-dlfcn`
 - `gnu-ls`, `bash-linux-fork`, `linux-ld-shim`
 - `epoll-core`, `kbd-layout`, `socket-api`
-- `pty-core`, `mmu-user-va`
+- `pty-core`, `glibc-compat`, `arksh-plugin`, `enlil-bundle`, `mmu-user-va`
 
 La build dedicata e':
 
