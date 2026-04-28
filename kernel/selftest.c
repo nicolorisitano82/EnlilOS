@@ -405,7 +405,7 @@ static int selftest_case_rootfs(void)
     n = vfs_read(&file, buf, sizeof(buf) - 1U);
     ST_CHECK(case_name, n > 0, "read /etc/arkshrc vuota");
     buf[n] = '\0';
-    ST_CHECK(case_name, st_contains(buf, "PATH=/bin:/usr/bin"),
+    ST_CHECK(case_name, st_contains(buf, "PATH=/bin:/usr/bin:/sbin"),
              "/etc/arkshrc non contiene PATH");
     (void)vfs_close(&file);
 

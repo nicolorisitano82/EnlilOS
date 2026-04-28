@@ -315,7 +315,7 @@ static size_t gen_pid_environ(char *buf, size_t bufsz)
 {
     static const char env_blob[] =
         "HOME=/home/user\0"
-        "PATH=/usr/bin:/bin\0"
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\0"
         "TERM=vt100\0"
         "USER=user\0"
         "PWD=/\0";

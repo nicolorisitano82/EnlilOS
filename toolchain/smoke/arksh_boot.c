@@ -140,7 +140,7 @@ static int ab_selftest(char **envp)
     if (out_fd < 0)
         return 10;
 
-    if (!ab_env_has(envp, "PATH=/bin:/usr/bin") ||
+    if (!ab_env_has(envp, "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin") ||
         !ab_env_has(envp, "HOME=/home/user") ||
         !ab_env_has(envp, "SHELL=/bin/arksh") ||
         !ab_env_has(envp, "TERM=vt100")) {

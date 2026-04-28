@@ -2381,7 +2381,7 @@ int elf64_load_from_path(const char *path, const char *argv0, elf_image_t *out)
 {
     const char *argv_local[1];
     static const char *const env_default[] = {
-        "PATH=/bin:/usr/bin",
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin",
         "HOME=/home/user",
         "PWD=/",
         "SHELL=/bin/arksh",
@@ -2470,7 +2470,7 @@ int elf64_spawn_path_argv(const char *path,
                           uint8_t priority, uint32_t *pid_out)
 {
     static const char *const env_default[] = {
-        "PATH=/bin:/usr/bin",
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin",
         "HOME=/home/user",
         "PWD=/",
         "SHELL=/bin/arksh",
