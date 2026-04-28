@@ -13,6 +13,7 @@
 #include "syscall.h"
 #include "sock.h"
 #include "cap.h"
+#include "framebuffer.h"
 #include "futex.h"
 #include "kdebug.h"
 #include "keyboard.h"
@@ -5943,6 +5944,12 @@ typedef struct {
     uint8_t  sin_zero[8];
 } kern_sockaddr_in_t;
 
+/* Struttura sockaddr_un letta dalla user-space (AF_UNIX, M12-01) */
+typedef struct {
+    uint16_t sun_family;                     /* AF_UNIX = 1 */
+    char     sun_path[SOCK_UNIX_PATH_MAX];   /* 108 byte */
+} kern_sockaddr_un_t;
+
 static inline uint16_t sock_ntohs(uint16_t v)
 {
     return (uint16_t)((v >> 8U) | (v << 8U));
@@ -6055,6 +6062,22 @@ static uint64_t sys_bind(uint64_t args[6])
 
     if (!sa_uva)
         return ERR(EFAULT);
+
+    /* Leggi solo la family prima di decidere il tipo */
+    {
+        uint16_t sa_family = 0U;
+        if (user_copy_bytes(sa_uva, &sa_family, sizeof(sa_family)) < 0)
+            return ERR(EFAULT);
+
+        if (sa_family == AF_UNIX) {
+            kern_sockaddr_un_t sun;
+            if (user_copy_bytes(sa_uva, &sun, sizeof(sun)) < 0)
+                return ERR(EFAULT);
+            rc = sock_unix_bind((int)obj->remote_handle, sun.sun_path);
+            return (rc < 0) ? ERR(-rc) : 0ULL;
+        }
+    }
+
     if (user_copy_bytes(sa_uva, &sa, sizeof(sa)) < 0)
         return ERR(EFAULT);
     if (sa.sin_family != AF_INET)
@@ -6111,15 +6134,28 @@ static uint64_t sys_accept(uint64_t args[6])
 
     /* Scrivi sockaddr peer se richiesto */
     if (sa_uva) {
-        kern_sockaddr_in_t sa;
-        sa.sin_family   = AF_INET;
-        sa.sin_port     = sock_ntohs(peer_port);
-        sa.sin_addr     = sock_ntohl(peer_ip);
-        sa.sin_zero[0]  = 0U;
-        (void)user_store_bytes(sa_uva, &sa, sizeof(sa));
-        if (len_uva) {
-            uint32_t slen = (uint32_t)sizeof(sa);
-            (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+        sock_t *ns = sock_get(new_sock_idx);
+        if (ns && ns->domain == AF_UNIX) {
+            kern_sockaddr_un_t sun;
+            uint32_t slen;
+            sun.sun_family = AF_UNIX;
+            __builtin_memcpy(sun.sun_path, ns->unix_path, SOCK_UNIX_PATH_MAX);
+            (void)user_store_bytes(sa_uva, &sun, sizeof(sun));
+            if (len_uva) {
+                slen = (uint32_t)sizeof(sun);
+                (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+            }
+        } else {
+            kern_sockaddr_in_t sa;
+            sa.sin_family   = AF_INET;
+            sa.sin_port     = sock_ntohs(peer_port);
+            sa.sin_addr     = sock_ntohl(peer_ip);
+            sa.sin_zero[0]  = 0U;
+            (void)user_store_bytes(sa_uva, &sa, sizeof(sa));
+            if (len_uva) {
+                uint32_t slen = (uint32_t)sizeof(sa);
+                (void)user_store_bytes(len_uva, &slen, sizeof(slen));
+            }
         }
     }
 
@@ -6146,6 +6182,36 @@ static uint64_t sys_connect(uint64_t args[6])
 
     if (!sa_uva)
         return ERR(EFAULT);
+
+    /* Detect AF_UNIX connect */
+    {
+        uint16_t sa_family = 0U;
+        if (user_copy_bytes(sa_uva, &sa_family, sizeof(sa_family)) < 0)
+            return ERR(EFAULT);
+        if (sa_family == AF_UNIX) {
+            kern_sockaddr_un_t sun;
+            if (user_copy_bytes(sa_uva, &sun, sizeof(sun)) < 0)
+                return ERR(EFAULT);
+            nonblock = ((obj->flags & O_NONBLOCK) != 0U);
+            if (!nonblock) {
+                deadline_ms = timer_now_ms() + 5000ULL;
+                do {
+                    rc = sock_unix_connect((int)obj->remote_handle, sun.sun_path);
+                    if (rc == 0 || rc != -EAGAIN)
+                        break;
+                    if (timer_now_ms() >= deadline_ms) {
+                        rc = -ETIMEDOUT;
+                        break;
+                    }
+                    sched_yield();
+                } while (1);
+            } else {
+                rc = sock_unix_connect((int)obj->remote_handle, sun.sun_path);
+            }
+            return (rc < 0) ? ERR(-rc) : 0ULL;
+        }
+    }
+
     if (user_copy_bytes(sa_uva, &sa, sizeof(sa)) < 0)
         return ERR(EFAULT);
     if (sa.sin_family != AF_INET)
@@ -8552,6 +8618,58 @@ static void linux_syscall_bind(uint32_t nr, syscall_handler_fn handler,
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * SYS_WLD_PRESENT (224) — M12-01 Wayland compositor present
+ *
+ * args[0] = user VA del compositing buffer (ARGB8888, FB_WIDTH x FB_HEIGHT)
+ * args[1] = width  (pixel, ≤ FB_WIDTH)
+ * args[2] = height (pixel, ≤ FB_HEIGHT)
+ * args[3] = stride (byte per riga)
+ *
+ * Copia i pixel dallo spazio utente nel framebuffer e chiama fb_flush().
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_wld_present(uint64_t args[6])
+{
+    uintptr_t src_uva = (uintptr_t)args[0];
+    uint32_t  width   = (uint32_t)args[1];
+    uint32_t  height  = (uint32_t)args[2];
+    uint32_t  stride  = (uint32_t)args[3];
+    uint32_t *fb;
+    uint32_t  row;
+
+    if (!src_uva)
+        return ERR(EFAULT);
+    if (width  == 0U || width  > FB_WIDTH)
+        return ERR(EINVAL);
+    if (height == 0U || height > FB_HEIGHT)
+        return ERR(EINVAL);
+    if (stride < width * 4U)
+        return ERR(EINVAL);
+
+    fb = fb_get_ptr();
+    if (!fb)
+        return ERR(EIO);
+
+    for (row = 0U; row < height; row++) {
+        uintptr_t row_uva = src_uva + (uintptr_t)(row * stride);
+        uint32_t *dst_row = fb + (uintptr_t)(row * FB_WIDTH);
+        /* Riempi a nero il resto della riga se width < FB_WIDTH */
+        if (user_copy_bytes(row_uva, dst_row, width * 4U) < 0) {
+            /* best-effort: skip riga corrotta */
+            __builtin_memset(dst_row, 0, width * 4U);
+        }
+        if (width < FB_WIDTH)
+            __builtin_memset(dst_row + width, 0, (FB_WIDTH - width) * 4U);
+    }
+    /* Righe rimanenti nere */
+    if (height < FB_HEIGHT)
+        __builtin_memset(fb + height * FB_WIDTH, 0,
+                         (FB_HEIGHT - height) * FB_WIDTH * 4U);
+
+    fb_flush();
+    return 0ULL;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * syscall_init — popola la tabella e inizializza le strutture dati
  * ════════════════════════════════════════════════════════════════════ */
 void syscall_init(void)
@@ -8974,6 +9092,7 @@ void syscall_init(void)
     syscall_table[SYS_SEMGET]        = (syscall_entry_t){ sys_semget,        0, "semget" };
     syscall_table[SYS_SEMOP]         = (syscall_entry_t){ sys_semop,         0, "semop" };
     syscall_table[SYS_SEMCTL]        = (syscall_entry_t){ sys_semctl,        0, "semctl" };
+    syscall_table[SYS_WLD_PRESENT]   = (syscall_entry_t){ sys_wld_present,   0, "wld_present" };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,

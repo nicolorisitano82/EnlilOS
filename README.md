@@ -26,11 +26,12 @@ Le milestone completate oggi coprono:
 - **M11-05d**: shim `PT_INTERP` — `ld-linux-aarch64.so.1` risolto automaticamente come alias verso `/LD-ENLIL.SO` quando il file non esiste nel VFS; search path `DT_NEEDED` esteso a `/lib/aarch64-linux-gnu`, `/usr/lib`.
 - **M11-05e**: Linux filesystem environment — `/proc/sys` subtree, `/etc/locale.conf`, `/etc/ld.so.cache` stub, `/etc/localtime` TZif2 UTC, `/proc/<pid>/maps` stub.
 - **M11-05f**: PTY pseudo-terminal `v1` — `posix_openpt/grantpt/unlockpt/ptsname_r`, `/dev/ptmx` e `/dev/pts/N`, line discipline completa (ICANON, ECHO, ISIG, ICRNL, OPOST/ONLCR), `TIOCGWINSZ/TIOCSWINSZ`, `SIGWINCH` (default ignore POSIX), musl bootstrap con `openpty`.
+- **M12-01**: server Wayland minimale `wld` in user-space, trasporto `AF_UNIX` su `/run/wayland-0`, protocol subset `wl_compositor` / `wl_surface` / `wl_shm` / `xdg_wm_base` / `wl_output` / `wl_seat`, compositing CPU-bound con present al framebuffer e demo client `WLDDEMO.ELF`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=60 pass=60 fail=0`.
+`SUMMARY total=61 pass=61 fail=0`.
 
 ---
 
@@ -96,6 +97,7 @@ L'`initrd` e' generato a build-time e contiene almeno:
 - ELF demo: `MUSLDL.ELF`
 - ELF demo: `CLONEDEMO.ELF`, `THREADLIFE.ELF`, `FUTEXDEMO.ELF`, `PTHREADDEMO.ELF`, `SEMDEMO.ELF`, `TLSMTDEMO.ELF`
 - ELF demo: `EPOLLDEMO.ELF`, `SYSVIPC.ELF`, `SOCKDEMO.ELF`, `PTYDEMO.ELF`
+- ELF grafici: `WLD.ELF`, `WLDDEMO.ELF`
 - ELF demo: `ARKSHSMK.ELF`
 - bundle demo: `hello.enlil/manifest.toon`, `hello.enlil/bin/hello`, `hello.enlil/lib/libdyn.so`
 - ELF server: `VFSD.ELF`, `BLKD.ELF`, `NETD.ELF`
@@ -317,7 +319,7 @@ in halt dopo il summary finale.
 Lo stato attuale validato e':
 
 ```text
-SUMMARY total=60 pass=60 fail=0
+SUMMARY total=61 pass=61 fail=0
 ```
 
 Nota: se il selftest si blocca prima del poweroff, conviene leggere il log seriale

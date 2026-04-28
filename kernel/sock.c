@@ -6,6 +6,7 @@
  *   - SOCK_STREAM (TCP loopback) + SOCK_DGRAM (UDP loopback)
  *   - Solo loopback 127.0.0.1; connessioni esterne → ENETUNREACH
  *   - Blocking recv/accept con sched_yield() cooperativo (come le pipe)
+ *   - AF_UNIX stream socket (M12-01): bind/connect/accept by path
  *
  * Tutti gli indirizzi e le porte sono in host byte order.
  * La conversione NBO←→HBO avviene nei handler syscall in kernel/syscall.c.
@@ -19,6 +20,27 @@
 extern void *memset(void *dst, int value, size_t n);
 extern void *memcpy(void *dst, const void *src, size_t n);
 
+static size_t sock_strlen(const char *s)
+{
+    const char *p = s;
+    while (*p) p++;
+    return (size_t)(p - s);
+}
+
+static int sock_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static char *sock_strncpy(char *dst, const char *src, size_t n)
+{
+    size_t i;
+    for (i = 0U; i < n && src[i]; i++) dst[i] = src[i];
+    for (; i < n; i++) dst[i] = '\0';
+    return dst;
+}
+
 /* ════════════════════════════════════════════════════════════════
  * Pool globale
  * ════════════════════════════════════════════════════════════════ */
@@ -27,6 +49,15 @@ static sock_t g_socks[SOCK_MAX_GLOBAL];
 
 /* Contatore porta efimera (host byte order). RFC 6335: 49152–65535. */
 static uint16_t g_ephemeral = 49152U;
+
+/* ── AF_UNIX path table ───────────────────────────────────────── */
+typedef struct {
+    char     path[SOCK_UNIX_PATH_MAX];
+    uint16_t sock_idx;
+    uint8_t  in_use;
+} unix_path_entry_t;
+
+static unix_path_entry_t g_unix_paths[SOCK_MAX_GLOBAL];
 
 /* ── Helper interni ───────────────────────────────────────────── */
 
@@ -130,6 +161,17 @@ void sock_free(int idx)
         }
     }
 
+    /* Rimuovi dal path table AF_UNIX se applicabile */
+    if (s->domain == AF_UNIX && s->unix_path[0] != '\0') {
+        for (uint32_t i = 0U; i < SOCK_MAX_GLOBAL; i++) {
+            if (g_unix_paths[i].in_use &&
+                g_unix_paths[i].sock_idx == (uint16_t)idx) {
+                g_unix_paths[i].in_use = 0U;
+                break;
+            }
+        }
+    }
+
     memset(s, 0, sizeof(*s));
 }
 
@@ -142,16 +184,41 @@ sock_t *sock_get(int idx)
 
 /* ── Operazioni socket ────────────────────────────────────────── */
 
+/* ════════════════════════════════════════════════════════════════
+ * AF_UNIX path table helpers
+ * ════════════════════════════════════════════════════════════════ */
+
+static unix_path_entry_t *unix_path_find(const char *path)
+{
+    for (uint32_t i = 0U; i < SOCK_MAX_GLOBAL; i++) {
+        if (g_unix_paths[i].in_use && sock_strcmp(g_unix_paths[i].path, path) == 0)
+            return &g_unix_paths[i];
+    }
+    return NULL;
+}
+
+static unix_path_entry_t *unix_path_alloc(void)
+{
+    for (uint32_t i = 0U; i < SOCK_MAX_GLOBAL; i++) {
+        if (!g_unix_paths[i].in_use)
+            return &g_unix_paths[i];
+    }
+    return NULL;
+}
+
 int sock_do_socket(int domain, int type, int protocol)
 {
     int idx;
     sock_t *s;
 
-    if (domain != AF_INET)
+    if (domain != AF_INET && domain != AF_UNIX)
         return -EAFNOSUPPORT;
     if (type != SOCK_STREAM && type != SOCK_DGRAM)
         return -EOPNOTSUPP;
-    (void)protocol;   /* v1: ignora, inferito dal type */
+    /* AF_UNIX solo SOCK_STREAM per ora */
+    if (domain == AF_UNIX && type != SOCK_STREAM)
+        return -EOPNOTSUPP;
+    (void)protocol;
 
     idx = sock_alloc();
     if (idx < 0)
@@ -159,11 +226,95 @@ int sock_do_socket(int domain, int type, int protocol)
 
     s = &g_socks[idx];
     s->in_use     = 1U;
-    s->domain     = (uint8_t)AF_INET;
+    s->domain     = (uint8_t)domain;
     s->type       = (uint8_t)type;
     s->state      = SOCK_STATE_CLOSED;
     s->peer_idx   = SOCK_IDX_NONE;
     return idx;
+}
+
+/* ── AF_UNIX bind ─────────────────────────────────────────────── */
+int sock_unix_bind(int idx, const char *path)
+{
+    sock_t *s = sock_get(idx);
+    unix_path_entry_t *ent;
+    size_t plen;
+
+    if (!s || s->domain != AF_UNIX)
+        return -EBADF;
+    if (!path || (plen = sock_strlen(path)) == 0U || plen >= SOCK_UNIX_PATH_MAX)
+        return -EINVAL;
+    if (s->state != SOCK_STATE_CLOSED)
+        return -EINVAL;
+    if (unix_path_find(path))
+        return -EADDRINUSE;
+
+    ent = unix_path_alloc();
+    if (!ent)
+        return -EADDRINUSE;
+
+    sock_strncpy(ent->path, path, SOCK_UNIX_PATH_MAX - 1U);
+    ent->path[SOCK_UNIX_PATH_MAX - 1U] = '\0';
+    ent->sock_idx = (uint16_t)idx;
+    ent->in_use   = 1U;
+
+    sock_strncpy(s->unix_path, path, SOCK_UNIX_PATH_MAX - 1U);
+    s->unix_path[SOCK_UNIX_PATH_MAX - 1U] = '\0';
+    s->state = SOCK_STATE_BOUND;
+    return 0;
+}
+
+/* ── AF_UNIX connect ──────────────────────────────────────────── */
+int sock_unix_connect(int idx, const char *path)
+{
+    sock_t *s = sock_get(idx);
+    unix_path_entry_t *ent;
+    sock_t *server;
+    sock_t *peer;
+    int     peer_idx;
+    uint8_t next_tail;
+
+    if (!s || s->domain != AF_UNIX)
+        return -EBADF;
+    if (s->state == SOCK_STATE_CONNECTED)
+        return -EISCONN;
+    if (!path || sock_strlen(path) == 0U)
+        return -EINVAL;
+
+    ent = unix_path_find(path);
+    if (!ent)
+        return -ENOENT;
+
+    server = sock_get((int)ent->sock_idx);
+    if (!server || server->state != SOCK_STATE_LISTENING)
+        return -ECONNREFUSED;
+
+    /* Accept queue piena? */
+    next_tail = (server->accept_tail + 1U) & (uint8_t)(SOCK_ACCEPT_MAX - 1U);
+    if (next_tail == server->accept_head)
+        return -EAGAIN;
+
+    /* Alloca socket lato-server per questa connessione */
+    peer_idx = sock_alloc();
+    if (peer_idx < 0)
+        return -ENFILE;
+
+    peer = &g_socks[peer_idx];
+    peer->in_use   = 1U;
+    peer->domain   = AF_UNIX;
+    peer->type     = SOCK_STREAM;
+    peer->state    = SOCK_STATE_CONNECTED;
+    peer->peer_idx = (uint16_t)idx;
+    sock_strncpy(peer->unix_path, path, SOCK_UNIX_PATH_MAX - 1U);
+
+    s->peer_idx = (uint16_t)peer_idx;
+    s->state    = SOCK_STATE_CONNECTED;
+    sock_strncpy(s->unix_path, path, SOCK_UNIX_PATH_MAX - 1U);
+
+    /* Inserisci nella accept queue del server */
+    server->accept_q[server->accept_tail] = (uint16_t)peer_idx;
+    server->accept_tail = next_tail;
+    return 0;
 }
 
 int sock_do_bind(int idx, uint32_t ip, uint16_t port)

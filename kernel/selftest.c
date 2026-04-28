@@ -2976,6 +2976,155 @@ static int selftest_case_mmu_user_va(void)
     return 0;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * selftest_case_wayland_core — M12-01
+ *
+ * Verifica:
+ *   1. WLD.ELF presente in VFS
+ *   2. WLDDEMO.ELF esiste
+ *   3. Lancia WLDDEMO.ELF (si connette a wld, crea superficie, commit)
+ *   4. Attende /data/WLDDEMO.TXT con "wayland-ok"
+ * ════════════════════════════════════════════════════════════════════ */
+static int selftest_case_wayland_core(void)
+{
+    static const char case_name[] = "wayland-core";
+    stat_t     st;
+    vfs_file_t f;
+    uint32_t   wld_pid = 0U;
+    uint64_t   deadline;
+    int        rc;
+
+    /* 1. WLD.ELF presente */
+    rc = vfs_lstat("/WLD.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WLD.ELF assente");
+    ST_CHECK(case_name, st.st_size > 1024LL, "WLD.ELF troppo piccolo");
+
+    /* 2. WLDDEMO.ELF presente */
+    rc = vfs_lstat("/WLDDEMO.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WLDDEMO.ELF assente");
+    ST_CHECK(case_name, st.st_size > 4096LL, "WLDDEMO.ELF troppo piccolo");
+
+    rc = elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &wld_pid);
+    ST_CHECK(case_name, rc == 0, "elf64_spawn_path WLD.ELF fallita");
+
+    deadline = timer_now_ms() + 200ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    /* 3. Lancia il demo client */
+    uint32_t demo_pid = 0U;
+    rc = elf64_spawn_path("/WLDDEMO.ELF", "wayland-demo", PRIO_HIGH, &demo_pid);
+    ST_CHECK(case_name, rc == 0, "elf64_spawn_path WLDDEMO.ELF fallita");
+
+    /* 4. Attendi /data/WLDDEMO.TXT per al massimo 6 secondi */
+    deadline = timer_now_ms() + 6000ULL;
+    while (timer_now_ms() < deadline) {
+        if (vfs_lstat("/data/WLDDEMO.TXT", &st) == 0 && st.st_size > 0LL)
+            break;
+        sched_yield();
+    }
+
+    rc = vfs_open("/data/WLDDEMO.TXT", O_RDONLY, &f);
+    ST_CHECK(case_name, rc == 0, "WLDDEMO.TXT non creato");
+
+    char buf[32];
+    ssize_t n = vfs_read(&f, buf, sizeof(buf) - 1);
+    (void)vfs_close(&f);
+    ST_CHECK(case_name, n > 0, "WLDDEMO.TXT vuoto");
+    buf[n] = '\0';
+
+    int ok = 0;
+    for (int i = 0; i + 10 <= (int)n; i++) {
+        if (buf[i]   == 'w' && buf[i+1] == 'a' && buf[i+2] == 'y' &&
+            buf[i+3] == 'l' && buf[i+4] == 'a' && buf[i+5] == 'n' &&
+            buf[i+6] == 'd' && buf[i+7] == '-' && buf[i+8] == 'o' &&
+            buf[i+9] == 'k') { ok = 1; break; }
+    }
+    ST_CHECK(case_name, ok, "WLDDEMO.TXT non contiene 'wayland-ok'");
+
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * selftest_case_wm_core — M12-02
+ *
+ * Verifica:
+ *   1. WLD.ELF / WM.ELF / WMDEMO.ELF presenti
+ *   2. Lancia compositor e WM controller in modalità selftest
+ *   3. Lancia client con due finestre
+ *   4. Attende WMSTATE.TXT e WMDEMO.TXT
+ * ════════════════════════════════════════════════════════════════════ */
+static int selftest_case_wm_core(void)
+{
+    static const char case_name[] = "wm-core";
+    stat_t           st;
+    vfs_file_t       f;
+    uint64_t         deadline;
+    uint32_t         pid = 0U;
+    int              rc;
+    const char      *wm_argv[3] = { "/WM.ELF", "--selftest", NULL };
+
+    (void)vfs_unlink("/data/WMSTATE.TXT");
+    (void)vfs_unlink("/data/WMDEMO.TXT");
+
+    rc = vfs_lstat("/WLD.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WLD.ELF assente");
+    rc = vfs_lstat("/WM.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WM.ELF assente");
+    rc = vfs_lstat("/WMDEMO.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WMDEMO.ELF assente");
+
+    rc = elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &pid);
+    ST_CHECK(case_name, rc == 0, "spawn WLD.ELF fallita");
+
+    deadline = timer_now_ms() + 200ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = elf64_spawn_path_argv("/WM.ELF", wm_argv, 2ULL, PRIO_HIGH, &pid);
+    ST_CHECK(case_name, rc == 0, "spawn WM.ELF --selftest fallita");
+
+    deadline = timer_now_ms() + 200ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &pid);
+    ST_CHECK(case_name, rc == 0, "spawn WMDEMO.ELF fallita");
+
+    deadline = timer_now_ms() + 6000ULL;
+    while (timer_now_ms() < deadline) {
+        if (vfs_lstat("/data/WMSTATE.TXT", &st) == 0 && st.st_size > 0LL &&
+            vfs_lstat("/data/WMDEMO.TXT", &st) == 0 && st.st_size > 0LL)
+            break;
+        sched_yield();
+    }
+
+    rc = vfs_open("/data/WMSTATE.TXT", O_RDONLY, &f);
+    ST_CHECK(case_name, rc == 0, "WMSTATE.TXT non creato");
+    {
+        char buf[128];
+        ssize_t n = vfs_read(&f, buf, sizeof(buf) - 1U);
+        (void)vfs_close(&f);
+        ST_CHECK(case_name, n > 0, "WMSTATE.TXT vuoto");
+        buf[(size_t)n] = '\0';
+        ST_CHECK(case_name, st_contains(buf, "wm-ok"), "WMSTATE.TXT non contiene wm-ok");
+        ST_CHECK(case_name, st_contains(buf, "windows=2"), "WMSTATE.TXT non riporta due finestre");
+    }
+
+    rc = vfs_open("/data/WMDEMO.TXT", O_RDONLY, &f);
+    ST_CHECK(case_name, rc == 0, "WMDEMO.TXT non creato");
+    {
+        char buf[64];
+        ssize_t n = vfs_read(&f, buf, sizeof(buf) - 1U);
+        (void)vfs_close(&f);
+        ST_CHECK(case_name, n > 0, "WMDEMO.TXT vuoto");
+        buf[(size_t)n] = '\0';
+        ST_CHECK(case_name, st_contains(buf, "wm-demo-ok"), "WMDEMO.TXT non contiene wm-demo-ok");
+    }
+
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -3037,6 +3186,8 @@ static const selftest_case_t selftest_cases[] = {
     { "enlil-bundle",  selftest_case_enlil_bundle },
     { "arksh-plugin",  selftest_case_arksh_plugin },
     { "mmu-user-va",   selftest_case_mmu_user_va },
+    { "wayland-core",  selftest_case_wayland_core },
+    { "wm-core",       selftest_case_wm_core },
 };
 
 int selftest_run_named(const char *name)

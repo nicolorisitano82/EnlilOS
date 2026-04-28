@@ -23,6 +23,9 @@
 #define SOCK_UDP_QUEUE_MAX  4U
 #define SOCK_UDP_DATA_MAX   512U
 
+/* ── Dimensioni unix path (M12-01) ─────────────────────────────── */
+#define SOCK_UNIX_PATH_MAX  108U
+
 /* Indice "assente" per peer_idx */
 #define SOCK_IDX_NONE       0xFFFFU
 
@@ -130,6 +133,9 @@ typedef struct {
     /* ── waiter per spin-yield blocking ── */
     /* (non usati in v1 — il blocking usa sched_yield loop come le pipe) */
     uint8_t    _reserved[8];
+
+    /* ── AF_UNIX: path di binding (vuoto se AF_INET) ── */
+    char       unix_path[SOCK_UNIX_PATH_MAX];
 } sock_t;
 
 /* ── API kernel ────────────────────────────────────────────────── */
@@ -141,9 +147,11 @@ sock_t *sock_get(int idx);
 
 int     sock_do_socket(int domain, int type, int protocol);
 int     sock_do_bind(int idx, uint32_t ip, uint16_t port);
+int     sock_unix_bind(int idx, const char *path);
 int     sock_do_listen(int idx, int backlog);
 int     sock_do_accept(int idx, uint32_t *out_ip, uint16_t *out_port);
 int     sock_do_connect(int idx, uint32_t ip, uint16_t port);
+int     sock_unix_connect(int idx, const char *path);
 ssize_t sock_do_send(int idx, const void *buf, size_t len, int flags);
 ssize_t sock_do_recv(int idx, void *buf, size_t len, int flags);
 ssize_t sock_do_sendto(int idx, const void *buf, size_t len,

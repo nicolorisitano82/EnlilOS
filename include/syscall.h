@@ -164,6 +164,7 @@
 #define SYS_SEMGET          221
 #define SYS_SEMOP           222
 #define SYS_SEMCTL          223
+#define SYS_WLD_PRESENT     224   /* M12-01: compositor present (uva, w, h, stride) */
 
 /* cmd valori (compatibili con Linux reboot(2)) */
 #define REBOOT_CMD_RESTART      0x01234567U

@@ -96,6 +96,18 @@
 #define SYS_GETSOCKOPT      210
 #define SYS_SHUTDOWN        211
 
+/* SysV IPC (M11-05c) */
+#define SYS_SHMGET          217
+#define SYS_SHMAT           218
+#define SYS_SHMDT           219
+#define SYS_SHMCTL          220
+#define SYS_SEMGET          221
+#define SYS_SEMOP           222
+#define SYS_SEMCTL          223
+
+/* Wayland compositor (M12-01) */
+#define SYS_WLD_PRESENT     224
+
 #define MAP_FAILED_VA ((unsigned long)(-1L))
 
 #endif

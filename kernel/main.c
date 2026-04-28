@@ -235,6 +235,60 @@ static void boot_launch_netd(void)
     uart_puts(" port=net\n");
 }
 
+/* ── wld: Wayland compositor (M12-01) ──────────────────────────── */
+static void boot_launch_wld(void)
+{
+    uint32_t pid = 0U;
+
+    /*
+     * Il compositor non puo' stare a PRIO_NORMAL: sotto carico resta dietro a
+     * shell/ticker/netd e il socket /run/wayland-0 non arriva online in tempo.
+     * PRIO_HIGH lo tiene nella stessa classe delle attivita' interattive senza
+     * riportarlo nel profilo quasi-RT che in precedenza affamava il sistema.
+     */
+    if (elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &pid) < 0) {
+        uart_puts("[WLD] Spawn fallita, Wayland non disponibile\n");
+        return;
+    }
+
+    uart_puts("[WLD] Compositor avviato: pid=");
+    {
+        char buf[12];
+        int  len = 0;
+        uint32_t v = pid;
+        if (v == 0U) uart_putc('0');
+        else {
+            while (v) { buf[len++] = (char)('0' + (v % 10U)); v /= 10U; }
+            while (len > 0) uart_putc(buf[--len]);
+        }
+    }
+    uart_puts("\n");
+}
+
+/* ── wm: Wayland window manager client (M12-02) ────────────────── */
+static void boot_launch_wm(void)
+{
+    uint32_t pid = 0U;
+
+    if (elf64_spawn_path("/WM.ELF", "/WM.ELF", PRIO_HIGH, &pid) < 0) {
+        uart_puts("[WM] Spawn fallita, WM non disponibile\n");
+        return;
+    }
+
+    uart_puts("[WM] Window manager avviato: pid=");
+    {
+        char buf[12];
+        int  len = 0;
+        uint32_t v = pid;
+        if (v == 0U) uart_putc('0');
+        else {
+            while (v) { buf[len++] = (char)('0' + (v % 10U)); v /= 10U; }
+            while (len > 0) uart_putc(buf[--len]);
+        }
+    }
+    uart_puts("\n");
+}
+
 static void boot_seed_dir_if_missing(const char *path, uint32_t mode)
 {
     int rc;
@@ -1547,7 +1601,7 @@ static void bootcli_render(void)
                       "socketdemo clonedemo threadlife futexdemo pthreaddemo semdemo tlsmtdemo",
                       muted_color, panel_color);
     bootcli_draw_text(48U, 172U,
-                      "crtdemo epolldemo sysvipcdemo runbundle | net mostra MAC/link/counter virtio-net e stato del bootstrap",
+                      "crtdemo epolldemo sysvipcdemo wm wmdemo runbundle | net mostra MAC/link/counter virtio-net e stato del bootstrap",
                       muted_color, panel_color);
 
     if (bootcli_graphics_mode) {
@@ -1709,6 +1763,8 @@ static void bootcli_execute_command(void)
         bootcli_push_line("tlsmtdemo lancia un ELF che verifica __thread + errno per-thread");
         bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("sysvipcdemo lancia un ELF che verifica shmget/shmat/semget/semop");
+        bootcli_push_line("wm        lancia il window manager Wayland v1");
+        bootcli_push_line("wmdemo    lancia due finestre Wayland per validare focus/close/layout");
         bootcli_push_line("arkshplugin dlopen enlil.so, query+init plugin M8-08");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
@@ -2157,6 +2213,26 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "wm")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/WM.ELF", "/WM.ELF", PRIO_HIGH, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "wm lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "wmdemo")) {
+        uint32_t pid = 0U;
+        if (elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "wm demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "crtdemo")) {
         uint32_t pid = 0U;
         if (elf64_spawn_path("/CRTDEMO.ELF", "/CRTDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
@@ -2436,6 +2512,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-02e: prova 'tlsmtdemo' per TLS multi-thread, __thread ed errno per-thread.");
     bootcli_push_line("M11-05b: prova 'epolldemo' per epoll_create1(), ctl(), edge-trigger e timeout.");
     bootcli_push_line("M11-05c: prova 'sysvipcdemo' per shmget/shmat/shmdt e semget/semop/semctl.");
+    bootcli_push_line("M12-02: prova 'wmdemo' per due finestre Wayland e WM separato con tiling/focus.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
@@ -2649,6 +2726,10 @@ void kernel_main(void)
     boot_launch_vfsd();
     boot_launch_blkd();
     boot_launch_netd();
+#ifndef ENLILOS_SELFTEST
+    boot_launch_wld();
+    boot_launch_wm();
+#endif
 
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 

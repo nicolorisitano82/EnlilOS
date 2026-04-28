@@ -95,7 +95,7 @@ C_SRCS   = kernel/main.c \
            drivers/framebuffer.c
 
 USER_STATIC_ASM_SRCS  = user/demo.S user/execve_demo.S user/execve_target.S
-USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/netd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c user/sysvipc_demo.c
+USER_STATIC_C_SRCS    = user/nsh.c user/fork_demo.c user/signal_demo.c user/mreact_demo.c user/cap_demo.c user/vfsd.c user/blkd.c user/netd.c user/mmap_demo.c user/job_demo.c user/ns_demo.c user/posix_demo.c user/musl_abi_demo.c user/tls_demo.c user/clone_demo.c user/thread_life_demo.c user/futex_demo.c user/sysvipc_demo.c user/wld.c
 NETD_STACK_OBJ        = user/net_stack.o
 USER_STATIC_OBJS      = $(USER_STATIC_ASM_SRCS:.S=.o) $(USER_STATIC_C_SRCS:.c=.o) \
                         $(NETD_STACK_OBJ)
@@ -173,7 +173,10 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/sys/socket.h \
                         $(MUSL_ROOT)/include/netinet/in.h \
                         $(MUSL_ROOT)/include/arpa/inet.h \
-                        $(MUSL_ROOT)/include/pty.h
+                        $(MUSL_ROOT)/include/pty.h \
+                        $(MUSL_ROOT)/include/sys/un.h \
+                        $(MUSL_ROOT)/include/sys/ipc.h \
+                        $(MUSL_ROOT)/include/sys/shm.h
 MUSL_HEADERS          = $(patsubst $(MUSL_ROOT)/include/%,$(MUSL_SYSROOT_INC)/%,$(MUSL_HEADER_SRCS))
 MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/ctype.c \
@@ -196,7 +199,8 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/socket.c \
                         $(MUSL_ROOT)/src/resource.c \
                         $(MUSL_ROOT)/src/reboot.c \
-                        $(MUSL_ROOT)/src/pty.c
+                        $(MUSL_ROOT)/src/pty.c \
+                        $(MUSL_ROOT)/src/shm.c
 MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
 MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a
@@ -222,7 +226,10 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/poweroff.c \
                         toolchain/smoke/pty_demo.c \
                         toolchain/smoke/glibc_compat_demo.c \
-                        toolchain/smoke/arksh_plugin_demo.c
+                        toolchain/smoke/arksh_plugin_demo.c \
+                        toolchain/smoke/wayland_demo.c \
+                        toolchain/smoke/wm_manager.c \
+                        toolchain/smoke/wm_demo.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -502,6 +509,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		dir:usr/lib \
 		dir:usr/lib/arksh \
 		dir:usr/lib/arksh/plugins \
+		dir:run \
 		dir:sbin \
 		INIT.ELF=$(ARKSH_BOOT_ELF) \
 		DEMO.ELF=user/demo.elf \
@@ -516,6 +524,10 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		VFSD.ELF=user/vfsd.elf \
 		BLKD.ELF=user/blkd.elf \
 		NETD.ELF=user/netd.elf \
+		WLD.ELF=user/wld.elf \
+		WLDDEMO.ELF=toolchain/smoke/wayland_demo.elf \
+		WM.ELF=toolchain/smoke/wm_manager.elf \
+		WMDEMO.ELF=toolchain/smoke/wm_demo.elf \
 		MMAPDEMO.ELF=user/mmap_demo.elf \
 		JOBDEMO.ELF=user/job_demo.elf \
 		NSDEMO.ELF=user/ns_demo.elf \
@@ -556,6 +568,8 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		bin/enlil-run=toolchain/smoke/enlil_run.elf \
 		bin/nsh=user/nsh.elf \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
+		bin/wld=user/wld.elf \
+		bin/wm=toolchain/smoke/wm_manager.elf \
 		$(ARKSH_REAL_INITRD) \
 		usr/bin/epolldemo=toolchain/smoke/epoll_demo.elf \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
