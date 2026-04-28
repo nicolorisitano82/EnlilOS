@@ -563,6 +563,9 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		sbin/poweroff=toolchain/smoke/poweroff.elf \
 		sbin/reboot=toolchain/smoke/poweroff.elf \
 		sbin/halt=toolchain/smoke/poweroff.elf \
+		usr/bin/poweroff=toolchain/smoke/poweroff.elf \
+		usr/bin/reboot=toolchain/smoke/poweroff.elf \
+		usr/bin/halt=toolchain/smoke/poweroff.elf \
 		sysroot/usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
 		sysroot/usr/bin/kbdlayout=toolchain/smoke/kbdlayout.elf \
 		usr/share/kbd/keymaps/us.map=initrd/us.map \

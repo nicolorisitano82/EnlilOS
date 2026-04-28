@@ -64,6 +64,7 @@
 #define LINUX_NR_sched_yield       124
 #define LINUX_NR_sched_get_priority_max 143
 #define LINUX_NR_sched_get_priority_min 144
+#define LINUX_NR_reboot            142
 #define LINUX_NR_kill              129
 #define LINUX_NR_tkill             130
 #define LINUX_NR_tgkill            131

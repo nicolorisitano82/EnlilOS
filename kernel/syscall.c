@@ -9109,6 +9109,7 @@ void syscall_init(void)
     linux_syscall_bind(LINUX_NR_set_tid_address, sys_linux_set_tid_address, 0, "linux_set_tid_address");
     linux_syscall_bind(LINUX_NR_exit, sys_linux_exit, SYSCALL_FLAG_RT, "linux_exit");
     linux_syscall_bind(LINUX_NR_exit_group, sys_linux_exit_group, SYSCALL_FLAG_RT, "linux_exit_group");
+    linux_syscall_bind(LINUX_NR_reboot, sys_reboot, 0, "linux_reboot");
 
     uart_puts("[SYSCALL] syscall native + Linux compat ABI registrate\n");
     uart_puts("[SYSCALL] fd_table: 0/1/2=VFS(/dev/std*) per ");
