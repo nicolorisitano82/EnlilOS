@@ -28,12 +28,14 @@
 #include "elf_loader.h"
 #include "ext4.h"
 #include "selftest.h"
+#include "signal.h"
 #include "term80.h"
 #include "vfs.h"
 #include "cap.h"
 #include "vmm.h"
 #include "pty.h"
 #include "shutdown.h"
+#include "sock.h"
 
 extern void *memcpy(void *dst, const void *src, size_t n);
 
@@ -103,11 +105,15 @@ static gpu_caps_t bootcli_caps;
 static uint8_t   bootcli_graphics_mode;
 static uint8_t   bootcli_mode;
 static uint32_t  bootcli_shell_pid;
+static uint32_t  bootcli_wld_pid;
+static uint32_t  bootcli_wm_pid;
+static uint32_t  bootcli_wayland_pid;
 static char      bootcli_shell_name[24];
 static volatile uint32_t bootcli_heartbeat;
 
 #define BOOTCLI_MODE_UI    0U
 #define BOOTCLI_MODE_TERM  1U
+#define BOOTCLI_MODE_WAYLAND 2U
 
 static const char boot_arkshrc_user_default[] =
     "# ~/.config/arksh/arkshrc\n"
@@ -240,6 +246,8 @@ static void boot_launch_wld(void)
 {
     uint32_t pid = 0U;
 
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+
     /*
      * Il compositor non puo' stare a PRIO_NORMAL: sotto carico resta dietro a
      * shell/ticker/netd e il socket /run/wayland-0 non arriva online in tempo.
@@ -250,6 +258,7 @@ static void boot_launch_wld(void)
         uart_puts("[WLD] Spawn fallita, Wayland non disponibile\n");
         return;
     }
+    bootcli_wld_pid = pid;
 
     uart_puts("[WLD] Compositor avviato: pid=");
     {
@@ -274,6 +283,7 @@ static void boot_launch_wm(void)
         uart_puts("[WM] Spawn fallita, WM non disponibile\n");
         return;
     }
+    bootcli_wm_pid = pid;
 
     uart_puts("[WM] Window manager avviato: pid=");
     {
@@ -287,6 +297,117 @@ static void boot_launch_wm(void)
         }
     }
     uart_puts("\n");
+}
+
+static int boot_task_alive(uint32_t pid)
+{
+    sched_tcb_t *task;
+
+    if (pid == 0U)
+        return 0;
+    task = sched_task_find(pid);
+    if (!task)
+        return 0;
+    return task->state != TCB_STATE_ZOMBIE;
+}
+
+static int boot_wayland_ready_marker(void)
+{
+    stat_t st;
+    return vfs_lstat("/data/WLDREADY.TXT", &st) == 0 && st.st_size > 0LL;
+}
+
+static int boot_wayland_ready(void)
+{
+    if (!boot_task_alive(bootcli_wld_pid))
+        return 0;
+    return boot_wayland_ready_marker();
+}
+
+static int boot_wait_wayland_socket(uint64_t timeout_ms)
+{
+    uint64_t deadline = timer_now_ms() + timeout_ms;
+
+    while (timer_now_ms() < deadline) {
+        if (boot_wayland_ready())
+            return 1;
+        sched_yield();
+    }
+    return boot_wayland_ready();
+}
+
+static void boot_stop_task(uint32_t *pid_slot, uint64_t timeout_ms)
+{
+    uint64_t deadline;
+
+    if (!pid_slot || *pid_slot == 0U)
+        return;
+
+    (void)signal_send_pid(*pid_slot, SIGTERM);
+    deadline = timer_now_ms() + timeout_ms;
+    while (timer_now_ms() < deadline) {
+        if (!boot_task_alive(*pid_slot))
+            break;
+        sched_yield();
+    }
+    *pid_slot = 0U;
+}
+
+static int boot_restart_wayland(uint64_t timeout_ms)
+{
+    boot_stop_task(&bootcli_wm_pid, 250ULL);
+    boot_stop_task(&bootcli_wld_pid, 400ULL);
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+
+    boot_launch_wld();
+    if (!boot_wait_wayland_socket(timeout_ms))
+        return 0;
+
+    boot_launch_wm();
+    {
+        uint64_t deadline = timer_now_ms() + timeout_ms;
+        while (timer_now_ms() < deadline) {
+            if (boot_task_alive(bootcli_wm_pid))
+                break;
+            sched_yield();
+        }
+    }
+
+    if (!boot_task_alive(bootcli_wm_pid))
+        return 0;
+
+    {
+        uint64_t settle_deadline = timer_now_ms() + 200ULL;
+        while (timer_now_ms() < settle_deadline)
+            sched_yield();
+    }
+
+    return boot_wayland_ready();
+}
+
+static int boot_ensure_wayland(uint64_t timeout_ms)
+{
+    if (!boot_wayland_ready()) {
+        if (!boot_task_alive(bootcli_wld_pid))
+            boot_launch_wld();
+        if (!boot_wait_wayland_socket(timeout_ms))
+            return 0;
+    }
+
+    if (!boot_task_alive(bootcli_wm_pid)) {
+        boot_launch_wm();
+        {
+            uint64_t deadline = timer_now_ms() + timeout_ms;
+            while (timer_now_ms() < deadline) {
+                if (boot_task_alive(bootcli_wm_pid))
+                    break;
+                sched_yield();
+            }
+        }
+    }
+
+    return boot_wayland_ready();
 }
 
 static void boot_seed_dir_if_missing(const char *path, uint32_t mode)
@@ -1505,6 +1626,7 @@ static int bootcli_poll_shell(void)
     bootcli_copy_trunc(shell_name, bootcli_shell_name, sizeof(shell_name));
     term80_deactivate();
     bootcli_mode = BOOTCLI_MODE_UI;
+    gpu_set_2d_present_enabled(true);
     bootcli_shell_pid = 0U;
     bootcli_shell_name[0] = '\0';
     if (shell_name[0] != '\0') {
@@ -1525,12 +1647,46 @@ static int bootcli_poll_shell(void)
     return 1;
 }
 
+static int bootcli_poll_wayland(void)
+{
+    sched_tcb_t *task;
+    int32_t      exit_code = 0;
+    int          have_exit_code = 0;
+    char         line[BOOTCLI_LINE_MAX + 1];
+
+    if (bootcli_mode != BOOTCLI_MODE_WAYLAND || bootcli_wayland_pid == 0U)
+        return 0;
+
+    task = sched_task_find(bootcli_wayland_pid);
+    if (task && task->state != TCB_STATE_ZOMBIE)
+        return 0;
+    if (task && sched_task_get_exit_code(task, &exit_code) == 0)
+        have_exit_code = 1;
+
+    bootcli_mode = BOOTCLI_MODE_UI;
+    gpu_set_2d_present_enabled(true);
+    bootcli_wayland_pid = 0U;
+
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line), "wmdemo terminato");
+    if (have_exit_code) {
+        bootcli_buf_append(line, sizeof(line), " (exit=");
+        bootcli_buf_append_i32(line, sizeof(line), exit_code);
+        bootcli_buf_append(line, sizeof(line), ")");
+    }
+    bootcli_buf_append(line, sizeof(line), ". Ritorno alla boot console.");
+    bootcli_push_line(line);
+    return 1;
+}
+
 static void bootcli_render(void)
 {
     if (bootcli_mode == BOOTCLI_MODE_TERM) {
         bootcli_render_term80();
         return;
     }
+    if (bootcli_mode == BOOTCLI_MODE_WAYLAND)
+        return;
 
     const uint32_t bg_color     = 0x000c1118;
     const uint32_t panel_color  = 0x00141d29;
@@ -2214,20 +2370,25 @@ static void bootcli_execute_command(void)
             bootcli_push_line(line);
         }
     } else if (bootcli_streq(bootcli_input, "wm")) {
-        uint32_t pid = 0U;
-        if (elf64_spawn_path("/WM.ELF", "/WM.ELF", PRIO_HIGH, &pid) < 0) {
-            bootcli_push_line(elf64_last_error());
+        if (!boot_ensure_wayland(1000ULL)) {
+            bootcli_push_line("wm: compositor Wayland non pronto.");
         } else {
             line[0] = '\0';
-            bootcli_buf_append(line, sizeof(line), "wm lanciato, pid=");
-            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_buf_append(line, sizeof(line), "wm pronto, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), bootcli_wm_pid);
             bootcli_push_line(line);
         }
     } else if (bootcli_streq(bootcli_input, "wmdemo")) {
         uint32_t pid = 0U;
-        if (elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_KERNEL, &pid) < 0) {
+
+        if (!boot_restart_wayland(1500ULL)) {
+            bootcli_push_line("wmdemo: Wayland non pronto.");
+        } else if (elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &pid) < 0) {
             bootcli_push_line(elf64_last_error());
         } else {
+            bootcli_wayland_pid = pid;
+            bootcli_mode = BOOTCLI_MODE_WAYLAND;
+            gpu_set_2d_present_enabled(true);
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "wm demo lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
@@ -2336,7 +2497,7 @@ static int bootcli_poll_input(void)
     int dirty = 0;
     int c;
 
-    if (bootcli_mode == BOOTCLI_MODE_TERM)
+    if (bootcli_mode == BOOTCLI_MODE_TERM || bootcli_mode == BOOTCLI_MODE_WAYLAND)
         return 0;
 
     while ((c = keyboard_getc()) >= 0) {
@@ -2431,7 +2592,7 @@ static int bootcli_poll_mouse(void)
     int dirty = 0;
     mouse_event_t ev;
 
-    if (bootcli_mode == BOOTCLI_MODE_TERM)
+    if (bootcli_mode == BOOTCLI_MODE_TERM || bootcli_mode == BOOTCLI_MODE_WAYLAND)
         return 0;
 
     while (mouse_get_event(&ev)) {
@@ -2472,6 +2633,7 @@ static void bootcli_init(void)
     bootcli_mouse_ready = (uint8_t)mouse_is_ready();
     bootcli_mode = BOOTCLI_MODE_UI;
     bootcli_shell_pid = 0U;
+    bootcli_wayland_pid = 0U;
     bootcli_shell_name[0] = '\0';
 
     gpu_get_caps(&bootcli_caps);
@@ -2765,6 +2927,7 @@ void kernel_main(void)
     uint32_t last_heartbeat = bootcli_heartbeat;
     while (1) {
         int dirty = bootcli_poll_shell();
+        dirty |= bootcli_poll_wayland();
         dirty |= bootcli_poll_input();
         dirty |= bootcli_poll_mouse();
         uint64_t cursor_phase = timer_now_ms() / 400ULL;

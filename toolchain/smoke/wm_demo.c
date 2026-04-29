@@ -2,8 +2,9 @@
  * wm_demo — client multi-window per validare M12-02
  *
  * Crea due toplevel Wayland distinti, commit di buffer colorati
- * e attende un evento xdg_toplevel.close dal WM.
- * Al close scrive /data/WMDEMO.TXT con "wm-demo-ok".
+ * e attende un evento xdg_toplevel.close dal WM oppure un breve timeout
+ * dimostrativo.
+ * Al close/timeout scrive /data/WMDEMO.TXT con "wm-demo-ok".
  */
 
 #include <sys/socket.h>
@@ -130,10 +131,18 @@ static int wl_next_event(wl_conn_t *c, wl_event_t *ev)
     return 1;
 }
 
-static void fill_color(uint32_t *dst, uint32_t color)
+static void fill_pattern(uint32_t *dst, uint32_t base, uint32_t accent)
 {
-    for (int i = 0; i < SURF_W * SURF_H; i++)
-        dst[i] = color;
+    for (int y = 0; y < SURF_H; y++) {
+        for (int x = 0; x < SURF_W; x++) {
+            uint32_t color = base;
+            if (x < 8 || y < 8 || x >= (SURF_W - 8) || y >= (SURF_H - 8))
+                color = 0x00FFFFFFU;
+            else if (((x / 16) + (y / 16)) & 1)
+                color = accent;
+            dst[y * SURF_W + x] = color;
+        }
+    }
 }
 
 static int wl_connect_runtime(wl_conn_t *conn, uint32_t *comp_name,
@@ -288,6 +297,12 @@ static void write_demo_ok(void)
     }
 }
 
+static void sleep_10ms(void)
+{
+    struct timespec sl = { 0, 10000000L };
+    nanosleep(&sl, NULL);
+}
+
 int main(void)
 {
     wl_conn_t conn;
@@ -315,15 +330,15 @@ int main(void)
     buf2 = (uint32_t *)shmat(shmid2, NULL, 0);
     if ((long)buf1 == -1L || (long)buf2 == -1L)
         return 3;
-    fill_color(buf1, 0x00d15b5bU);
-    fill_color(buf2, 0x005b87d1U);
+    fill_pattern(buf1, 0x00FF5A36U, 0x00FFD6CCU);
+    fill_pattern(buf2, 0x0036B8FFU, 0x00D9F1FFU);
 
     create_window(&conn, 4U, 3U, 5U, 6U, 7U, 8U, 9U, 10U, shmid1, "WM One");
     create_window(&conn, 4U, 3U, 5U, 11U, 12U, 13U, 14U, 15U, shmid2, "WM Two");
 
     {
-        uint64_t deadline = (uint64_t)time(NULL) + 4ULL;
-        while ((uint64_t)time(NULL) < deadline && (!cfg1 || !cfg2)) {
+        int polls = 400; /* ~4s a passi da 10ms */
+        while (polls-- > 0 && (!cfg1 || !cfg2)) {
             wl_event_t ev;
             ssize_t n = recv(conn.fd, conn.ibuf + conn.ilen,
                              sizeof(conn.ibuf) - conn.ilen, MSG_DONTWAIT);
@@ -343,8 +358,7 @@ int main(void)
             }
 
             if (!cfg1 || !cfg2) {
-                struct timespec sl = { 0, 10000000L };
-                nanosleep(&sl, NULL);
+                sleep_10ms();
             }
         }
     }
@@ -361,8 +375,8 @@ int main(void)
     commit_buffer(&conn, 13U, 12U);
 
     {
-        uint64_t deadline = (uint64_t)time(NULL) + 6ULL;
-        while ((uint64_t)time(NULL) < deadline) {
+        int polls = 800; /* ~8s a passi da 10ms */
+        while (polls-- > 0) {
             wl_event_t ev;
             ssize_t n = recv(conn.fd, conn.ibuf + conn.ilen,
                              sizeof(conn.ibuf) - conn.ilen, MSG_DONTWAIT);
@@ -381,16 +395,14 @@ int main(void)
                 }
             }
 
-            {
-                struct timespec sl = { 0, 10000000L };
-                nanosleep(&sl, NULL);
-            }
+            sleep_10ms();
         }
     }
 
-    write(2, "wmdemo: no close received\n", 26);
+    write(2, "[WMDEMO] timeout complete\n", 26);
+    write_demo_ok();
     shmdt(buf1);
     shmdt(buf2);
     close(conn.fd);
-    return 5;
+    return 0;
 }

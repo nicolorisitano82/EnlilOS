@@ -57,6 +57,8 @@
 #define WLD_O_CREAT   0100
 #define WLD_O_TRUNC   01000
 
+#define WLD_READY_PATH "/data/WLDREADY.TXT"
+
 /* framebuffer dimensions */
 #define WLD_FB_W    800U
 #define WLD_FB_H    600U
@@ -338,6 +340,17 @@ static void wld_write_log(const char *s)
 {
     long len = wld_strlen(s);
     (void)user_svc3(WLD_SYS_WRITE, 2, (long)s, len); /* stderr fd=2 */
+}
+
+static void wld_write_ready_marker(void)
+{
+    static const char ready_text[] = "ready\n";
+    long fd = user_svc3(WLD_SYS_OPEN, (long)WLD_READY_PATH,
+                        WLD_O_WRONLY | WLD_O_CREAT | WLD_O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    (void)user_svc3(WLD_SYS_WRITE, fd, (long)ready_text, (long)(sizeof(ready_text) - 1U));
+    wld_close((int)fd);
 }
 
 static long wld_present(long w, long h, long stride)
@@ -1194,6 +1207,8 @@ static void accept_clients(void)
 /* ── Close client and cleanup surfaces ─────────────────────────── */
 static void client_close(wclient_t *c)
 {
+    uint32_t obj_count;
+
     if (c->fd >= 0) wld_close(c->fd);
     /* Free surfaces belonging to this client */
     uint32_t ci = client_idx_of(c);
@@ -1206,7 +1221,10 @@ static void client_close(wclient_t *c)
         }
     }
     /* Detach pools owned by this client */
-    for (uint32_t i = 0U; i < c->obj_count; i++) {
+    obj_count = c->obj_count;
+    if (obj_count > WLD_MAX_OBJS)
+        obj_count = WLD_MAX_OBJS;
+    for (uint32_t i = 0U; i < obj_count; i++) {
         if (c->objs[i].alive && c->objs[i].type == WOBJ_SHM_POOL) {
             uint32_t pi = c->objs[i].extra;
             if (pi < WLD_MAX_POOLS && wld_pools[pi].alive) {
@@ -1248,6 +1266,7 @@ static void wld_setup_socket(void)
         return;
     }
     wld_listen_fd = (int)fd;
+    wld_write_ready_marker();
     wld_write_log("[WLD] ascoltando su /run/wayland-0\n");
 }
 

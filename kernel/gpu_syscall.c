@@ -92,12 +92,14 @@ static uint64_t gpu_2d_total_ops;
 static gpu_buf_handle_t gpu_2d_scanout_handle = GPU_INVALID_BUF;
 static uint32_t *gpu_2d_scanout_ptr;
 static bool gpu_2d_frame_open;
+static bool gpu_2d_present_enabled = true;
 
 static void gpu_mm_init(void);
 static int gpu_buf_flush_entry(gpu_buf_entry_t *e);
 static void gpu_flush_dirty_buffers(void);
 static int gpu_2d_flush_batch(void);
 static int gpu_2d_ensure_target(void);
+static void gpu_2d_mark_dirty(void);
 
 static void gpu_fence_update(gpu_fence_entry_t *f)
 {
@@ -727,12 +729,20 @@ void gpu_present_fullscreen(void)
     gpu_buf_entry_t *scanout = NULL;
     uint32_t *fb = fb_get_ptr();
 
-    if (gpu_2d_frame_open) {
+    if (gpu_2d_present_enabled && gpu_2d_frame_open) {
         if (gpu_2d_flush_batch() == 0 && buf_valid(gpu_2d_scanout_handle)) {
             scanout = &gpu_buf_pool[gpu_2d_scanout_handle - 1U];
             (void)gpu_buf_flush_entry(scanout);
         }
         gpu_2d_frame_open = false;
+    }
+
+    if (gpu_2d_present_enabled &&
+        !scanout &&
+        buf_valid(gpu_2d_scanout_handle) &&
+        gpu_2d_scanout_ptr) {
+        scanout = &gpu_buf_pool[gpu_2d_scanout_handle - 1U];
+        (void)gpu_buf_flush_entry(scanout);
     }
 
     if (!scanout) {
@@ -751,6 +761,62 @@ void gpu_present_fullscreen(void)
     fence.state = GPU_FENCE_PENDING;
 
     gpu_active_backend->present(scanout, 0U, 0U, FB_WIDTH, FB_HEIGHT, &fence);
+}
+
+void gpu_present_framebuffer(void)
+{
+    static gpu_fence_entry_t fence = {
+        .id     = 0U,
+        .in_use = true,
+    };
+    static gpu_buf_entry_t fb_entry = {
+        .size   = FB_WIDTH * FB_HEIGHT * 4U,
+        .type   = GPU_BUF_SCANOUT,
+        .in_use = true,
+    };
+    uint32_t *fb = fb_get_ptr();
+
+    if (!gpu_active_backend || !fb)
+        return;
+
+    fb_entry.phys = (uint64_t)(uintptr_t)fb;
+    fence.state = GPU_FENCE_PENDING;
+    gpu_active_backend->present(&fb_entry, 0U, 0U, FB_WIDTH, FB_HEIGHT, &fence);
+}
+
+void gpu_set_2d_present_enabled(bool enabled)
+{
+    gpu_2d_present_enabled = enabled;
+    if (!enabled) {
+        gpu_2d_frame_open = false;
+        gpu_2d_ring_count = 0U;
+    }
+}
+
+uint32_t *gpu_get_present_target_ptr(void)
+{
+    if (gpu_2d_present_enabled &&
+        gpu_active_backend &&
+        gpu_2d_ensure_target() == 0 &&
+        gpu_2d_scanout_ptr)
+        return gpu_2d_scanout_ptr;
+    return fb_get_ptr();
+}
+
+void gpu_mark_present_target_dirty(void)
+{
+    if (gpu_2d_present_enabled)
+        gpu_2d_mark_dirty();
+}
+
+uint32_t *gpu_get_visible_scanout_ptr(void)
+{
+    if (gpu_active_backend == &gpu_virtio_backend) {
+        uint32_t *scan = virtio_gpu_visible_scanout_ptr();
+        if (scan)
+            return scan;
+    }
+    return fb_get_ptr();
 }
 
 void gpu_get_caps(gpu_caps_t *out)
@@ -1083,6 +1149,7 @@ static int gpu_2d_push(const gpu_2d_cmd_t *cmd)
 
 int gpu_begin_2d_frame(uint32_t clear_color)
 {
+    gpu_2d_present_enabled = true;
     (void)gpu_2d_ensure_target();
     gpu_2d_ring_count = 0U;
     gpu_2d_frame_open = true;

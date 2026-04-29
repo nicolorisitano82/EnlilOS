@@ -107,4 +107,10 @@ void gpu_backend_init(void);
  */
 bool virtio_gpu_init(void);
 
+/*
+ * Buffer scanout effettivamente visibile lato host/QEMU.
+ * Utile per selftest visuali e debug di present.
+ */
+uint32_t *virtio_gpu_visible_scanout_ptr(void);
+
 #endif /* GPU_INTERNAL_H */

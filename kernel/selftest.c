@@ -14,6 +14,7 @@
 #include "vmm.h"
 #include "elf_loader.h"
 #include "ext4.h"
+#include "framebuffer.h"
 #include "gpu.h"
 #include "kdebug.h"
 #include "kmon.h"
@@ -3090,6 +3091,34 @@ static int selftest_case_wm_core(void)
 
     rc = elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &pid);
     ST_CHECK(case_name, rc == 0, "spawn WMDEMO.ELF fallita");
+
+    {
+        uint64_t visual_deadline = timer_now_ms() + 1500ULL;
+        int      visual_ok = 0;
+
+        while (timer_now_ms() < visual_deadline) {
+            uint32_t *scan = gpu_get_visible_scanout_ptr();
+            if (scan) {
+                uint32_t px_left  = scan[120U * FB_WIDTH + 120U];
+                uint32_t px_right = scan[120U * FB_WIDTH + 520U];
+                int left_ok =
+                    (px_left == 0xFFFF5A36U) ||
+                    (px_left == 0xFFFFD6CCU) ||
+                    (px_left == 0xFFFFFFFFU);
+                int right_ok =
+                    (px_right == 0xFF36B8FFU) ||
+                    (px_right == 0xFFD9F1FFU) ||
+                    (px_right == 0xFFFFFFFFU);
+                if (left_ok && right_ok) {
+                    visual_ok = 1;
+                    break;
+                }
+            }
+            sched_yield();
+        }
+
+        ST_CHECK(case_name, visual_ok, "scanout Wayland visibile non aggiornato");
+    }
 
     deadline = timer_now_ms() + 6000ULL;
     while (timer_now_ms() < deadline) {

@@ -70,7 +70,19 @@
       "Bash(aarch64-elf-readelf -r user/arksh_plugin_enlil.so)",
       "Bash(aarch64-elf-objdump -d toolchain/smoke/arksh_plugin_demo.elf)",
       "Bash(aarch64-elf-readelf -l toolchain/smoke/arksh_plugin_demo.elf)",
-      "Bash(aarch64-elf-readelf -l toolchain/smoke/musl_dlfcn.elf)"
+      "Bash(aarch64-elf-readelf -l toolchain/smoke/musl_dlfcn.elf)",
+      "Bash(git -C /Users/nicolo/nros status)",
+      "Bash(git -C /Users/nicolo/nros diff --stat)",
+      "Bash(git -C /Users/nicolo/nros add BACKLOG2.md README.md)",
+      "Bash(git -C /Users/nicolo/nros commit -m ' *)",
+      "Bash(aarch64-elf-nm /Users/nicolo/nros/toolchain/smoke/poweroff.elf)",
+      "Bash(aarch64-elf-objdump -d /Users/nicolo/nros/toolchain/smoke/poweroff.elf)",
+      "Bash(sed -n '95,125p' /Users/nicolo/nros/Makefile)",
+      "Bash(sed -n '505,550p' /Users/nicolo/nros/Makefile)",
+      "Bash(sed -n '315,380p' /Users/nicolo/nros/kernel/gpu_syscall.c)",
+      "Bash(sed -n '516,560p' /Users/nicolo/nros/kernel/gpu_syscall.c)",
+      "Bash(grep -v \"\\\\.o$\\\\|\\\\.elf$\")",
+      "Bash(git -C /Users/nicolo/nros log --oneline -3)"
     ]
   }
 }

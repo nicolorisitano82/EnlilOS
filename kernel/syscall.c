@@ -15,6 +15,7 @@
 #include "cap.h"
 #include "framebuffer.h"
 #include "futex.h"
+#include "gpu.h"
 #include "kdebug.h"
 #include "keyboard.h"
 #include "linux_compat.h"
@@ -8625,7 +8626,13 @@ static void linux_syscall_bind(uint32_t nr, syscall_handler_fn handler,
  * args[2] = height (pixel, ≤ FB_HEIGHT)
  * args[3] = stride (byte per riga)
  *
- * Copia i pixel dallo spazio utente nel framebuffer e chiama fb_flush().
+ * Copia i pixel dallo spazio utente nel target di present condiviso e
+ * presenta il risultato tramite il backend display attivo.
+ *
+ * Nota importante: la boot console grafica usa il renderer 2D GPU su un
+ * target scanout dedicato; perche' Wayland sia davvero visibile nella
+ * sessione interattiva, il compositor deve scrivere sullo stesso target
+ * condiviso anziche' passare solo dal framebuffer legacy.
  * ════════════════════════════════════════════════════════════════════ */
 static uint64_t sys_wld_present(uint64_t args[6])
 {
@@ -8633,7 +8640,8 @@ static uint64_t sys_wld_present(uint64_t args[6])
     uint32_t  width   = (uint32_t)args[1];
     uint32_t  height  = (uint32_t)args[2];
     uint32_t  stride  = (uint32_t)args[3];
-    uint32_t *fb;
+    size_t    src_span;
+    uint32_t *dst;
     uint32_t  row;
 
     if (!src_uva)
@@ -8645,27 +8653,50 @@ static uint64_t sys_wld_present(uint64_t args[6])
     if (stride < width * 4U)
         return ERR(EINVAL);
 
-    fb = fb_get_ptr();
-    if (!fb)
+    src_span = (size_t)(height - 1U) * (size_t)stride + (size_t)width * 4U;
+    /*
+     * WLD compone il frame nel proprio spazio utente. Prima di leggerlo
+     * tramite il mapping kernel-side, puliamo il range sorgente dalla
+     * D-cache così il backend display vede il contenuto aggiornato e non
+     * eventuali linee stale attraverso alias VA distinti.
+     */
+    cache_flush_range(src_uva, src_span);
+
+    dst = gpu_get_present_target_ptr();
+    if (!dst)
         return ERR(EIO);
 
     for (row = 0U; row < height; row++) {
         uintptr_t row_uva = src_uva + (uintptr_t)(row * stride);
-        uint32_t *dst_row = fb + (uintptr_t)(row * FB_WIDTH);
-        /* Riempi a nero il resto della riga se width < FB_WIDTH */
-        if (user_copy_bytes(row_uva, dst_row, width * 4U) < 0) {
-            /* best-effort: skip riga corrotta */
-            __builtin_memset(dst_row, 0, width * 4U);
+        uint32_t  tmp_row[FB_WIDTH];
+        uint32_t col;
+
+        /* Copia la riga user-space una sola volta e poi specchiala sui target. */
+        if (user_copy_bytes(row_uva, tmp_row, width * 4U) < 0) {
+            return ERR(EFAULT);
         }
-        if (width < FB_WIDTH)
-            __builtin_memset(dst_row + width, 0, (FB_WIDTH - width) * 4U);
+        for (col = 0U; col < width; col++)
+            tmp_row[col] |= 0xFF000000U;
+        for (col = width; col < FB_WIDTH; col++)
+            tmp_row[col] = 0xFF000000U;
+
+        {
+            uint32_t *dst_row = dst + (uintptr_t)(row * FB_WIDTH);
+            for (col = 0U; col < FB_WIDTH; col++)
+                dst_row[col] = tmp_row[col];
+        }
     }
     /* Righe rimanenti nere */
-    if (height < FB_HEIGHT)
-        __builtin_memset(fb + height * FB_WIDTH, 0,
-                         (FB_HEIGHT - height) * FB_WIDTH * 4U);
+    if (height < FB_HEIGHT) {
+        uint32_t remaining = (FB_HEIGHT - height) * FB_WIDTH;
+        uint32_t *tail = dst + height * FB_WIDTH;
+        for (row = 0U; row < remaining; row++)
+            tail[row] = 0xFF000000U;
+    }
 
-    fb_flush();
+    cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
+    gpu_mark_present_target_dirty();
+    gpu_present_fullscreen();
     return 0ULL;
 }
 

@@ -552,6 +552,7 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
     uint32_t back_idx;
     uint32_t back_resource;
     uint32_t *src;
+    uint32_t *front_dst;
     uint32_t *dst;
 
     vgpu_ensure_device();
@@ -575,16 +576,29 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
     back_resource = (back_idx == 0U) ? VGPU_RESOURCE_FRONT_ID
                                      : VGPU_RESOURCE_BACK_ID;
     src = (uint32_t *)(uintptr_t)scanout->phys;
+    front_dst = vgpu_scanbuf[vgpu_front_idx];
     dst = vgpu_scanbuf[back_idx];
 
     for (uint32_t row = 0U; row < h; row++) {
         uint32_t base = (y + row) * FB_WIDTH + x;
-        for (uint32_t col = 0U; col < w; col++)
+        for (uint32_t col = 0U; col < w; col++) {
+            front_dst[base + col] = src[base + col];
             dst[base + col] = src[base + col];
+        }
     }
 
+    cache_flush_range((uintptr_t)front_dst, FB_WIDTH * FB_HEIGHT * 4U);
     cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
 
+    /*
+     * Aggiorna anche la risorsa attualmente visibile: su alcune sequenze
+     * interattive il page-flip può arrivare tardi rispetto al primo present
+     * Wayland, mentre il frontbuffer viene comunque mostrato subito.
+     */
+    if (vgpu_transfer_and_flush(front_resource, x, y, w, h) != 0) {
+        fence->state = GPU_FENCE_ERROR;
+        return -1;
+    }
     if (vgpu_transfer_and_flush(back_resource, x, y, w, h) != 0) {
         fence->state = GPU_FENCE_ERROR;
         return -1;
@@ -598,7 +612,6 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
         return -1;
     }
 
-    (void)front_resource;
     vgpu_front_idx = back_idx;
     vgpu_frame_counter++;
     if (vgpu_next_vsync_ns == 0U || timer_now_ns() >= vgpu_next_vsync_ns) {
@@ -641,6 +654,16 @@ bool virtio_gpu_init(void)
     vgpu_transport = true;
     uart_puts("[VGPU] VirtIO-GPU: trasporto v2 pronto\n");
     return true;
+}
+
+uint32_t *virtio_gpu_visible_scanout_ptr(void)
+{
+    if (!vgpu_transport)
+        return NULL;
+    vgpu_ensure_device();
+    if (!vgpu_device)
+        return NULL;
+    return vgpu_scanbuf[vgpu_front_idx];
 }
 
 static int vgpu_create_resource(uint32_t resource_id, uint32_t *pixels)

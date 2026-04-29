@@ -139,6 +139,14 @@ void gpu_init(void);
 void gpu_present_fullscreen(void);
 
 /*
+ * gpu_present_framebuffer() — presenta esplicitamente il framebuffer legacy
+ * tramite il backend attivo, bypassando l'eventuale target 2D separato.
+ * Utile per path che disegnano ancora con fb_put_pixel()/fb_clear().
+ */
+void gpu_present_framebuffer(void);
+void gpu_set_2d_present_enabled(bool enabled);
+
+/*
  * gpu_get_caps() — ritorna le capability del backend GPU attivo.
  * Utile per scegliere una UI di boot coerente tra SW fallback e VirtIO-GPU.
  */
@@ -149,6 +157,31 @@ void gpu_get_caps(gpu_caps_t *out);
  * scanout size, vsync, double buffering, front/back index e frame count.
  */
 void gpu_get_scanout_info(gpu_scanout_info_t *out);
+
+/*
+ * gpu_get_present_target_ptr() — ritorna il target CPU-writable usato dal
+ * path di present attuale.
+ *
+ * In modalita' grafica preferisce il buffer scanout del renderer 2D; altrimenti
+ * degrada al framebuffer locale del kernel.
+ */
+uint32_t *gpu_get_present_target_ptr(void);
+
+/*
+ * gpu_mark_present_target_dirty() — marca il target CPU-writable come sporco
+ * in modo che il backend di present lo flushi correttamente al prossimo
+ * gpu_present_fullscreen().
+ */
+void gpu_mark_present_target_dirty(void);
+
+/*
+ * gpu_get_visible_scanout_ptr() — ritorna il buffer che il backend display
+ * considera attualmente visibile.
+ *
+ * Con VirtIO-GPU corrisponde al frontbuffer attivo sullo scanout; sui backend
+ * piu' semplici degrada al framebuffer locale.
+ */
+uint32_t *gpu_get_visible_scanout_ptr(void);
 
 /*
  * gpu_flush_cache() — pulisce la D-cache per un GBO e lo rende visibile
