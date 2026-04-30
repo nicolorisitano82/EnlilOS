@@ -548,11 +548,7 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
                            uint32_t           w, uint32_t h,
                            gpu_fence_entry_t *fence)
 {
-    uint32_t front_resource;
-    uint32_t back_idx;
-    uint32_t back_resource;
     uint32_t *src;
-    uint32_t *front_dst;
     uint32_t *dst;
 
     vgpu_ensure_device();
@@ -570,49 +566,29 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
     if (x + w > FB_WIDTH)  w = FB_WIDTH - x;
     if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
 
-    front_resource = (vgpu_front_idx == 0U) ? VGPU_RESOURCE_FRONT_ID
-                                            : VGPU_RESOURCE_BACK_ID;
-    back_idx = vgpu_front_idx ^ 1U;
-    back_resource = (back_idx == 0U) ? VGPU_RESOURCE_FRONT_ID
-                                     : VGPU_RESOURCE_BACK_ID;
     src = (uint32_t *)(uintptr_t)scanout->phys;
-    front_dst = vgpu_scanbuf[vgpu_front_idx];
-    dst = vgpu_scanbuf[back_idx];
+    dst = vgpu_scanbuf[0];   /* single scanout buffer — no page flip needed */
 
     for (uint32_t row = 0U; row < h; row++) {
         uint32_t base = (y + row) * FB_WIDTH + x;
-        for (uint32_t col = 0U; col < w; col++) {
-            front_dst[base + col] = src[base + col];
+        for (uint32_t col = 0U; col < w; col++)
             dst[base + col] = src[base + col];
-        }
     }
 
-    cache_flush_range((uintptr_t)front_dst, FB_WIDTH * FB_HEIGHT * 4U);
     cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
 
     /*
-     * Aggiorna anche la risorsa attualmente visibile: su alcune sequenze
-     * interattive il page-flip può arrivare tardi rispetto al primo present
-     * Wayland, mentre il frontbuffer viene comunque mostrato subito.
+     * Single transfer+flush onto VGPU_RESOURCE_FRONT_ID (the scanout
+     * resource set up in virtio_gpu_device_init).  No page-flip needed
+     * for our compositor: QEMU sees the updated pixels immediately.
+     * This replaces the old 7-command double-buffer sequence (4×transfer
+     * + 4×flush + 1 set_scanout) that was causing ~200ms/frame on TCG.
      */
-    if (vgpu_transfer_and_flush(front_resource, x, y, w, h) != 0) {
-        fence->state = GPU_FENCE_ERROR;
-        return -1;
-    }
-    if (vgpu_transfer_and_flush(back_resource, x, y, w, h) != 0) {
-        fence->state = GPU_FENCE_ERROR;
-        return -1;
-    }
-    if (vgpu_set_scanout_resource(back_resource) != 0) {
-        fence->state = GPU_FENCE_ERROR;
-        return -1;
-    }
-    if (vgpu_transfer_and_flush(back_resource, x, y, w, h) != 0) {
+    if (vgpu_transfer_and_flush(VGPU_RESOURCE_FRONT_ID, x, y, w, h) != 0) {
         fence->state = GPU_FENCE_ERROR;
         return -1;
     }
 
-    vgpu_front_idx = back_idx;
     vgpu_frame_counter++;
     if (vgpu_next_vsync_ns == 0U || timer_now_ns() >= vgpu_next_vsync_ns) {
         vgpu_next_vsync_ns = timer_now_ns() + VGPU_VSYNC_NS;

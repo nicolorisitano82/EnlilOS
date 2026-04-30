@@ -48,19 +48,25 @@ typedef struct {
 #define ENLIL_WM_FOCUS_NEXT      1U
 #define ENLIL_WM_CLOSE_FOCUSED   3U
 #define ENLIL_WM_GET_STATE       4U
+#define ENLIL_WM_SET_FOCUS_POLICY 5U
 #define ENLIL_WM_LAYOUT_TILE     1U
+#define ENLIL_WM_FOCUS_CLICK     0U
+#define ENLIL_WM_FOCUS_POINTER   1U
 
 static void wl_flush(wl_conn_t *c)
 {
     ssize_t sent = 0;
 
     while ((uint32_t)sent < c->olen) {
-        ssize_t r = send(c->fd, c->obuf + sent, c->olen - (uint32_t)sent, 0);
+        ssize_t r = send(c->fd, c->obuf + sent, c->olen - (uint32_t)sent,
+                         MSG_DONTWAIT);
         if (r <= 0)
             break;
         sent += r;
     }
-    c->olen = 0U;
+    if (sent > 0 && (uint32_t)sent < c->olen)
+        memmove(c->obuf, c->obuf + sent, c->olen - (uint32_t)sent);
+    c->olen -= (uint32_t)sent;
 }
 
 static void out_u32(wl_conn_t *c, uint32_t v)
@@ -259,6 +265,13 @@ static void wm_get_state(wl_conn_t *conn, uint32_t wm_id)
     wl_flush(conn);
 }
 
+static void wm_set_focus_policy(wl_conn_t *conn, uint32_t wm_id, uint32_t mode)
+{
+    msg_begin(conn, wm_id, ENLIL_WM_SET_FOCUS_POLICY, 4U);
+    out_u32(conn, mode);
+    wl_flush(conn);
+}
+
 static void wm_focus_next(wl_conn_t *conn, uint32_t wm_id)
 {
     msg_begin(conn, wm_id, ENLIL_WM_FOCUS_NEXT, 0U);
@@ -302,6 +315,7 @@ int main(int argc, char **argv)
 
     wm_bind(&conn, wm_name, wm_id);
     wm_set_layout(&conn, wm_id, ENLIL_WM_LAYOUT_TILE);
+    wm_set_focus_policy(&conn, wm_id, ENLIL_WM_FOCUS_POINTER);
     write(2, "[WM] bound + tile\n", 18);
 
     if (selftest) {

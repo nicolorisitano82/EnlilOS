@@ -1829,6 +1829,9 @@ static int wld_main(void)
     /* Primo frame vuoto */
     composite_and_present();
 
+    /* Auto-lancia terminale: utente vede subito una finestra bash */
+    wld_launch_terminal_window();
+
     long last_frame_ms = wld_gettimeofday_ms();
 
     while (1) {
