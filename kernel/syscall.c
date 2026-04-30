@@ -19,6 +19,7 @@
 #include "kdebug.h"
 #include "keyboard.h"
 #include "linux_compat.h"
+#include "mouse.h"
 #include "net.h"
 #include "net_ipc.h"
 #include "elf_loader.h"
@@ -3501,6 +3502,45 @@ static uint64_t sys_fstatat(uint64_t args[6])
     return (rc < 0) ? ERR(-rc) : 0ULL;
 }
 
+static uint64_t sys_readlinkat(uint64_t args[6])
+{
+    int         dirfd = (int)args[0];
+    uintptr_t   path_uva = (uintptr_t)args[1];
+    const char *path = (const char *)(uintptr_t)args[1];
+    uintptr_t   buf_uva = (uintptr_t)args[2];
+    size_t      buflen = (size_t)args[3];
+    char        path_buf[EXEC_MAX_PATH];
+    char        resolved[VFSD_IO_BYTES];
+    char        target[VFSD_IO_BYTES];
+    size_t      len = 0U;
+    int         rc;
+
+    if (!path || !buf_uva || buflen == 0U)
+        return ERR(EFAULT);
+
+    if (current_task && sched_task_is_user(current_task)) {
+        rc = user_copy_cstr(path_uva, path_buf, sizeof(path_buf));
+        if (rc < 0)
+            return ERR(-rc);
+        path = path_buf;
+    }
+
+    rc = resolve_dirfd_path_meta(dirfd, path, 0, resolved, sizeof(resolved), NULL);
+    if (rc < 0)
+        return ERR(-rc);
+
+    rc = vfs_readlink(resolved, target, sizeof(target));
+    if (rc < 0)
+        return ERR(-rc);
+
+    while (target[len] != '\0')
+        len++;
+    if (len > buflen)
+        len = buflen;
+    rc = user_store_bytes(buf_uva, target, len);
+    return (rc < 0) ? ERR(-rc) : (uint64_t)len;
+}
+
 static uint64_t sys_mkdir(uint64_t args[6])
 {
     uintptr_t   path_uva = (uintptr_t)args[0];
@@ -5082,6 +5122,38 @@ static uint64_t sys_kbd_get_layout(uint64_t args[6])
     if (rc < 0)
         return ERR(-rc);
     return (uint64_t)(copy_len - 1U);
+}
+
+static uint64_t sys_kbd_get_event(uint64_t args[6])
+{
+    uintptr_t        ev_uva = (uintptr_t)args[0];
+    keyboard_event_t ev;
+    int              rc;
+
+    if (!ev_uva)
+        return ERR(EFAULT);
+    if (!keyboard_get_event(&ev))
+        return 0ULL;
+    rc = user_store_bytes(ev_uva, &ev, sizeof(ev));
+    if (rc < 0)
+        return ERR(-rc);
+    return 1ULL;
+}
+
+static uint64_t sys_mouse_get_event(uint64_t args[6])
+{
+    uintptr_t     ev_uva = (uintptr_t)args[0];
+    mouse_event_t ev;
+    int           rc;
+
+    if (!ev_uva)
+        return ERR(EFAULT);
+    if (!mouse_get_event(&ev))
+        return 0ULL;
+    rc = user_store_bytes(ev_uva, &ev, sizeof(ev));
+    if (rc < 0)
+        return ERR(-rc);
+    return 1ULL;
 }
 
 static uint64_t sys_isatty(uint64_t args[6])
@@ -8852,6 +8924,12 @@ void syscall_init(void)
     syscall_table[SYS_KBD_GET_LAYOUT] = (syscall_entry_t){
         sys_kbd_get_layout, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "kbd_get_layout"
     };
+    syscall_table[SYS_KBD_GET_EVENT] = (syscall_entry_t){
+        sys_kbd_get_event, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "kbd_get_event"
+    };
+    syscall_table[SYS_MOUSE_GET_EVENT] = (syscall_entry_t){
+        sys_mouse_get_event, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "mouse_get_event"
+    };
     syscall_table[SYS_GETPID] = (syscall_entry_t){
         sys_getpid, SYSCALL_FLAG_RT | SYSCALL_FLAG_NOBLOCK, "getpid"
     };
@@ -8896,6 +8974,9 @@ void syscall_init(void)
     };
     syscall_table[SYS_FSTATAT] = (syscall_entry_t){
         sys_fstatat, 0, "fstatat"
+    };
+    syscall_table[SYS_READLINKAT] = (syscall_entry_t){
+        sys_readlinkat, 0, "readlinkat"
     };
     syscall_table[SYS_IOCTL] = (syscall_entry_t){
         sys_ioctl, 0, "ioctl"

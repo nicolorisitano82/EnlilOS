@@ -50,6 +50,18 @@ int memcmp(const void *a, const void *b, size_t n)
     return 0;
 }
 
+void *memchr(const void *s, int c, size_t n)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    unsigned char        ch = (unsigned char)c;
+
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] == ch)
+            return (void *)(p + i);
+    }
+    return NULL;
+}
+
 size_t strlen(const char *s)
 {
     size_t n = 0U;
@@ -91,6 +103,45 @@ int strncmp(const char *a, const char *b, size_t n)
         n--;
     }
     return (unsigned char)*a - (unsigned char)*b;
+}
+
+static unsigned char str_ascii_tolower(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return (unsigned char)(c - 'A' + 'a');
+    return c;
+}
+
+int strcasecmp(const char *a, const char *b)
+{
+    unsigned char ca;
+    unsigned char cb;
+
+    while (*a != '\0' || *b != '\0') {
+        ca = str_ascii_tolower((unsigned char)*a++);
+        cb = str_ascii_tolower((unsigned char)*b++);
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (ca == '\0')
+            break;
+    }
+    return 0;
+}
+
+int strncasecmp(const char *a, const char *b, size_t n)
+{
+    unsigned char ca;
+    unsigned char cb;
+
+    while (n-- > 0U) {
+        ca = str_ascii_tolower((unsigned char)*a++);
+        cb = str_ascii_tolower((unsigned char)*b++);
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (ca == '\0')
+            break;
+    }
+    return 0;
 }
 
 char *strcpy(char *dst, const char *src)
@@ -281,4 +332,9 @@ char *strtok_r(char *str, const char *delim, char **saveptr)
     }
 
     return start;
+}
+
+void bcopy(const void *src, void *dst, size_t n)
+{
+    (void)memmove(dst, src, n);
 }

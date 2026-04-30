@@ -57,6 +57,7 @@ int    fstatat(int dirfd, const char *path, struct stat *st, int flags);
 int    mkdir(const char *path, mode_t mode);
 int    mkfifo(const char *path, mode_t mode);
 int    chmod(const char *path, mode_t mode);
+int    fchmod(int fd, mode_t mode);
 mode_t umask(mode_t mask);
 
 #endif

@@ -1,0 +1,6 @@
+#ifndef ENLILOS_MUSL_SYS_PARAM_H
+#define ENLILOS_MUSL_SYS_PARAM_H
+
+#define MAXPATHLEN 1024
+
+#endif

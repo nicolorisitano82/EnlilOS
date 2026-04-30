@@ -1,6 +1,8 @@
 #ifndef ENLILOS_MUSL_UNISTD_H
 #define ENLILOS_MUSL_UNISTD_H
 
+#define _POSIX_VERSION 200809L
+
 #include <stddef.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -35,13 +37,15 @@ int     isatty(int fd);
 int     access(const char *path, int mode);
 int     chdir(const char *path);
 char   *getcwd(char *buf, size_t size);
-int     gethostname(char *name, size_t len);
+int     gethostname(char *name, int len);
 long    sysconf(int name);
 int     pipe(int fds[2]);
 int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
 int     unlink(const char *path);
 int     usleep(unsigned int usec);
+unsigned int sleep(unsigned int sec);
+unsigned int alarm(unsigned int sec);
 pid_t   fork(void);
 int     setpgid(pid_t pid, pid_t pgid);
 pid_t   getpgid(pid_t pid);
@@ -52,6 +56,12 @@ int     tcsetpgrp(int fd, pid_t pgrp);
 pid_t   tcgetpgrp(int fd);
 int     execve(const char *path, char *const argv[], char *const envp[]);
 int     execvp(const char *file, char *const argv[]);
+int     killpg(pid_t pgrp, int sig);
+char   *ttyname(int fd);
+char   *getlogin(void);
+int     setuid(uid_t uid);
+int     setgid(gid_t gid);
+ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 void    _exit(int status) __attribute__((noreturn));
 
 #endif

@@ -338,6 +338,20 @@ void clearerr(FILE *stream)
     stream->flags &= ~(FILE_FLAG_EOF | FILE_FLAG_ERR);
 }
 
+int setvbuf(FILE *stream, char *buf, int mode, size_t size)
+{
+    (void)stream;
+    (void)buf;
+    (void)mode;
+    (void)size;
+    return 0;
+}
+
+void setlinebuf(FILE *stream)
+{
+    (void)setvbuf(stream, NULL, _IOLBF, 0U);
+}
+
 void rewind(FILE *stream)
 {
     if (!stream)
@@ -507,6 +521,17 @@ int fprintf(FILE *stream, const char *fmt, ...)
     return rc;
 }
 
+int sprintf(char *buf, const char *fmt, ...)
+{
+    va_list ap;
+    int     rc;
+
+    va_start(ap, fmt);
+    rc = vsnprintf(buf, (size_t)-1, fmt, ap);
+    va_end(ap);
+    return rc;
+}
+
 int perror(const char *s)
 {
     if (s && *s)
@@ -631,4 +656,14 @@ int puts(const char *s)
     if (fputc('\n', stdout) == EOF)
         return EOF;
     return rc;
+}
+
+int putc(int c, FILE *stream)
+{
+    return fputc(c, stream);
+}
+
+int putchar(int c)
+{
+    return fputc(c, stdout);
 }

@@ -21,8 +21,11 @@ struct tm {
 };
 
 time_t      time(time_t *tloc);
+struct tm  *localtime(const time_t *timep);
 struct tm  *localtime_r(const time_t *timep, struct tm *result);
 size_t      strftime(char *s, size_t max, const char *format, const struct tm *tm);
+char       *timezone(int zone, int dst);
+void        tzset(void);
 int nanosleep(const struct timespec *req, struct timespec *rem);
 
 #endif

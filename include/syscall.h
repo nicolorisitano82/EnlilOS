@@ -165,6 +165,9 @@
 #define SYS_SEMOP           222
 #define SYS_SEMCTL          223
 #define SYS_WLD_PRESENT     224   /* M12-01: compositor present (uva, w, h, stride) */
+#define SYS_KBD_GET_EVENT   225   /* M12-02: raw keyboard event for wld */
+#define SYS_MOUSE_GET_EVENT 226   /* M12-02: raw mouse event for wld */
+#define SYS_READLINKAT      227
 
 /* cmd valori (compatibili con Linux reboot(2)) */
 #define REBOOT_CMD_RESTART      0x01234567U

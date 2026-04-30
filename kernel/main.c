@@ -87,6 +87,7 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 #define BOOTCLI_MOUSE_EVENT_MAX 4U
 
 static int boot_persist_keyboard_layout(const char *name);
+static void bootcli_copy_trunc(char *dst, const char *src, uint32_t max_chars);
 #define BOOTCLI_MOUSE_LINE_MAX  52U
 
 static char      bootcli_lines[BOOTCLI_HISTORY_MAX][BOOTCLI_LINE_MAX + 1];
@@ -109,6 +110,7 @@ static uint32_t  bootcli_wld_pid;
 static uint32_t  bootcli_wm_pid;
 static uint32_t  bootcli_wayland_pid;
 static char      bootcli_shell_name[24];
+static char      bootcli_wayland_name[24];
 static volatile uint32_t bootcli_heartbeat;
 
 #define BOOTCLI_MODE_UI    0U
@@ -410,6 +412,16 @@ static int boot_ensure_wayland(uint64_t timeout_ms)
     return boot_wayland_ready();
 }
 
+static void bootcli_enter_wayland(uint32_t pid, const char *name)
+{
+    bootcli_wayland_pid = pid;
+    bootcli_mode = BOOTCLI_MODE_WAYLAND;
+    gpu_set_2d_present_enabled(true);
+    bootcli_copy_trunc(bootcli_wayland_name,
+                       name ? name : "wayland",
+                       sizeof(bootcli_wayland_name));
+}
+
 static void boot_seed_dir_if_missing(const char *path, uint32_t mode)
 {
     int rc;
@@ -484,6 +496,8 @@ static void boot_prepare_login_layout(void)
     boot_seed_dir_if_missing("/data/etc", 0755U);
     boot_seed_dir_if_missing("/data/home", 0755U);
     boot_seed_dir_if_missing("/data/home/user", 0755U);
+    boot_seed_dir_if_missing("/data/var", 0755U);
+    boot_seed_dir_if_missing("/data/tmp", 01777U);
     boot_seed_dir_if_missing("/data/home/user/.config", 0755U);
     boot_seed_dir_if_missing("/data/home/user/.config/arksh", 0755U);
     boot_seed_dir_if_missing("/data/home/user/.local", 0755U);
@@ -1525,7 +1539,7 @@ static void bootcli_render_term80(void)
     }
 
     bootcli_draw_text(term_x, term_y + term_h + 12U,
-                      "Comandi shell: arksh login nsh ls cat echo exec clear top cd pwd help exit",
+                      "Comandi shell: arksh bash login nsh ls cat echo exec clear top cd pwd help exit",
                       muted_color, panel_color);
 
     gpu_present_fullscreen();
@@ -1607,6 +1621,11 @@ static void bootcli_launch_real_arksh(int announce)
     bootcli_launch_shell(path, "arksh", "arksh", announce);
 }
 
+static void bootcli_launch_bash(int announce)
+{
+    bootcli_launch_shell("/bin/bash", "bash", "bash", announce);
+}
+
 static int bootcli_poll_shell(void)
 {
     sched_tcb_t *shell;
@@ -1653,6 +1672,7 @@ static int bootcli_poll_wayland(void)
     int32_t      exit_code = 0;
     int          have_exit_code = 0;
     char         line[BOOTCLI_LINE_MAX + 1];
+    char         wayland_name[sizeof(bootcli_wayland_name)];
 
     if (bootcli_mode != BOOTCLI_MODE_WAYLAND || bootcli_wayland_pid == 0U)
         return 0;
@@ -1663,12 +1683,16 @@ static int bootcli_poll_wayland(void)
     if (task && sched_task_get_exit_code(task, &exit_code) == 0)
         have_exit_code = 1;
 
+    bootcli_copy_trunc(wayland_name, bootcli_wayland_name, sizeof(wayland_name));
     bootcli_mode = BOOTCLI_MODE_UI;
     gpu_set_2d_present_enabled(true);
     bootcli_wayland_pid = 0U;
+    bootcli_wayland_name[0] = '\0';
 
     line[0] = '\0';
-    bootcli_buf_append(line, sizeof(line), "wmdemo terminato");
+    bootcli_buf_append(line, sizeof(line),
+                       (wayland_name[0] != '\0') ? wayland_name : "sessione Wayland");
+    bootcli_buf_append(line, sizeof(line), " terminata");
     if (have_exit_code) {
         bootcli_buf_append(line, sizeof(line), " (exit=");
         bootcli_buf_append_i32(line, sizeof(line), exit_code);
@@ -1769,7 +1793,7 @@ static void bootcli_render(void)
         } else {
             mouse_status[0] = '\0';
             bootcli_buf_append(mouse_status, sizeof(mouse_status),
-                               "Mouse guest non rilevato: run-gpu richiede virtio-mouse-device.");
+                               "Mouse guest non rilevato: run-gpu richiede virtio-tablet-device.");
         }
 
         bootcli_draw_text(48U, 150U, mouse_status,
@@ -1894,6 +1918,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("kbdlayout mostra il layout tastiera attivo");
         bootcli_push_line("loadkeys L attiva il layout tastiera (us/it) e prova a persisterlo");
         bootcli_push_line("arksh     lancia la shell arksh reale da /bin se presente");
+        bootcli_push_line("bash      lancia GNU bash nativa da /bin/bash");
         bootcli_push_line("login     rilancia la login shell bridge (/bin/arksh)");
         bootcli_push_line("nsh       lancia la shell ELF statica 80x25 di recovery");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
@@ -1920,7 +1945,9 @@ static void bootcli_execute_command(void)
         bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("sysvipcdemo lancia un ELF che verifica shmget/shmat/semget/semop");
         bootcli_push_line("wm        lancia il window manager Wayland v1");
+        bootcli_push_line("desktop   apre una sessione Wayland persistente con una finestra iniziale");
         bootcli_push_line("wmdemo    lancia due finestre Wayland per validare focus/close/layout");
+        bootcli_push_line("wtermdemo lancia una finestra terminal-style Wayland");
         bootcli_push_line("arkshplugin dlopen enlil.so, query+init plugin M8-08");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
@@ -2110,6 +2137,8 @@ static void bootcli_execute_command(void)
         }
     } else if (bootcli_streq(bootcli_input, "arksh")) {
         bootcli_launch_real_arksh(1);
+    } else if (bootcli_streq(bootcli_input, "bash")) {
+        bootcli_launch_bash(1);
     } else if (bootcli_streq(bootcli_input, "login")) {
         bootcli_launch_default_shell(1);
     } else if (bootcli_streq(bootcli_input, "nsh")) {
@@ -2378,6 +2407,22 @@ static void bootcli_execute_command(void)
             bootcli_buf_append_u32(line, sizeof(line), bootcli_wm_pid);
             bootcli_push_line(line);
         }
+    } else if (bootcli_streq(bootcli_input, "desktop") ||
+               bootcli_streq(bootcli_input, "wayland")) {
+        uint32_t     pid = 0U;
+        const char  *argv[3] = { "/WTERM.ELF", "--session", NULL };
+
+        if (!boot_restart_wayland(1500ULL)) {
+            bootcli_push_line("desktop: Wayland non pronto.");
+        } else if (elf64_spawn_path_argv("/WTERM.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            bootcli_enter_wayland(pid, "desktop");
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "desktop Wayland avviato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
     } else if (bootcli_streq(bootcli_input, "wmdemo")) {
         uint32_t pid = 0U;
 
@@ -2386,11 +2431,23 @@ static void bootcli_execute_command(void)
         } else if (elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &pid) < 0) {
             bootcli_push_line(elf64_last_error());
         } else {
-            bootcli_wayland_pid = pid;
-            bootcli_mode = BOOTCLI_MODE_WAYLAND;
-            gpu_set_2d_present_enabled(true);
+            bootcli_enter_wayland(pid, "wmdemo");
             line[0] = '\0';
             bootcli_buf_append(line, sizeof(line), "wm demo lanciato, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), pid);
+            bootcli_push_line(line);
+        }
+    } else if (bootcli_streq(bootcli_input, "wtermdemo")) {
+        uint32_t pid = 0U;
+
+        if (!boot_restart_wayland(1500ULL)) {
+            bootcli_push_line("wtermdemo: Wayland non pronto.");
+        } else if (elf64_spawn_path("/WTERM.ELF", "/WTERM.ELF", PRIO_HIGH, &pid) < 0) {
+            bootcli_push_line(elf64_last_error());
+        } else {
+            bootcli_enter_wayland(pid, "wtermdemo");
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "wterm demo lanciato, pid=");
             bootcli_buf_append_u32(line, sizeof(line), pid);
             bootcli_push_line(line);
         }
@@ -2635,6 +2692,7 @@ static void bootcli_init(void)
     bootcli_shell_pid = 0U;
     bootcli_wayland_pid = 0U;
     bootcli_shell_name[0] = '\0';
+    bootcli_wayland_name[0] = '\0';
 
     gpu_get_caps(&bootcli_caps);
     bootcli_graphics_mode = (bootcli_caps.vendor == GPU_VENDOR_VIRTIO) ? 1U : 0U;
@@ -2646,7 +2704,7 @@ static void bootcli_init(void)
         bootcli_push_line("Modalita framebuffer locale attiva.");
     bootcli_push_line("Login shell di default: /bin/arksh (bridge con fallback automatico a nsh).");
     bootcli_push_line("Digita 'help' e premi Invio per testare tastiera e comandi di recovery.");
-    bootcli_push_line("Prova anche: arksh, login, nsh, net, pwd, cd /data, ls, cat /BOOT.TXT.");
+    bootcli_push_line("Prova anche: arksh, bash, login, nsh, net, pwd, cd /data, ls, cat /BOOT.TXT.");
     {
         char line[96];
         line[0] = '\0';
@@ -2674,7 +2732,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-02e: prova 'tlsmtdemo' per TLS multi-thread, __thread ed errno per-thread.");
     bootcli_push_line("M11-05b: prova 'epolldemo' per epoll_create1(), ctl(), edge-trigger e timeout.");
     bootcli_push_line("M11-05c: prova 'sysvipcdemo' per shmget/shmat/shmdt e semget/semop/semctl.");
-    bootcli_push_line("M12-02: prova 'wmdemo' per due finestre Wayland e WM separato con tiling/focus.");
+    bootcli_push_line("M12-02: prova 'desktop' per una sessione Wayland, 'wmdemo' per due finestre demo.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
@@ -2917,7 +2975,7 @@ void kernel_main(void)
     uart_puts("[EnlilOS] Layout tastiera: ");
     uart_puts(keyboard_get_layout_name());
     uart_puts(" (usa 'loadkeys us|it' o 'kbdlayout')\n");
-    uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
+    uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'bash' apre GNU bash nativa, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
     uart_puts("[EnlilOS] Rete: usa 'net' per vedere MAC/link/counter del driver virtio-net\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");

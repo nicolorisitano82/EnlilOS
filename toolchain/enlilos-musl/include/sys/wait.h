@@ -1,6 +1,10 @@
 #ifndef ENLILOS_MUSL_SYS_WAIT_H
 #define ENLILOS_MUSL_SYS_WAIT_H
 
+#ifndef _POSIX_VERSION
+#define _POSIX_VERSION 200809L
+#endif
+
 #include <sys/types.h>
 
 #define WNOHANG     1

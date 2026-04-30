@@ -45,6 +45,15 @@ int close(int fd)
     return (int)libc_set_errno(user_svc1(SYS_CLOSE, fd));
 }
 
+ssize_t readlink(const char *path, char *buf, size_t bufsiz)
+{
+    return (ssize_t)libc_set_errno(user_svc4(SYS_READLINKAT,
+                                             AT_FDCWD,
+                                             (long)path,
+                                             (long)buf,
+                                             (long)bufsiz));
+}
+
 off_t lseek(int fd, off_t offset, int whence)
 {
     return (off_t)libc_set_errno(user_svc3(SYS_LSEEK, fd, (long)offset, whence));
@@ -168,6 +177,15 @@ int kill(pid_t pid, int sig)
     return (int)libc_set_errno(user_svc2(SYS_KILL, pid, sig));
 }
 
+int killpg(pid_t pgrp, int sig)
+{
+    if (pgrp <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return kill(-pgrp, sig);
+}
+
 sighandler_t signal(int sig, sighandler_t handler)
 {
     struct sigaction act;
@@ -214,10 +232,29 @@ int chdir(const char *path)
 
 char *getcwd(char *buf, size_t size)
 {
-    long rc = user_svc2(SYS_GETCWD, (long)buf, (long)size);
+    char  *owned = NULL;
+    size_t cap = size;
+    long   rc;
+
+    if (!buf) {
+        if (cap == 0U)
+            cap = 4096U;
+        owned = (char *)malloc(cap);
+        if (!owned) {
+            errno = ENOMEM;
+            return NULL;
+        }
+        buf = owned;
+    } else if (cap == 0U) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    rc = user_svc2(SYS_GETCWD, (long)buf, (long)cap);
 
     if (rc < 0) {
         (void)libc_set_errno(rc);
+        free(owned);
         return NULL;
     }
     return buf;

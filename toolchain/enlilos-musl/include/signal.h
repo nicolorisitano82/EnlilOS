@@ -91,6 +91,7 @@ static inline int sigismember(const sigset_t *set, int sig)
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 int kill(pid_t pid, int sig);
+int killpg(pid_t pgrp, int sig);
 sighandler_t signal(int sig, sighandler_t handler);
 
 #endif

@@ -355,7 +355,9 @@ printf_builtin (WORD_LIST *list)
 
   garglist = orig_arglist = list->next;
 
+#if defined (HANDLE_MULTIBYTE)
   mb_cur_max = MB_CUR_MAX;
+#endif
 
   /* Basic algorithm is to scan the format string for conversion
      specifications -- once one is found, find out if the field
@@ -1175,7 +1177,8 @@ tescape (char *estart, char *cp, int *lenp, int *sawc)
 static char *
 bexpand (char *string, size_t len, int *sawc, size_t *lenp)
 {
-  int temp, c;
+  int temp;
+  char c;
   char *ret, *r, *s, *send;
 #if defined (HANDLE_MULTIBYTE)
   char mbch[25];

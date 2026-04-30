@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -22,6 +23,17 @@ typedef struct {
 
 static mode_t g_umask = 0022U;
 extern char **environ;
+static char g_login_name[] = "user";
+static char g_tty_name[] = "/dev/tty";
+static struct passwd g_passwd = {
+    .pw_name = g_login_name,
+    .pw_passwd = (char *)"x",
+    .pw_uid = 0U,
+    .pw_gid = 0U,
+    .pw_gecos = (char *)"EnlilOS User",
+    .pw_dir = (char *)"/home/user",
+    .pw_shell = (char *)"/bin/bash",
+};
 static struct rlimit g_rlimits[10] = {
     [RLIMIT_CPU]     = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_FSIZE]   = { RLIM_INFINITY, RLIM_INFINITY },
@@ -166,6 +178,27 @@ int chmod(const char *path, mode_t mode)
     return -1;
 }
 
+int tcflow(int fd, int action)
+{
+    if (!isatty(fd)) {
+        if (errno == 0)
+            errno = ENOTTY;
+        return -1;
+    }
+    if (action != TCOOFF && action != TCOON) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int fchmod(int fd, mode_t mode)
+{
+    (void)fd;
+    (void)mode;
+    return 0;
+}
+
 int access(const char *path, int mode)
 {
     struct stat st;
@@ -196,15 +229,15 @@ int access(const char *path, int mode)
     return 0;
 }
 
-int gethostname(char *name, size_t len)
+int gethostname(char *name, int len)
 {
     static const char host[] = "enlilos";
 
-    if (!name || len == 0U) {
+    if (!name || len <= 0) {
         errno = EINVAL;
         return -1;
     }
-    if (len <= sizeof(host) - 1U) {
+    if ((size_t)len <= sizeof(host) - 1U) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -264,6 +297,22 @@ int usleep(unsigned int usec)
     return nanosleep(&ts, NULL);
 }
 
+unsigned int sleep(unsigned int sec)
+{
+    struct timespec ts;
+
+    ts.tv_sec = (long)sec;
+    ts.tv_nsec = 0L;
+    (void)nanosleep(&ts, NULL);
+    return 0U;
+}
+
+unsigned int alarm(unsigned int sec)
+{
+    (void)sec;
+    return 0U;
+}
+
 int execvp(const char *file, char *const argv[])
 {
     static const char default_path[] = "/bin:/usr/bin:/usr/local/bin";
@@ -301,6 +350,56 @@ int execvp(const char *file, char *const argv[])
 
     errno = ENOENT;
     return -1;
+}
+
+char *ttyname(int fd)
+{
+    if (fd < 0 || !isatty(fd)) {
+        errno = ENOTTY;
+        return NULL;
+    }
+    return g_tty_name;
+}
+
+char *getlogin(void)
+{
+    return g_login_name;
+}
+
+int setuid(uid_t uid)
+{
+    if (uid != getuid() && uid != geteuid()) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+int setgid(gid_t gid)
+{
+    if (gid != getgid() && gid != getegid()) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+struct passwd *getpwuid(uid_t uid)
+{
+    if (uid != g_passwd.pw_uid) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return &g_passwd;
+}
+
+struct passwd *getpwnam(const char *name)
+{
+    if (!name || strcmp(name, g_passwd.pw_name) != 0) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return &g_passwd;
 }
 
 mode_t umask(mode_t mask)

@@ -340,7 +340,7 @@ strftime(char *s, size_t maxsize, const char *format, const struct tm *timeptr)
 #ifndef HAVE_TM_NAME
 #ifndef HAVE_TZNAME
 #ifndef __CYGWIN__
-	extern char *timezone();
+	extern char *timezone(int, int);
 	struct timeval tv;
 	struct timezone zone;
 #endif /* __CYGWIN__ */

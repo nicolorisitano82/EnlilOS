@@ -109,5 +109,6 @@
 #define SYS_WLD_PRESENT     224
 
 #define MAP_FAILED_VA ((unsigned long)(-1L))
+#define SYS_READLINKAT      227
 
 #endif

@@ -1,8 +1,12 @@
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 extern char **environ;
 
@@ -237,6 +241,47 @@ static char *env_make_entry(const char *name, const char *value)
     return entry;
 }
 
+static unsigned long g_rand_state = 1UL;
+static unsigned long g_tmp_counter = 0UL;
+
+static unsigned long enlil_rand_next(void)
+{
+    g_rand_state = g_rand_state * 1103515245UL + 12345UL;
+    return g_rand_state;
+}
+
+static int tmp_template_tail(char *template_name)
+{
+    size_t len;
+
+    if (!template_name) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    len = strlen(template_name);
+    if (len < 6U || strcmp(template_name + len - 6U, "XXXXXX") != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return (int)(len - 6U);
+}
+
+static void tmp_fill_suffix(char *tail)
+{
+    static const char alphabet[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    unsigned long value = enlil_rand_next() ^ (unsigned long)getpid() ^ g_tmp_counter++;
+
+    for (int i = 0; i < 6; i++) {
+        tail[i] = alphabet[value % (sizeof(alphabet) - 1U)];
+        value /= (sizeof(alphabet) - 1U);
+        if (value == 0UL)
+            value = enlil_rand_next() ^ ((unsigned long)(i + 1) << 8);
+    }
+}
+
 int atoi(const char *nptr)
 {
     return (int)strtol(nptr, NULL, 10);
@@ -250,6 +295,18 @@ long atol(const char *nptr)
 double atof(const char *nptr)
 {
     return strtod(nptr, NULL);
+}
+
+int rand(void)
+{
+    return (int)(enlil_rand_next() & 0x7fffffffUL);
+}
+
+void srand(unsigned int seed)
+{
+    g_rand_state = (unsigned long)seed;
+    if (g_rand_state == 0UL)
+        g_rand_state = 1UL;
 }
 
 long strtol(const char *nptr, char **endptr, int base)
@@ -338,6 +395,76 @@ double strtod(const char *nptr, char **endptr)
         value = -value;
     (void)start;
     return value;
+}
+
+char *mktemp(char *template_name)
+{
+    int offset;
+
+    offset = tmp_template_tail(template_name);
+    if (offset < 0)
+        return NULL;
+
+    for (int attempt = 0; attempt < 256; attempt++) {
+        struct stat st;
+
+        tmp_fill_suffix(template_name + offset);
+        if (lstat(template_name, &st) < 0) {
+            if (errno == ENOENT)
+                return template_name;
+            return NULL;
+        }
+    }
+
+    errno = EEXIST;
+    if (offset >= 0)
+        memcpy(template_name + offset, "XXXXXX", 6U);
+    return NULL;
+}
+
+int mkstemp(char *template_name)
+{
+    int offset;
+
+    offset = tmp_template_tail(template_name);
+    if (offset < 0)
+        return -1;
+
+    for (int attempt = 0; attempt < 256; attempt++) {
+        int fd;
+
+        tmp_fill_suffix(template_name + offset);
+        fd = open(template_name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd >= 0)
+            return fd;
+        if (errno != EEXIST)
+            return -1;
+    }
+
+    errno = EEXIST;
+    memcpy(template_name + offset, "XXXXXX", 6U);
+    return -1;
+}
+
+char *mkdtemp(char *template_name)
+{
+    int offset;
+
+    offset = tmp_template_tail(template_name);
+    if (offset < 0)
+        return NULL;
+
+    for (int attempt = 0; attempt < 256; attempt++) {
+        tmp_fill_suffix(template_name + offset);
+        if (mkdir(template_name, 0700) == 0)
+            return template_name;
+        if (errno != EEXIST)
+            return NULL;
+    }
+
+    errno = EEXIST;
+    memcpy(template_name + offset, "XXXXXX", 6U);
+    return NULL;
 }
 
 char *getenv(const char *name)

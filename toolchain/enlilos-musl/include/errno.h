@@ -1,13 +1,17 @@
 #ifndef ENLILOS_MUSL_ERRNO_H
 #define ENLILOS_MUSL_ERRNO_H
 
-extern __thread int errno;
+int *__errno_location(void);
+
+#define errno (*__errno_location())
 
 #define EPERM               1
 #define ENOENT              2
 #define ESRCH               3
 #define EINTR               4
 #define EIO                 5
+#define E2BIG               7
+#define ENOEXEC             8
 #define EBADF               9
 #define ECHILD              10
 #define EAGAIN              11

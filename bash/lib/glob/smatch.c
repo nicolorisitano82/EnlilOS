@@ -22,6 +22,7 @@
 #include <config.h>
 
 #include <stdio.h>	/* for debugging */
+#include <string.h>
 				
 #include "strmatch.h"
 #include <chartypes.h>
@@ -35,6 +36,8 @@
 #if !defined (errno)
 extern int errno;
 #endif
+
+extern int locale_utf8locale;
 
 #if FNMATCH_EQUIV_FALLBACK
 /* We don't include <fnmatch.h> in order to avoid namespace collisions; the

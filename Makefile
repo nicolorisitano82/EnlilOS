@@ -133,6 +133,16 @@ ARKSH_SMOKE_ELF       = $(ARKSH_SMOKE_BUILD)/arkshsmoke.elf
 ARKSH_BOOT_ELF        = toolchain/smoke/arksh_boot.elf
 ARKSH_SELFTEST_ELF    = toolchain/smoke/arksh_selftest.elf
 ARKSH_REAL_ELF        = $(ARKSH_BUILD_DIR)/arksh
+BASH_DIR             ?= $(CURDIR)/bash
+BASH_BUILD_DIR       ?= toolchain/build/bash-src
+BASH_CONFIG_STAMP     = $(BASH_BUILD_DIR)/.enlilos-configured
+BASH_NATIVE_ELF       = $(BASH_BUILD_DIR)/bash
+BASH_PORT_SRCS        = $(BASH_DIR)/bashline.c \
+                        $(BASH_DIR)/builtins/printf.def \
+                        $(BASH_DIR)/lib/glob/smatch.c \
+                        $(BASH_DIR)/lib/sh/netopen.c \
+                        $(BASH_DIR)/lib/sh/strftime.c
+BASH_NATIVE_DEP       = $(if $(wildcard $(BASH_DIR)/configure),$(BASH_NATIVE_ELF),)
 LINUX_COMPAT_STAGE_DIR ?= toolchain/build/linux-compat
 LINUX_COMPAT_STAGE_MARK = $(LINUX_COMPAT_STAGE_DIR)/.staged
 MUSL_SYSROOT_INC      = $(MUSL_SYSROOT)/usr/include
@@ -148,10 +158,13 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/fcntl.h \
                         $(MUSL_ROOT)/include/fnmatch.h \
                         $(MUSL_ROOT)/include/glob.h \
+                        $(MUSL_ROOT)/include/locale.h \
                         $(MUSL_ROOT)/include/math.h \
                         $(MUSL_ROOT)/include/pthread.h \
+                        $(MUSL_ROOT)/include/pwd.h \
                         $(MUSL_ROOT)/include/regex.h \
                         $(MUSL_ROOT)/include/semaphore.h \
+                        $(MUSL_ROOT)/include/setjmp.h \
                         $(MUSL_ROOT)/include/signal.h \
                         $(MUSL_ROOT)/include/stdio.h \
                         $(MUSL_ROOT)/include/stdlib.h \
@@ -160,11 +173,16 @@ MUSL_HEADER_SRCS      = $(MUSL_ROOT)/include/errno.h \
                         $(MUSL_ROOT)/include/termios.h \
                         $(MUSL_ROOT)/include/toon.h \
                         $(MUSL_ROOT)/include/unistd.h \
+                        $(MUSL_ROOT)/include/wchar.h \
+                        $(MUSL_ROOT)/include/wctype.h \
                         $(MUSL_ROOT)/include/sys/ioctl.h \
                         $(MUSL_ROOT)/include/sys/resource.h \
                         $(MUSL_ROOT)/include/sys/reboot.h \
                         $(MUSL_ROOT)/include/sys/mman.h \
+                        $(MUSL_ROOT)/include/sys/param.h \
+                        $(MUSL_ROOT)/include/sys/select.h \
                         $(MUSL_ROOT)/include/sys/stat.h \
+                        $(MUSL_ROOT)/include/sys/times.h \
                         $(MUSL_ROOT)/include/sys/time.h \
                         $(MUSL_ROOT)/include/sys/types.h \
                         $(MUSL_ROOT)/include/sys/uio.h \
@@ -185,15 +203,18 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/epoll.c \
                         $(MUSL_ROOT)/src/fnmatch.c \
                         $(MUSL_ROOT)/src/glob.c \
+                        $(MUSL_ROOT)/src/locale.c \
                         $(MUSL_ROOT)/src/posix.c \
                         $(MUSL_ROOT)/src/pthread.c \
                         $(MUSL_ROOT)/src/regex.c \
                         $(MUSL_ROOT)/src/semaphore.c \
+                        $(MUSL_ROOT)/src/select.c \
                         $(MUSL_ROOT)/src/string.c \
                         $(MUSL_ROOT)/src/stdlib.c \
                         $(MUSL_ROOT)/src/syscall.c \
                         $(MUSL_ROOT)/src/time.c \
                         $(MUSL_ROOT)/src/toon.c \
+                        $(MUSL_ROOT)/src/wchar.c \
                         $(MUSL_ROOT)/src/malloc.c \
                         $(MUSL_ROOT)/src/stdio.c \
                         $(MUSL_ROOT)/src/socket.c \
@@ -201,7 +222,9 @@ MUSL_LIBC_SRCS        = $(MUSL_ROOT)/src/errno.c \
                         $(MUSL_ROOT)/src/reboot.c \
                         $(MUSL_ROOT)/src/pty.c \
                         $(MUSL_ROOT)/src/shm.c
-MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS))
+MUSL_LIBC_ASM_SRCS    = $(MUSL_ROOT)/src/setjmp.S
+MUSL_LIBC_OBJS        = $(patsubst $(MUSL_ROOT)/src/%.c,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_SRCS)) \
+                        $(patsubst $(MUSL_ROOT)/src/%.S,$(MUSL_BUILD)/libc/%.o,$(MUSL_LIBC_ASM_SRCS))
 MUSL_LIBC_A           = $(MUSL_SYSROOT_LIB)/libc.a
 MUSL_LIBDL_A          = $(MUSL_SYSROOT_LIB)/libdl.a
 MUSL_SYSROOT_STAMP    = $(MUSL_BUILD)/sysroot.stamp
@@ -229,7 +252,8 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/arksh_plugin_demo.c \
                         toolchain/smoke/wayland_demo.c \
                         toolchain/smoke/wm_manager.c \
-                        toolchain/smoke/wm_demo.c
+                        toolchain/smoke/wm_demo.c \
+                        toolchain/smoke/wterm_demo.c
 MUSL_SMOKE_ELFS       = $(MUSL_SMOKE_SRCS:.c=.elf)
 ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)) \
                         -DCMAKE_BUILD_TYPE=Release \
@@ -237,6 +261,7 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DARKSH_PLUGINS=ON \
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),bin/arksh.real=$(ARKSH_REAL_ELF),)
+BASH_NATIVE_INITRD    = $(if $(wildcard $(BASH_NATIVE_ELF)),BASH.ELF=$(BASH_NATIVE_ELF) bin/bash=$(BASH_NATIVE_ELF),)
 LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
 BASH_LINUX_BINARY     = bash-linux/bash-linux-aarch64
 BASH_LINUX_INITRD     = $(if $(wildcard $(BASH_LINUX_BINARY)),BASH-LINUX.ELF=$(BASH_LINUX_BINARY),)
@@ -268,7 +293,7 @@ PASS1_SELFTEST_KERNEL = enlil-selftest.pass1.elf
 
 # === Targets ===
 
-.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke arksh-configure arksh-build arksh-smoke linux-compat-stage linux-compat-check
+.PHONY: all clean run run-fb run-gpu run-blk debug dump disk-ready disk-reset disk-fsck test test-build musl-sysroot musl-smoke arksh-configure arksh-build arksh-smoke bash-configure bash-build linux-compat-stage linux-compat-check
 
 all: $(KERNEL) $(KERNEL_BIN)
 	@echo ""
@@ -313,6 +338,11 @@ $(MUSL_BUILD)/libc/%.o: $(MUSL_ROOT)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -Wall -Wextra -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -mcpu=cortex-a72 -I$(MUSL_ROOT)/include -Iinclude -c $< -o $@
+
+$(MUSL_BUILD)/libc/%.o: $(MUSL_ROOT)/src/%.S
+	@mkdir -p $(dir $@)
+	$(CC) -ffreestanding -nostdlib -nostartfiles -mcpu=cortex-a72 \
+	      -I$(MUSL_ROOT)/include -Iinclude -c $< -o $@
 
 $(MUSL_SYSROOT_LIB)/crt1.o: user/crt1.o
 	@mkdir -p $(MUSL_SYSROOT_LIB)
@@ -405,6 +435,73 @@ arksh-build: arksh-configure
 arksh-smoke: $(ARKSH_SMOKE_ELF)
 	@echo "Smoke CMake/arksh pronta: $(ARKSH_SMOKE_ELF)"
 
+$(BASH_CONFIG_STAMP): $(BASH_DIR)/configure $(BASH_DIR)/Makefile.in \
+                      $(BASH_PORT_SRCS) $(MUSL_SYSROOT_STAMP) \
+                      $(MUSL_WRAPPER_GCC) Makefile
+	@if [ ! -d "$(BASH_DIR)" ]; then \
+		echo "bash-configure: sorgente bash non trovato in $(BASH_DIR)"; \
+		echo "  atteso un checkout completo in ./bash"; \
+		exit 1; \
+	fi
+	@mkdir -p "$(BASH_BUILD_DIR)"
+	cd "$(BASH_BUILD_DIR)" && \
+	env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS \
+	    ac_cv_func_killpg=yes \
+	    bash_cv_getcwd_malloc=yes \
+	    bash_cv_func_sigsetjmp=present \
+	    bash_cv_job_control_missing=present \
+	    "$(abspath $(BASH_DIR))/configure" \
+	        --host=aarch64-unknown-linux-musl \
+	        --build="$$(cd "$(BASH_DIR)" && ./support/config.guess)" \
+	        --disable-nls \
+	        --without-bash-malloc \
+	        CC="$(abspath $(MUSL_WRAPPER_GCC))" \
+	        AR="$(abspath $(MUSL_WRAPPER_AR))" \
+	        RANLIB="$(abspath $(MUSL_WRAPPER_RANLIB))" \
+	        CC_FOR_BUILD="cc -include sys/types.h" \
+	        CPPFLAGS="-include sys/types.h" \
+	        CFLAGS="-g -O2 -fcommon" \
+	        CFLAGS_FOR_BUILD="-g -DCROSS_COMPILING -fcommon" \
+	        LDFLAGS="-Wl,--allow-multiple-definition"
+	@for macro in \
+		HAVE_BCOPY HAVE_GETENV HAVE_MEMSET HAVE_MKDTEMP HAVE_MKFIFO \
+		HAVE_MKSTEMP HAVE_SNPRINTF HAVE_STRCASECMP HAVE_STRNLEN \
+		HAVE_STRSTR HAVE_STRTOD HAVE_TZSET HAVE_VSNPRINTF \
+		HAVE_SNPRINTF_RETVAL_C99 HAVE_SNPRINTF_TRUNCATION_C99 \
+		HAVE_POSIX_SIGNALS HAVE_POSIX_SIGSETJMP JOB_CONTROL; do \
+		if grep -q "^#define $$macro " "$(BASH_BUILD_DIR)/config.h"; then \
+			perl -0pi -e "s@^#define $$macro .*@#define $$macro 1@m" "$(BASH_BUILD_DIR)/config.h"; \
+		else \
+			perl -0pi -e "s@/\\* #undef $$macro \\*/@#define $$macro 1@g" "$(BASH_BUILD_DIR)/config.h"; \
+			grep -q "^#define $$macro " "$(BASH_BUILD_DIR)/config.h" || \
+				echo "#define $$macro 1" >> "$(BASH_BUILD_DIR)/config.h"; \
+		fi; \
+	done
+	@perl -0pi -e 's@^#define JOB_CONTROL_MISSING .*@/* #undef JOB_CONTROL_MISSING */@m' \
+		"$(BASH_BUILD_DIR)/config.h"
+	@perl -0pi -e 's@^#define GETCWD_BROKEN .*@/* #undef GETCWD_BROKEN */@m' \
+		"$(BASH_BUILD_DIR)/config.h"
+	@perl -0pi -e 's@/\\* #undef HAVE_GETCWD \\*/@#define HAVE_GETCWD 1@g' \
+		"$(BASH_BUILD_DIR)/config.h"
+	@perl -0pi -e 's@^JOBS_O = nojobs\.o$$@JOBS_O = jobs.o@m' \
+		"$(BASH_BUILD_DIR)/Makefile"
+	@touch $@
+
+$(BASH_NATIVE_ELF): $(BASH_CONFIG_STAMP) $(BASH_PORT_SRCS) \
+                    $(MUSL_SYSROOT_STAMP) $(MUSL_WRAPPER_GCC)
+	$(MAKE) -C "$(BASH_BUILD_DIR)" bash \
+		CC_FOR_BUILD='cc -include sys/types.h' \
+		CPPFLAGS='-include sys/types.h' \
+		CFLAGS='-g -O2 -fcommon' \
+		CFLAGS_FOR_BUILD='-g -DCROSS_COMPILING -fcommon' \
+		LDFLAGS='-Wl,--allow-multiple-definition'
+
+bash-configure: $(BASH_CONFIG_STAMP)
+	@echo "Bash configurata in $(BASH_BUILD_DIR)"
+
+bash-build: $(BASH_NATIVE_ELF)
+	@echo "Bash EnlilOS pronta: $(BASH_NATIVE_ELF)"
+
 linux-compat-stage:
 	@if [ -z "$(LINUX_ROOT_DIR)" ]; then \
 		echo "linux-compat-stage: imposta LINUX_ROOT_DIR=/percorso/root-linux-aarch64"; \
@@ -474,7 +571,8 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
                 initrd/hello_manifest.toon \
                 $(USER_ELFS) $(USER_SHARED_LIBS) $(MUSL_SMOKE_ELFS) \
                 $(ARKSH_SMOKE_ELF) $(ARKSH_SELFTEST_ELF) \
-                $(wildcard $(ARKSH_REAL_ELF)) $(wildcard $(LINUX_COMPAT_STAGE_MARK))
+                $(BASH_NATIVE_DEP) $(wildcard $(ARKSH_REAL_ELF)) \
+                $(wildcard $(LINUX_COMPAT_STAGE_MARK))
 	python3 tools/mkinitrd.py $@ \
 		README.TXT=initrd/README.TXT \
 		BOOT.TXT=initrd/BOOT.TXT \
@@ -528,6 +626,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		WLDDEMO.ELF=toolchain/smoke/wayland_demo.elf \
 		WM.ELF=toolchain/smoke/wm_manager.elf \
 		WMDEMO.ELF=toolchain/smoke/wm_demo.elf \
+		WTERM.ELF=toolchain/smoke/wterm_demo.elf \
 		MMAPDEMO.ELF=user/mmap_demo.elf \
 		JOBDEMO.ELF=user/job_demo.elf \
 		NSDEMO.ELF=user/ns_demo.elf \
@@ -565,11 +664,13 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		ARKSHBOOT.ELF=$(ARKSH_SELFTEST_ELF) \
 		ARKSHSMK.ELF=$(ARKSH_SMOKE_ELF) \
 		bin/arksh=$(ARKSH_BOOT_ELF) \
+		$(BASH_NATIVE_INITRD) \
 		bin/enlil-run=toolchain/smoke/enlil_run.elf \
 		bin/nsh=user/nsh.elf \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
 		bin/wld=user/wld.elf \
 		bin/wm=toolchain/smoke/wm_manager.elf \
+		bin/wterm=toolchain/smoke/wterm_demo.elf \
 		$(ARKSH_REAL_INITRD) \
 		usr/bin/epolldemo=toolchain/smoke/epoll_demo.elf \
 		usr/bin/loadkeys=toolchain/smoke/loadkeys.elf \
@@ -676,7 +777,7 @@ run-gpu: $(KERNEL)
 		-device virtio-net-device,netdev=net0 \
 		-device virtio-gpu-device \
 		-device virtio-keyboard-device \
-		-device virtio-mouse-device \
+		-device virtio-tablet-device \
 		-display default,show-cursor=off \
 		-monitor none \
 		-serial stdio \
@@ -748,7 +849,7 @@ run-blk: $(KERNEL) disk-ready
 		-device virtio-net-device,netdev=net0 \
 		-device virtio-gpu-device \
 		-device virtio-keyboard-device \
-		-device virtio-mouse-device \
+		-device virtio-tablet-device \
 		-drive format=raw,file=disk.img,if=none,id=blk0 \
 		-device virtio-blk-device,drive=blk0 \
 		-display default,show-cursor=off \
@@ -799,5 +900,6 @@ clean:
 	      $(PASS1_KERNEL) $(PASS1_SELFTEST_KERNEL) \
 	      $(USER_OBJS) $(USER_ELFS) $(USER_EMBEDOBJS) $(INITRD_CPIO) \
 	      $(KSYMS_DATA) $(KSYMS_SELFTEST_DATA) $(MUSL_SMOKE_ELFS)
-	rm -rf $(MUSL_BUILD) $(MUSL_SYSROOT) $(ARKSH_BUILD_DIR) $(ARKSH_SMOKE_BUILD)
+	rm -rf $(MUSL_BUILD) $(MUSL_SYSROOT) $(ARKSH_BUILD_DIR) $(ARKSH_SMOKE_BUILD) \
+	      $(BASH_BUILD_DIR)
 	@echo "Clean completato."

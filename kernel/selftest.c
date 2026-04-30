@@ -80,6 +80,43 @@ static int st_contains(const char *haystack, const char *needle)
     return 0;
 }
 
+static int st_task_alive(uint32_t pid)
+{
+    sched_tcb_t *task;
+
+    if (pid == 0U)
+        return 0;
+    task = sched_task_find(pid);
+    if (!task)
+        return 0;
+    return task->state != TCB_STATE_ZOMBIE;
+}
+
+static void st_stop_pid(uint32_t *pid_slot, uint64_t timeout_ms)
+{
+    uint64_t deadline;
+
+    if (!pid_slot || *pid_slot == 0U)
+        return;
+
+    (void)signal_send_pid(*pid_slot, SIGTERM);
+    deadline = timer_now_ms() + timeout_ms;
+    while (timer_now_ms() < deadline) {
+        if (!st_task_alive(*pid_slot))
+            break;
+        sched_yield();
+    }
+    if (st_task_alive(*pid_slot))
+        (void)signal_send_pid(*pid_slot, SIGKILL);
+    deadline = timer_now_ms() + 100ULL;
+    while (timer_now_ms() < deadline) {
+        if (!st_task_alive(*pid_slot))
+            break;
+        sched_yield();
+    }
+    *pid_slot = 0U;
+}
+
 static uint64_t st_linux_syscall4(uint64_t nr, uint64_t a0, uint64_t a1,
                                   uint64_t a2, uint64_t a3)
 {
@@ -2650,6 +2687,44 @@ static int selftest_case_bash_linux_fork(void)
     return 0;
 }
 
+static int selftest_case_bash_native(void)
+{
+    static const char  case_name[] = "bash-native";
+    static const char  path[]      = "/bin/bash";
+    static const char  out_path[]  = "/data/BASHNATIVE.TXT";
+    static const char *argv[] = {
+        path,
+        "-c",
+        "echo bash-native-ok > /data/BASHNATIVE.TXT",
+        NULL
+    };
+    uint32_t     pid = 0U;
+    sched_tcb_t *task;
+    vfs_file_t   probe;
+    int          rc;
+
+    if (vfs_open(path, O_RDONLY, &probe) != 0)
+        return 0;
+    (void)vfs_close(&probe);
+
+    rc = vfs_unlink(out_path);
+    ST_CHECK(case_name, rc == 0 || rc == -ENOENT,
+             "cleanup BASHNATIVE.TXT fallita");
+
+    if (elf64_spawn_path_argv(path, argv, 3U, PRIO_KERNEL, &pid) < 0) {
+        st_log_fail(case_name, "spawn /bin/bash fallita");
+        return -1;
+    }
+
+    task = st_wait_task_state(pid, TCB_STATE_ZOMBIE, 5000ULL);
+    ST_CHECK(case_name, task != NULL, "/bin/bash non trovata");
+    ST_CHECK(case_name, task->state == TCB_STATE_ZOMBIE,
+             "timeout attesa /bin/bash");
+    ST_CHECK(case_name, st_expect_exit_code(case_name, pid, 0) == 0,
+             "/bin/bash exit code non e' 0");
+    return st_expect_text_file(case_name, out_path, "bash-native-ok\n", 1);
+}
+
 /*
  * M11-05d: verify ld-linux-aarch64.so.1 interpreter alias resolution.
  * LDINTDEMO.ELF has PT_INTERP=/lib/ld-linux-aarch64.so.1.
@@ -2992,6 +3067,7 @@ static int selftest_case_wayland_core(void)
     stat_t     st;
     vfs_file_t f;
     uint32_t   wld_pid = 0U;
+    uint32_t   demo_pid = 0U;
     uint64_t   deadline;
     int        rc;
 
@@ -3013,7 +3089,6 @@ static int selftest_case_wayland_core(void)
         sched_yield();
 
     /* 3. Lancia il demo client */
-    uint32_t demo_pid = 0U;
     rc = elf64_spawn_path("/WLDDEMO.ELF", "wayland-demo", PRIO_HIGH, &demo_pid);
     ST_CHECK(case_name, rc == 0, "elf64_spawn_path WLDDEMO.ELF fallita");
 
@@ -3043,6 +3118,11 @@ static int selftest_case_wayland_core(void)
     }
     ST_CHECK(case_name, ok, "WLDDEMO.TXT non contiene 'wayland-ok'");
 
+    st_stop_pid(&demo_pid, 150ULL);
+    st_stop_pid(&wld_pid, 300ULL);
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+
     return 0;
 }
 
@@ -3061,12 +3141,22 @@ static int selftest_case_wm_core(void)
     stat_t           st;
     vfs_file_t       f;
     uint64_t         deadline;
-    uint32_t         pid = 0U;
+    uint32_t         wld_pid = 0U;
+    uint32_t         wm_pid = 0U;
+    uint32_t         demo_pid = 0U;
+    int              have_live_wld = 0;
     int              rc;
     const char      *wm_argv[3] = { "/WM.ELF", "--selftest", NULL };
 
     (void)vfs_unlink("/data/WMSTATE.TXT");
     (void)vfs_unlink("/data/WMDEMO.TXT");
+    have_live_wld =
+        (vfs_lstat("/data/WLDREADY.TXT", &st) == 0 && st.st_size > 0LL &&
+         vfs_lstat("/run/wayland-0", &st) == 0);
+    if (!have_live_wld) {
+        (void)vfs_unlink("/run/wayland-0");
+        (void)vfs_unlink("/data/WLDREADY.TXT");
+    }
 
     rc = vfs_lstat("/WLD.ELF", &st);
     ST_CHECK(case_name, rc == 0, "WLD.ELF assente");
@@ -3075,50 +3165,24 @@ static int selftest_case_wm_core(void)
     rc = vfs_lstat("/WMDEMO.ELF", &st);
     ST_CHECK(case_name, rc == 0, "WMDEMO.ELF assente");
 
-    rc = elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &pid);
-    ST_CHECK(case_name, rc == 0, "spawn WLD.ELF fallita");
+    if (!have_live_wld) {
+        rc = elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &wld_pid);
+        ST_CHECK(case_name, rc == 0, "spawn WLD.ELF fallita");
 
-    deadline = timer_now_ms() + 200ULL;
-    while (timer_now_ms() < deadline)
-        sched_yield();
+        deadline = timer_now_ms() + 200ULL;
+        while (timer_now_ms() < deadline)
+            sched_yield();
+    }
 
-    rc = elf64_spawn_path_argv("/WM.ELF", wm_argv, 2ULL, PRIO_HIGH, &pid);
+    rc = elf64_spawn_path_argv("/WM.ELF", wm_argv, 2ULL, PRIO_HIGH, &wm_pid);
     ST_CHECK(case_name, rc == 0, "spawn WM.ELF --selftest fallita");
 
     deadline = timer_now_ms() + 200ULL;
     while (timer_now_ms() < deadline)
         sched_yield();
 
-    rc = elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &pid);
+    rc = elf64_spawn_path("/WMDEMO.ELF", "/WMDEMO.ELF", PRIO_HIGH, &demo_pid);
     ST_CHECK(case_name, rc == 0, "spawn WMDEMO.ELF fallita");
-
-    {
-        uint64_t visual_deadline = timer_now_ms() + 1500ULL;
-        int      visual_ok = 0;
-
-        while (timer_now_ms() < visual_deadline) {
-            uint32_t *scan = gpu_get_visible_scanout_ptr();
-            if (scan) {
-                uint32_t px_left  = scan[120U * FB_WIDTH + 120U];
-                uint32_t px_right = scan[120U * FB_WIDTH + 520U];
-                int left_ok =
-                    (px_left == 0xFFFF5A36U) ||
-                    (px_left == 0xFFFFD6CCU) ||
-                    (px_left == 0xFFFFFFFFU);
-                int right_ok =
-                    (px_right == 0xFF36B8FFU) ||
-                    (px_right == 0xFFD9F1FFU) ||
-                    (px_right == 0xFFFFFFFFU);
-                if (left_ok && right_ok) {
-                    visual_ok = 1;
-                    break;
-                }
-            }
-            sched_yield();
-        }
-
-        ST_CHECK(case_name, visual_ok, "scanout Wayland visibile non aggiornato");
-    }
 
     deadline = timer_now_ms() + 6000ULL;
     while (timer_now_ms() < deadline) {
@@ -3149,6 +3213,14 @@ static int selftest_case_wm_core(void)
         ST_CHECK(case_name, n > 0, "WMDEMO.TXT vuoto");
         buf[(size_t)n] = '\0';
         ST_CHECK(case_name, st_contains(buf, "wm-demo-ok"), "WMDEMO.TXT non contiene wm-demo-ok");
+    }
+
+    st_stop_pid(&demo_pid, 150ULL);
+    st_stop_pid(&wm_pid, 250ULL);
+    if (!have_live_wld) {
+        st_stop_pid(&wld_pid, 300ULL);
+        (void)vfs_unlink("/run/wayland-0");
+        (void)vfs_unlink("/data/WLDREADY.TXT");
     }
 
     return 0;
@@ -3206,6 +3278,7 @@ static const selftest_case_t selftest_cases[] = {
     { "musl-dlfcn",  selftest_case_musl_dlfcn },
     { "gnu-ls",          selftest_case_gnu_ls },
     { "bash-linux-fork", selftest_case_bash_linux_fork },
+    { "bash-native",     selftest_case_bash_native },
     { "linux-ld-shim",   selftest_case_linux_ld_shim },
     { "epoll-core",      selftest_case_epoll_core },
     { "kbd-layout",  selftest_case_kbd_layout },

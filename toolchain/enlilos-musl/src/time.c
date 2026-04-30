@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <sys/times.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -29,6 +30,33 @@ time_t time(time_t *tloc)
     if (tloc)
         *tloc = now;
     return now;
+}
+
+clock_t times(struct tms *buffer)
+{
+    struct timeval tv;
+    clock_t        ticks;
+
+    if (gettimeofday(&tv, NULL) < 0)
+        return (clock_t)-1;
+
+    ticks = (clock_t)(tv.tv_sec * 100L + (tv.tv_usec / 10000L));
+    if (buffer) {
+        buffer->tms_utime = 0;
+        buffer->tms_stime = 0;
+        buffer->tms_cutime = 0;
+        buffer->tms_cstime = 0;
+    }
+    return ticks;
+}
+
+struct tm *localtime(const time_t *timep)
+{
+    static __thread struct tm tm_storage;
+
+    if (!timep)
+        return NULL;
+    return localtime_r(timep, &tm_storage);
 }
 
 struct tm *localtime_r(const time_t *timep, struct tm *result)
@@ -149,4 +177,15 @@ size_t strftime(char *s, size_t max, const char *format, const struct tm *tm)
 
     s[used] = '\0';
     return used;
+}
+
+char *timezone(int zone, int dst)
+{
+    (void)zone;
+    (void)dst;
+    return (char *)"UTC";
+}
+
+void tzset(void)
+{
 }
