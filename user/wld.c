@@ -662,6 +662,16 @@ static void wld_blit_scaled(uint32_t *dst, int32_t dx0, int32_t dy0,
     if (!src || !dst || sw == 0U || sh == 0U || dw == 0U || dh == 0U)
         return;
 
+    /* Precompute x source map: one division per column, not per pixel */
+    uint16_t x_map[WLD_FB_W];
+    {
+        uint32_t cap = (dw < WLD_FB_W) ? dw : WLD_FB_W;
+        for (uint32_t dx = 0U; dx < cap; dx++) {
+            uint32_t sx = (dx * sw) / dw;
+            x_map[dx] = (uint16_t)((sx < sw) ? sx : sw - 1U);
+        }
+    }
+
     for (uint32_t dy = 0U; dy < dh; dy++) {
         int32_t out_y = dy0 + (int32_t)dy;
         uint32_t sy;
@@ -672,19 +682,15 @@ static void wld_blit_scaled(uint32_t *dst, int32_t dx0, int32_t dy0,
         if (sy >= sh)
             sy = sh - 1U;
 
+        const uint32_t *src_row = src + sy * stride_px;
+
         for (uint32_t dx = 0U; dx < dw; dx++) {
             int32_t out_x = dx0 + (int32_t)dx;
-            uint32_t sx;
-            uint32_t pix;
-            uint32_t *dst_px;
 
             if (out_x < 0 || out_x >= (int32_t)WLD_FB_W)
                 continue;
-            sx = (dx * sw) / dw;
-            if (sx >= sw)
-                sx = sw - 1U;
-            pix = src[sy * stride_px + sx];
-            dst_px = &dst[(uint32_t)out_y * WLD_FB_W + (uint32_t)out_x];
+            uint32_t pix = src_row[x_map[dx]];
+            uint32_t *dst_px = &dst[(uint32_t)out_y * WLD_FB_W + (uint32_t)out_x];
             *dst_px = (alpha >= 255U) ? pix : wld_blend_rgb(*dst_px, pix, alpha);
         }
     }

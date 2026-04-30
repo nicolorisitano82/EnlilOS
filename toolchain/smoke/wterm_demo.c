@@ -890,8 +890,6 @@ static int app_spawn_bash(app_t *app)
     }
 
     if (pid == 0) {
-        char *const argv[] = { "bash", "-i", NULL };
-
         close(master_fd);
         (void)setsid();
         (void)ioctl(slave_fd, TIOCSCTTY, 0);
@@ -906,8 +904,21 @@ static int app_spawn_bash(app_t *app)
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
-        execve("/bin/bash", argv, environ);
-        write(STDERR_FILENO, "wterm: exec /bin/bash fail\n", 27);
+        /* Try shells in order: native bash → bash-linux → nsh → arksh */
+        {
+            static const char * const shells[] = {
+                "/bin/bash", "/data/bash-linux", "/bin/nsh", "/bin/arksh", NULL
+            };
+            static const char * const names[] = {
+                "bash", "bash", "nsh", "arksh", NULL
+            };
+            int i;
+            for (i = 0; shells[i] != NULL; i++) {
+                char *const argv_sh[] = { (char *)(uintptr_t)names[i], "-i", NULL };
+                execve(shells[i], argv_sh, environ);
+            }
+        }
+        write(STDERR_FILENO, "wterm: no shell found\n", 22);
         _exit(127);
     }
 
@@ -1063,7 +1074,7 @@ int main(int argc, char **argv)
     }
 
     term_reset(&app.term);
-    term_feed_bytes(&app.term, (const uint8_t *)"Starting /bin/bash...\r\n", 23U);
+    term_feed_bytes(&app.term, (const uint8_t *)"Starting shell...\r\n", 19U);
     term_render(&app);
     wl_present_surface(&app);
 
@@ -1074,7 +1085,7 @@ int main(int argc, char **argv)
     }
 
     if (app_spawn_bash(&app) < 0) {
-        term_feed_bytes(&app.term, (const uint8_t *)"Failed to start /bin/bash\r\n", 27U);
+        term_feed_bytes(&app.term, (const uint8_t *)"Failed to start shell\r\n", 23U);
         term_render(&app);
         wl_present_surface(&app);
         sleep_10ms();
