@@ -2384,7 +2384,7 @@ int elf64_load_from_path(const char *path, const char *argv0, elf_image_t *out)
         "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin",
         "HOME=/home/user",
         "PWD=/",
-        "SHELL=/bin/arksh",
+        "SHELL=/bin/bash",
         "TERM=vt100",
         "USER=user",
     };
@@ -2473,7 +2473,7 @@ int elf64_spawn_path_argv(const char *path,
         "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin",
         "HOME=/home/user",
         "PWD=/",
-        "SHELL=/bin/arksh",
+        "SHELL=/bin/bash",
         "TERM=vt100",
         "USER=user",
     };

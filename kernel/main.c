@@ -120,6 +120,10 @@ static volatile uint32_t bootcli_heartbeat;
 static const char boot_arkshrc_user_default[] =
     "# ~/.config/arksh/arkshrc\n"
     "# Personalizza qui la shell di login EnlilOS.\n";
+static const char boot_bashrc_user_default[] =
+    "# ~/.bashrc\n"
+    "PS1='user@enlilos:\\w$ '\n"
+    "export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\n";
 
 static void boot_launch_vfsd(void)
 {
@@ -507,6 +511,8 @@ static void boot_prepare_login_layout(void)
     boot_seed_text_if_missing("/data/home/user/.config/arksh/arkshrc",
                               boot_arkshrc_user_default);
     boot_seed_text_if_missing("/data/home/user/.local/state/arksh/history", "");
+    boot_seed_text_if_missing("/data/home/user/.bashrc",
+                              boot_bashrc_user_default);
     boot_seed_text_if_missing("/data/etc/vconsole.conf", "KEYMAP=it\n");
 }
 
@@ -1590,7 +1596,18 @@ static void bootcli_launch_default_shell(int announce)
         return;
     }
 
-    if (elf64_spawn_path("/bin/arksh", "/bin/arksh", PRIO_HIGH, &bootcli_shell_pid) >= 0) {
+    if (elf64_spawn_path("/bin/bash", "/bin/bash", PRIO_HIGH, &bootcli_shell_pid) >= 0) {
+        term80_activate(bootcli_shell_pid, "bash");
+        bootcli_mode = BOOTCLI_MODE_TERM;
+        bootcli_copy_trunc(bootcli_shell_name, "bash", sizeof(bootcli_shell_name));
+        if (announce) {
+            char line[BOOTCLI_LINE_MAX + 1];
+            line[0] = '\0';
+            bootcli_buf_append(line, sizeof(line), "bash login avviata a EL0, pid=");
+            bootcli_buf_append_u32(line, sizeof(line), bootcli_shell_pid);
+            bootcli_push_line(line);
+        }
+    } else if (elf64_spawn_path("/bin/arksh", "/bin/arksh", PRIO_HIGH, &bootcli_shell_pid) >= 0) {
         term80_activate(bootcli_shell_pid, "arksh");
         bootcli_mode = BOOTCLI_MODE_TERM;
         bootcli_copy_trunc(bootcli_shell_name, "arksh", sizeof(bootcli_shell_name));
@@ -1603,7 +1620,7 @@ static void bootcli_launch_default_shell(int announce)
         }
     } else {
         if (announce)
-            bootcli_push_line("arksh non disponibile, fallback a nsh.");
+            bootcli_push_line("bash/arksh non disponibili, fallback a nsh.");
         bootcli_launch_nsh(announce);
     }
 }
@@ -1697,6 +1714,66 @@ static int bootcli_poll_wayland(void)
         bootcli_buf_append(line, sizeof(line), " (exit=");
         bootcli_buf_append_i32(line, sizeof(line), exit_code);
         bootcli_buf_append(line, sizeof(line), ")");
+    }
+    bootcli_buf_append(line, sizeof(line), ". Ritorno alla boot console.");
+    bootcli_push_line(line);
+    return 1;
+}
+
+static int bootcli_abort_wayland_session(const char *reason)
+{
+    uint32_t     pid;
+    uint64_t     deadline;
+    int32_t      exit_code = 0;
+    int          have_exit_code = 0;
+    char         line[BOOTCLI_LINE_MAX + 1];
+    char         wayland_name[sizeof(bootcli_wayland_name)];
+    sched_tcb_t *task;
+
+    if (bootcli_mode != BOOTCLI_MODE_WAYLAND || bootcli_wayland_pid == 0U)
+        return 0;
+
+    pid = bootcli_wayland_pid;
+    bootcli_copy_trunc(wayland_name, bootcli_wayland_name, sizeof(wayland_name));
+
+    (void)signal_send_pid(pid, SIGTERM);
+    deadline = timer_now_ms() + 250ULL;
+    while (timer_now_ms() < deadline) {
+        if (!boot_task_alive(pid))
+            break;
+        sched_yield();
+    }
+    if (boot_task_alive(pid)) {
+        (void)signal_send_pid(pid, SIGKILL);
+        deadline = timer_now_ms() + 150ULL;
+        while (timer_now_ms() < deadline) {
+            if (!boot_task_alive(pid))
+                break;
+            sched_yield();
+        }
+    }
+
+    task = sched_task_find(pid);
+    if (task && sched_task_get_exit_code(task, &exit_code) == 0)
+        have_exit_code = 1;
+
+    bootcli_mode = BOOTCLI_MODE_UI;
+    gpu_set_2d_present_enabled(true);
+    bootcli_wayland_pid = 0U;
+    bootcli_wayland_name[0] = '\0';
+
+    line[0] = '\0';
+    bootcli_buf_append(line, sizeof(line),
+                       (wayland_name[0] != '\0') ? wayland_name : "sessione Wayland");
+    bootcli_buf_append(line, sizeof(line), " interrotta");
+    if (reason && *reason) {
+        bootcli_buf_append(line, sizeof(line), " (");
+        bootcli_buf_append(line, sizeof(line), reason);
+        bootcli_buf_append(line, sizeof(line), ")");
+    }
+    if (have_exit_code) {
+        bootcli_buf_append(line, sizeof(line), " exit=");
+        bootcli_buf_append_i32(line, sizeof(line), exit_code);
     }
     bootcli_buf_append(line, sizeof(line), ". Ritorno alla boot console.");
     bootcli_push_line(line);
@@ -1919,7 +1996,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("loadkeys L attiva il layout tastiera (us/it) e prova a persisterlo");
         bootcli_push_line("arksh     lancia la shell arksh reale da /bin se presente");
         bootcli_push_line("bash      lancia GNU bash nativa da /bin/bash");
-        bootcli_push_line("login     rilancia la login shell bridge (/bin/arksh)");
+        bootcli_push_line("login     rilancia la login shell di default (bash, fallback arksh/nsh)");
         bootcli_push_line("nsh       lancia la shell ELF statica 80x25 di recovery");
         bootcli_push_line("elfdemo   lancia il demo ELF statico integrato a EL0");
         bootcli_push_line("execdemo  lancia un ELF che chiama execve('/EXEC2.ELF')");
@@ -2554,8 +2631,20 @@ static int bootcli_poll_input(void)
     int dirty = 0;
     int c;
 
-    if (bootcli_mode == BOOTCLI_MODE_TERM || bootcli_mode == BOOTCLI_MODE_WAYLAND)
+    if (bootcli_mode == BOOTCLI_MODE_TERM)
         return 0;
+
+    if (bootcli_mode == BOOTCLI_MODE_WAYLAND) {
+        while ((c = keyboard_getc()) >= 0) {
+            uint8_t ch = (uint8_t)c;
+
+            if (ch == 0x03U || ch == 0x1DU) {
+                if (bootcli_abort_wayland_session(ch == 0x03U ? "^C" : "^]"))
+                    dirty = 1;
+            }
+        }
+        return dirty;
+    }
 
     while ((c = keyboard_getc()) >= 0) {
         uint8_t ch = (uint8_t)c;
@@ -2702,9 +2791,9 @@ static void bootcli_init(void)
         bootcli_push_line("Modalita grafica attiva: VirtIO-GPU.");
     else
         bootcli_push_line("Modalita framebuffer locale attiva.");
-    bootcli_push_line("Login shell di default: /bin/arksh (bridge con fallback automatico a nsh).");
+    bootcli_push_line("Login shell di default: /bin/bash (fallback automatico a arksh, poi nsh).");
     bootcli_push_line("Digita 'help' e premi Invio per testare tastiera e comandi di recovery.");
-    bootcli_push_line("Prova anche: arksh, bash, login, nsh, net, pwd, cd /data, ls, cat /BOOT.TXT.");
+    bootcli_push_line("Prova anche: bash, arksh, login, nsh, net, pwd, cd /data, ls, cat /BOOT.TXT.");
     {
         char line[96];
         line[0] = '\0';
@@ -2724,7 +2813,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-03: prova 'musldl' per dlopen(), dlsym(), dlclose() e libdl bootstrap.");
     bootcli_push_line("M10-03: prova 'socketdemo' per BSD socket API TCP/UDP su loopback 127.0.0.1.");
     bootcli_push_line("M8-08e: prova 'arkshsmoke' per la toolchain CMake/cross-build EnlilOS.");
-    bootcli_push_line("M8-08f: 'login' usa il bridge /bin/arksh; 'arksh' prova solo la shell reale in /bin/arksh.real.");
+    bootcli_push_line("M8-08f: 'login' usa bash come default; 'arksh' prova solo la shell reale in /bin/arksh.real.");
     bootcli_push_line("M11-02a: prova 'clonedemo' per clone(), gettid(), CLONE_VM/FS/FILES e TPIDR_EL0 per-thread.");
     bootcli_push_line("M11-02b: prova 'threadlife' per set_tid_address(), tgkill(), clear_child_tid ed exit_group().");
     bootcli_push_line("M11-02c: prova 'futexdemo' per FUTEX_WAIT/WAKE/REQUEUE e join via clear_child_tid.");
@@ -2736,13 +2825,14 @@ static void bootcli_init(void)
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
-    bootcli_push_line("M7-02: usa 'nsh' per recovery shell, 'login' per il bridge, 'arksh' per la shell reale.");
+    bootcli_push_line("M7-02: usa 'nsh' per recovery shell, 'login' per la shell di default, 'arksh' per la shell reale.");
     if (bootcli_graphics_mode) {
         bootcli_push_line("Fai click nella finestra QEMU per il focus.");
         if (bootcli_mouse_ready)
             bootcli_push_line("Mouse guest pronto: puntatore ed eventi attivi.");
         else
             bootcli_push_line("Mouse guest non rilevato: tastiera soltanto.");
+        bootcli_push_line("In desktop: Ctrl+C o Ctrl+] forzano il ritorno alla boot console.");
     }
 }
 
@@ -2971,11 +3061,11 @@ void kernel_main(void)
     uart_puts("\n[EnlilOS] ===================================\n");
     uart_puts("[EnlilOS] Boot completato con successo!\n");
     uart_puts("[EnlilOS] Console interattiva pronta\n");
-    uart_puts("[EnlilOS] Login shell: /bin/arksh (bridge con fallback automatico a /bin/nsh)\n");
+    uart_puts("[EnlilOS] Login shell: /bin/bash (fallback automatico a /bin/arksh, poi /bin/nsh)\n");
     uart_puts("[EnlilOS] Layout tastiera: ");
     uart_puts(keyboard_get_layout_name());
     uart_puts(" (usa 'loadkeys us|it' o 'kbdlayout')\n");
-    uart_puts("[EnlilOS] Comandi: 'arksh' prova la shell reale, 'bash' apre GNU bash nativa, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
+    uart_puts("[EnlilOS] Comandi: 'bash' apre GNU bash nativa, 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
     uart_puts("[EnlilOS] Rete: usa 'net' per vedere MAC/link/counter del driver virtio-net\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");

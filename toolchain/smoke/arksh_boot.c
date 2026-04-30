@@ -10,6 +10,7 @@
 #define ARKSH_USER_RC        "/home/user/.config/arksh/arkshrc"
 #define ARKSH_ETC_RC         "/etc/arkshrc"
 #define ARKSH_EXTRA_ENV      "ARKSH_FORCE_CAPTURE=1"
+#define ARKSH_SHELL_ENV      "SHELL=/bin/arksh"
 
 static unsigned long ab_strlen(const char *s)
 {
@@ -120,6 +121,25 @@ static int ab_env_has(char **envp, const char *entry)
     return 0;
 }
 
+static int ab_env_index(char **envp, const char *prefix)
+{
+    unsigned long plen = ab_strlen(prefix);
+    int           idx = 0;
+
+    if (!envp || !prefix)
+        return -1;
+    while (envp[idx]) {
+        unsigned long j = 0UL;
+
+        while (j < plen && envp[idx][j] == prefix[j])
+            j++;
+        if (j == plen)
+            return idx;
+        idx++;
+    }
+    return -1;
+}
+
 static void ab_prepare_login_home(void)
 {
     if (ab_file_exists("/data/home"))
@@ -142,7 +162,7 @@ static int ab_selftest(char **envp)
 
     if (!ab_env_has(envp, "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin") ||
         !ab_env_has(envp, "HOME=/home/user") ||
-        !ab_env_has(envp, "SHELL=/bin/arksh") ||
+        !ab_env_has(envp, "SHELL=/bin/bash") ||
         !ab_env_has(envp, "TERM=vt100")) {
         close(out_fd);
         return 11;
@@ -212,6 +232,14 @@ int main(int argc, char **argv, char **envp)
     while (envp && envp[envc] && envc + 2 < (int)(sizeof(real_env) / sizeof(real_env[0]))) {
         real_env[envc] = envp[envc];
         envc++;
+    }
+    {
+        int shell_idx = ab_env_index(real_env, "SHELL=");
+
+        if (shell_idx >= 0)
+            real_env[shell_idx] = (char *)ARKSH_SHELL_ENV;
+        else if (envc + 2 < (int)(sizeof(real_env) / sizeof(real_env[0])))
+            real_env[envc++] = (char *)ARKSH_SHELL_ENV;
     }
     real_env[envc++] = (char *)ARKSH_EXTRA_ENV;
     real_env[envc] = NULL;
