@@ -14,7 +14,10 @@
 
 #include "user_svc.h"
 #include "syscall.h"
+#include "keyboard.h"
+#include "mouse.h"
 #include "types.h"
+#include "virtio_mmio.h"
 
 /* ── syscall wrappers ───────────────────────────────────────────── */
 #define WLD_SYS_SOCKET      200
@@ -34,7 +37,10 @@
 #define WLD_SYS_OPEN        4
 #define WLD_SYS_WRITE       1
 #define WLD_SYS_YIELD       20
+#define WLD_SYS_SPAWN       16
 #define WLD_SYS_WLD_PRESENT 224
+#define WLD_SYS_KBD_GET_EVENT 225
+#define WLD_SYS_MOUSE_GET_EVENT 226
 
 /* mmap/mprotect flags */
 #define WLD_PROT_READ   1
@@ -58,11 +64,27 @@
 #define WLD_O_TRUNC   01000
 
 #define WLD_READY_PATH "/data/WLDREADY.TXT"
+#define WLD_WTERM_PATH "/WTERM.ELF"
+
+#define WLD_KEY_HOME       102U
+#define WLD_KEY_UP         103U
+#define WLD_KEY_PAGEUP     104U
+#define WLD_KEY_LEFT       105U
+#define WLD_KEY_RIGHT      106U
+#define WLD_KEY_END        107U
+#define WLD_KEY_DOWN       108U
+#define WLD_KEY_PAGEDOWN   109U
+#define WLD_KEY_INSERT     110U
+#define WLD_KEY_DELETE     111U
 
 /* framebuffer dimensions */
 #define WLD_FB_W    800U
 #define WLD_FB_H    600U
 #define WLD_FB_SZ   (WLD_FB_W * WLD_FB_H * 4U)
+#define WLD_TITLE_H 22U
+#define WLD_FRAME_BORDER 2U
+#define WLD_TITLE_BTN_SZ 12U
+#define WLD_TITLE_BTN_PAD 5U
 
 /* ── Mini strlib ────────────────────────────────────────────────── */
 static void wld_memcpy(void *d, const void *s, long n)
@@ -73,6 +95,16 @@ static void wld_memcpy(void *d, const void *s, long n)
 }
 static void wld_memset(void *d, int v, long n)
 {
+    /* Word-at-a-time for large zero fills (composite buffer clear) */
+    if (v == 0 && n >= 8L) {
+        uint64_t *wp = (uint64_t *)d;
+        long wn = n >> 3;
+        while (wn-- > 0) *wp++ = 0ULL;
+        char *p = (char *)wp;
+        n &= 7L;
+        while (n-- > 0) *p++ = 0;
+        return;
+    }
     char *p = (char *)d;
     while (n-- > 0) *p++ = (char)v;
 }
@@ -86,6 +118,7 @@ static void wld_strcpy(char *d, const char *s)
 {
     while ((*d++ = *s++));
 }
+static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha);
 
 /* ── Pool limits ────────────────────────────────────────────────── */
 #define WLD_MAX_CLIENTS     8
@@ -111,6 +144,7 @@ static void wld_strcpy(char *d, const char *s)
 #define WOBJ_OUTPUT        13
 #define WOBJ_REGION        14
 #define WOBJ_ENLIL_WM      15
+#define WOBJ_ENLIL_TERM    16
 
 /* ── Global registry names ──────────────────────────────────────── */
 #define GLOBAL_COMPOSITOR  1U
@@ -119,6 +153,7 @@ static void wld_strcpy(char *d, const char *s)
 #define GLOBAL_SEAT        4U
 #define GLOBAL_OUTPUT      5U
 #define GLOBAL_ENLIL_WM    6U
+#define GLOBAL_ENLIL_TERM  7U
 
 /* ── Pixel formats ──────────────────────────────────────────────── */
 #define WL_SHM_FORMAT_ARGB8888  0U
@@ -149,6 +184,8 @@ static void wld_strcpy(char *d, const char *s)
 #define WL_OUTPUT_DONE           3U
 /* enlil_wm_v1 events */
 #define ENLIL_WM_STATE           0U
+/* enlil_term_v1 events */
+#define ENLIL_TERM_INPUT         0U
 
 /* ── Wayland message opcodes (client requests) ──────────────────── */
 /* wl_display */
@@ -192,8 +229,14 @@ static void wld_strcpy(char *d, const char *s)
 #define ENLIL_WM_FOCUS_PREV        2U
 #define ENLIL_WM_CLOSE_FOCUSED     3U
 #define ENLIL_WM_GET_STATE         4U
+#define ENLIL_WM_SET_FOCUS_POLICY  5U
+/* enlil_term_v1 */
+#define ENLIL_TERM_ATTACH_SURFACE  0U
+#define ENLIL_TERM_RELEASE         1U
 
 #define ENLIL_WM_LAYOUT_TILE       1U
+#define ENLIL_WM_FOCUS_CLICK       0U
+#define ENLIL_WM_FOCUS_POINTER     1U
 
 /* ════════════════════════════════════════════════════════════════
  * Data structures
@@ -241,13 +284,17 @@ typedef struct {
     uint8_t  configured;
     uint8_t  focused;
     uint8_t  fade_ticks;
-    uint8_t  _pad0;
+    uint8_t  closing;
+    uint8_t  close_sent;
+    uint8_t  _pad0[2];
 } wsurf_t;
 
 typedef struct {
     int      fd;
     uint8_t  alive;
     uint32_t serial;
+    uint32_t term_obj_id;
+    uint32_t term_surface_obj;
     wobj_t   objs[WLD_MAX_OBJS];
     uint32_t obj_count;
     /* input buffer */
@@ -270,6 +317,10 @@ static uint32_t wld_frame_serial = 1U;
 static uint32_t wld_present_count = 0U;
 static uint32_t wld_layout_mode = ENLIL_WM_LAYOUT_TILE;
 static uint32_t wld_focus_idx = 0xFFFFU;
+static int32_t  wld_pointer_x = (int32_t)(WLD_FB_W / 2U);
+static int32_t  wld_pointer_y = (int32_t)(WLD_FB_H / 2U);
+static uint32_t wld_pointer_buttons;
+static uint8_t  wld_focus_follow_pointer = 1U;
 
 /* ── sockaddr_un ────────────────────────────────────────────────── */
 typedef struct {
@@ -303,6 +354,15 @@ static long wld_recv(int fd, void *buf, long len, int fl)
 
 static void wld_close(int fd)
 { (void)user_svc1(WLD_SYS_CLOSE, fd); }
+
+static long wld_spawn(const char *path, uint32_t *pid_out, uint32_t prio)
+{ return user_svc3(WLD_SYS_SPAWN, (long)path, (long)pid_out, (long)prio); }
+
+static long wld_kbd_get_event(keyboard_event_t *ev)
+{ return user_svc1(WLD_SYS_KBD_GET_EVENT, (long)ev); }
+
+static long wld_mouse_get_event(mouse_event_t *ev)
+{ return user_svc1(WLD_SYS_MOUSE_GET_EVENT, (long)ev); }
 
 static void *wld_mmap(long size)
 {
@@ -441,6 +501,33 @@ static void out_str(wclient_t *c, const char *s)
     (void)pad;
 }
 
+static uint32_t wld_utf8_encode(uint32_t cp, uint8_t out[4])
+{
+    if (!out || cp == 0U)
+        return 0U;
+
+    if (cp <= 0x7FU) {
+        out[0] = (uint8_t)cp;
+        return 1U;
+    }
+    if (cp <= 0x7FFU) {
+        out[0] = (uint8_t)(0xC0U | ((cp >> 6) & 0x1FU));
+        out[1] = (uint8_t)(0x80U | (cp & 0x3FU));
+        return 2U;
+    }
+    if (cp <= 0xFFFFU) {
+        out[0] = (uint8_t)(0xE0U | ((cp >> 12) & 0x0FU));
+        out[1] = (uint8_t)(0x80U | ((cp >> 6) & 0x3FU));
+        out[2] = (uint8_t)(0x80U | (cp & 0x3FU));
+        return 3U;
+    }
+    out[0] = (uint8_t)(0xF0U | ((cp >> 18) & 0x07U));
+    out[1] = (uint8_t)(0x80U | ((cp >> 12) & 0x3FU));
+    out[2] = (uint8_t)(0x80U | ((cp >> 6) & 0x3FU));
+    out[3] = (uint8_t)(0x80U | (cp & 0x3FU));
+    return 4U;
+}
+
 /* Invia messaggio: comincia con header poi chiama out_u32/out_str */
 static void msg_begin(wclient_t *c, uint32_t obj_id, uint32_t opcode,
                       uint32_t payload_bytes)
@@ -456,11 +543,20 @@ static void client_flush(wclient_t *c)
     if (c->olen == 0U || c->fd < 0) return;
     long sent = 0;
     while ((uint32_t)sent < c->olen) {
-        long r = wld_send(c->fd, c->obuf + sent, (long)(c->olen - (uint32_t)sent), 0);
+        long r = wld_send(c->fd, c->obuf + sent, (long)(c->olen - (uint32_t)sent),
+                          0x40 /* MSG_DONTWAIT */);
         if (r <= 0) break;
         sent += r;
     }
-    c->olen = 0U;
+    if ((uint32_t)sent >= c->olen) {
+        c->olen = 0U;
+    } else if (sent > 0L) {
+        /* Partial send: compact remaining bytes to front, retry next call */
+        uint32_t remain = c->olen - (uint32_t)sent;
+        wld_memcpy(c->obuf, c->obuf + (uint32_t)sent, (long)remain);
+        c->olen = remain;
+    }
+    /* sent==0 && EAGAIN: leave buffer as-is, retry next call */
 }
 
 static void send_configure(wclient_t *c, wsurf_t *surf);
@@ -488,6 +584,58 @@ static void wld_fill_rect(uint32_t *dst, int32_t x, int32_t y,
             dst[(uint32_t)dy * WLD_FB_W + (uint32_t)dx] = color;
         }
     }
+}
+
+static void wld_draw_cursor(uint32_t *dst, int32_t x, int32_t y, uint32_t buttons)
+{
+    static const uint16_t mask[24] = {
+        0x8000U, 0xC000U, 0xE000U, 0xF000U,
+        0xF800U, 0xFC00U, 0xFE00U, 0xFF00U,
+        0xFF80U, 0xFFC0U, 0xFFE0U, 0xFFF0U,
+        0xFE00U, 0xCE00U, 0x8E00U, 0x0E00U,
+        0x0F00U, 0x0780U, 0x0780U, 0x03C0U,
+        0x03C0U, 0x01E0U, 0x0000U, 0x0000U,
+    };
+    uint32_t fill = (buttons & MOUSE_BTN_LEFT) ? 0x00FFD166U : 0x00FFFFFFU;
+    uint32_t edge = 0x00000000U;
+    uint32_t shadow = 0x00202020U;
+
+    for (uint32_t row = 0U; row < 24U; row++) {
+        for (uint32_t col = 0U; col < 16U; col++) {
+            uint16_t bit = (uint16_t)(0x8000U >> col);
+            int32_t px = x + (int32_t)col;
+            int32_t py = y + (int32_t)row;
+            int32_t spx = px + 1;
+            int32_t spy = py + 1;
+            int edge_px = 0;
+
+            if (!(mask[row] & bit))
+                continue;
+
+            if (spx >= 0 && spy >= 0 &&
+                spx < (int32_t)WLD_FB_W && spy < (int32_t)WLD_FB_H) {
+                uint32_t *shadow_px = &dst[(uint32_t)spy * WLD_FB_W + (uint32_t)spx];
+                *shadow_px = wld_blend_rgb(*shadow_px, shadow, 120U);
+            }
+
+            if (px < 0 || py < 0 || px >= (int32_t)WLD_FB_W || py >= (int32_t)WLD_FB_H)
+                continue;
+
+            if (col == 0U || !(mask[row] & (uint16_t)(bit << 1)))
+                edge_px = 1;
+            else if (col == 15U || !(mask[row] & (uint16_t)(bit >> 1)))
+                edge_px = 1;
+            else if (row == 0U || !(mask[row - 1U] & bit))
+                edge_px = 1;
+            else if (row == 23U || !(mask[row + 1U] & bit))
+                edge_px = 1;
+
+            dst[(uint32_t)py * WLD_FB_W + (uint32_t)px] = edge_px ? edge : fill;
+        }
+    }
+
+    if (x >= 0 && y >= 0 && x < (int32_t)WLD_FB_W && y < (int32_t)WLD_FB_H)
+        dst[(uint32_t)y * WLD_FB_W + (uint32_t)x] = 0x00FF3B30U;
 }
 
 static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha)
@@ -579,8 +727,6 @@ static void wld_send_wm_state(wclient_t *c, uint32_t obj_id)
 
 static void wld_request_close_focused(void)
 {
-    uint32_t ci;
-    wclient_t *c;
     wsurf_t   *surf;
 
     wld_focus_sanitize();
@@ -588,12 +734,12 @@ static void wld_request_close_focused(void)
         return;
 
     surf = &wld_surfs[wld_focus_idx];
-    ci = surf->client_idx;
-    if (ci >= WLD_MAX_CLIENTS || !wld_clients[ci].alive || surf->xdg_top_obj == 0U)
+    if (surf->closing || surf->client_idx >= WLD_MAX_CLIENTS ||
+        !wld_clients[surf->client_idx].alive || surf->xdg_top_obj == 0U)
         return;
-    c = &wld_clients[ci];
-    msg_begin(c, surf->xdg_top_obj, XDG_TOPLEVEL_CLOSE, 0U);
-    client_flush(c);
+    surf->closing = 1U;
+    surf->close_sent = 0U;
+    surf->fade_ticks = 8U;
 }
 
 static void wld_relayout(int send_cfg)
@@ -677,11 +823,334 @@ static void wld_focus_rotate(int dir)
     wld_relayout(0);
 }
 
+static void wld_focus_set(uint32_t idx)
+{
+    if (idx >= WLD_MAX_SURFACES || !wsurf_is_viewable(&wld_surfs[idx]))
+        return;
+    if (wld_focus_idx == idx)
+        return;
+    wld_focus_idx = idx;
+    wld_relayout(0);
+}
+
+static void wld_surface_frame_box(const wsurf_t *surf, int32_t *sx, int32_t *sy,
+                                  uint32_t *frame_w, uint32_t *frame_h)
+{
+    uint32_t base_w;
+    uint32_t base_h;
+
+    if (!surf) {
+        if (sx) *sx = 0;
+        if (sy) *sy = 0;
+        if (frame_w) *frame_w = 0U;
+        if (frame_h) *frame_h = 0U;
+        return;
+    }
+
+    base_w = (surf->view_w != 0U) ? surf->view_w : 0U;
+    base_h = (surf->view_h != 0U) ? surf->view_h : 0U;
+    if (base_h == 0U)
+        base_h = WLD_TITLE_H + WLD_FRAME_BORDER;
+
+    if (sx) *sx = surf->x;
+    if (sy) *sy = surf->y;
+    if (frame_w) *frame_w = base_w;
+    if (frame_h) *frame_h = base_h;
+}
+
+static int wld_surface_close_hit(const wsurf_t *surf, int32_t px, int32_t py)
+{
+    int32_t sx;
+    int32_t sy;
+    uint32_t frame_w;
+
+    wld_surface_frame_box(surf, &sx, &sy, &frame_w, NULL);
+    if (frame_w <= (WLD_TITLE_BTN_PAD * 2U) + WLD_TITLE_BTN_SZ)
+        return 0;
+
+    return px >= sx + (int32_t)WLD_TITLE_BTN_PAD &&
+           px < sx + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)WLD_TITLE_BTN_SZ &&
+           py >= sy + (int32_t)WLD_TITLE_BTN_PAD &&
+           py < sy + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)WLD_TITLE_BTN_SZ;
+}
+
+static int wld_surface_spawn_hit(const wsurf_t *surf, int32_t px, int32_t py)
+{
+    int32_t sx;
+    int32_t sy;
+    uint32_t frame_w;
+    int32_t left;
+
+    wld_surface_frame_box(surf, &sx, &sy, &frame_w, NULL);
+    if (frame_w <= (WLD_TITLE_BTN_PAD * 3U) + (WLD_TITLE_BTN_SZ * 2U))
+        return 0;
+
+    left = sx + (int32_t)frame_w - (int32_t)WLD_TITLE_BTN_PAD - (int32_t)WLD_TITLE_BTN_SZ;
+    return px >= left &&
+           px < left + (int32_t)WLD_TITLE_BTN_SZ &&
+           py >= sy + (int32_t)WLD_TITLE_BTN_PAD &&
+           py < sy + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)WLD_TITLE_BTN_SZ;
+}
+
+static uint32_t wld_hit_test_surface(int32_t px, int32_t py)
+{
+    if (wld_focus_idx < WLD_MAX_SURFACES) {
+        wsurf_t *focus = &wld_surfs[wld_focus_idx];
+        if (wsurf_is_viewable(focus) &&
+            px >= focus->x && py >= focus->y &&
+            px < focus->x + (int32_t)focus->view_w &&
+            py < focus->y + (int32_t)focus->view_h) {
+            return wld_focus_idx;
+        }
+    }
+
+    for (uint32_t i = 0U; i < WLD_MAX_SURFACES; i++) {
+        wsurf_t *surf = &wld_surfs[i];
+        if (!wsurf_is_viewable(surf))
+            continue;
+        if (px < surf->x || py < surf->y)
+            continue;
+        if (px >= surf->x + (int32_t)surf->view_w ||
+            py >= surf->y + (int32_t)surf->view_h)
+            continue;
+        return i;
+    }
+    return 0xFFFFU;
+}
+
+static wclient_t *wld_focused_term_client(void)
+{
+    wsurf_t   *surf;
+    wclient_t *c;
+
+    wld_focus_sanitize();
+    if (wld_focus_idx >= WLD_MAX_SURFACES)
+        return (wclient_t *)0;
+
+    surf = &wld_surfs[wld_focus_idx];
+    if (!wsurf_is_viewable(surf) || surf->client_idx >= WLD_MAX_CLIENTS)
+        return (wclient_t *)0;
+
+    c = &wld_clients[surf->client_idx];
+    if (!c->alive || c->term_obj_id == 0U)
+        return (wclient_t *)0;
+    if (c->term_surface_obj != surf->surface_obj)
+        return (wclient_t *)0;
+    return c;
+}
+
+static void wld_send_term_input(wclient_t *c, const uint8_t *buf, uint32_t len)
+{
+    uint32_t padded;
+
+    if (!c || !buf || len == 0U || c->term_obj_id == 0U)
+        return;
+
+    padded = (len + 3U) & ~3U;
+    if (8U + 4U + padded > sizeof(c->obuf))
+        return;
+    if (c->olen + 8U + 4U + padded > sizeof(c->obuf))
+        client_flush(c);
+    if (c->olen + 8U + 4U + padded > sizeof(c->obuf))
+        return;
+
+    msg_begin(c, c->term_obj_id, ENLIL_TERM_INPUT, 4U + padded);
+    out_u32(c, len);
+    wld_memcpy(c->obuf + c->olen, buf, (long)len);
+    if (padded > len)
+        wld_memset(c->obuf + c->olen + len, 0, (long)(padded - len));
+    c->olen += padded;
+    client_flush(c);
+}
+
+static uint32_t wld_key_to_term_bytes(const keyboard_event_t *ev, uint8_t out[8])
+{
+    if (!ev || !out || !ev->pressed)
+        return 0U;
+
+    switch (ev->keycode) {
+    case KEY_BACKSPACE:
+        out[0] = 0x7FU;
+        return 1U;
+    case KEY_ENTER:
+        out[0] = '\n';
+        return 1U;
+    case KEY_TAB:
+        if (ev->modifiers & KBD_MOD_SHIFT) {
+            out[0] = 0x1BU; out[1] = '['; out[2] = 'Z';
+            return 3U;
+        }
+        out[0] = '\t';
+        return 1U;
+    case KEY_ESC:
+        out[0] = 0x1BU;
+        return 1U;
+    case WLD_KEY_UP:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'A';
+        return 3U;
+    case WLD_KEY_DOWN:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'B';
+        return 3U;
+    case WLD_KEY_RIGHT:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'C';
+        return 3U;
+    case WLD_KEY_LEFT:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'D';
+        return 3U;
+    case WLD_KEY_HOME:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'H';
+        return 3U;
+    case WLD_KEY_END:
+        out[0] = 0x1BU; out[1] = '['; out[2] = 'F';
+        return 3U;
+    case WLD_KEY_DELETE:
+        out[0] = 0x1BU; out[1] = '['; out[2] = '3'; out[3] = '~';
+        return 4U;
+    case WLD_KEY_PAGEUP:
+        out[0] = 0x1BU; out[1] = '['; out[2] = '5'; out[3] = '~';
+        return 4U;
+    case WLD_KEY_PAGEDOWN:
+        out[0] = 0x1BU; out[1] = '['; out[2] = '6'; out[3] = '~';
+        return 4U;
+    case WLD_KEY_INSERT:
+        out[0] = 0x1BU; out[1] = '['; out[2] = '2'; out[3] = '~';
+        return 4U;
+    default:
+        break;
+    }
+
+    if (ev->unicode != 0U)
+        return wld_utf8_encode(ev->unicode, out);
+    return 0U;
+}
+
+static void wld_launch_terminal_window(void)
+{
+    uint32_t pid = 0U;
+
+    (void)wld_spawn(WLD_WTERM_PATH, &pid, 32U);
+}
+
+static void wld_process_pending_closes(void)
+{
+    for (uint32_t i = 0U; i < WLD_MAX_SURFACES; i++) {
+        wsurf_t *surf = &wld_surfs[i];
+        wclient_t *c;
+
+        if (!surf->alive || !surf->closing || surf->close_sent || surf->fade_ticks != 0U)
+            continue;
+        if (surf->client_idx >= WLD_MAX_CLIENTS)
+            continue;
+        c = &wld_clients[surf->client_idx];
+        if (!c->alive || surf->xdg_top_obj == 0U)
+            continue;
+
+        msg_begin(c, surf->xdg_top_obj, XDG_TOPLEVEL_CLOSE, 0U);
+        client_flush(c);
+        surf->close_sent = 1U;
+        surf->alive = 0U;
+        surf->pending_buf = 0xFFFFU;
+        surf->current_buf = 0xFFFFU;
+        if (wld_focus_idx == i)
+            wld_focus_sanitize();
+        wld_relayout(1);
+    }
+}
+
+static void wld_handle_keyboard(void)
+{
+    keyboard_event_t ev;
+
+    while (wld_kbd_get_event(&ev) > 0L) {
+        uint8_t   bytes[8];
+        uint32_t  nbytes;
+        wclient_t *term_client;
+
+        if (!ev.pressed)
+            continue;
+
+        if ((ev.modifiers & KBD_MOD_SUPER) != 0U) {
+            if (ev.repeat)
+                continue;
+            if (ev.keycode == KEY_ENTER || ev.unicode == '\n') {
+                wld_launch_terminal_window();
+                continue;
+            }
+            if (ev.keycode == KEY_Q || ev.unicode == 'q' || ev.unicode == 'Q') {
+                wld_request_close_focused();
+                continue;
+            }
+            if (ev.keycode == KEY_TAB || ev.unicode == '\t') {
+                wld_focus_rotate((ev.modifiers & KBD_MOD_SHIFT) ? -1 : +1);
+                continue;
+            }
+        }
+
+        term_client = wld_focused_term_client();
+        if (!term_client)
+            continue;
+
+        nbytes = wld_key_to_term_bytes(&ev, bytes);
+        if (nbytes > 0U)
+            wld_send_term_input(term_client, bytes, nbytes);
+    }
+}
+
+static void wld_handle_mouse(void)
+{
+    mouse_event_t ev;
+
+    while (wld_mouse_get_event(&ev) > 0L) {
+        uint32_t old_buttons = wld_pointer_buttons;
+        uint32_t hit;
+        uint32_t pressed_mask;
+
+        if (ev.flags & MOUSE_EVT_ABS) {
+            wld_pointer_x = (int32_t)ev.x;
+            wld_pointer_y = (int32_t)ev.y;
+        } else {
+            wld_pointer_x += ev.dx;
+            wld_pointer_y += ev.dy;
+        }
+        if (wld_pointer_x < 0) wld_pointer_x = 0;
+        if (wld_pointer_y < 0) wld_pointer_y = 0;
+        if (wld_pointer_x >= (int32_t)WLD_FB_W) wld_pointer_x = (int32_t)WLD_FB_W - 1;
+        if (wld_pointer_y >= (int32_t)WLD_FB_H) wld_pointer_y = (int32_t)WLD_FB_H - 1;
+        wld_pointer_buttons = ev.buttons;
+
+        hit = wld_hit_test_surface(wld_pointer_x, wld_pointer_y);
+        pressed_mask = (old_buttons ^ ev.buttons) & ev.buttons;
+
+        if (hit != 0xFFFFU) {
+            if ((pressed_mask & MOUSE_BTN_LEFT) != 0U) {
+                if (wld_surface_close_hit(&wld_surfs[hit], wld_pointer_x, wld_pointer_y)) {
+                    wld_focus_set(hit);
+                    wld_request_close_focused();
+                    continue;
+                }
+                if (wld_surface_spawn_hit(&wld_surfs[hit], wld_pointer_x, wld_pointer_y)) {
+                    wld_focus_set(hit);
+                    wld_launch_terminal_window();
+                    continue;
+                }
+                wld_focus_set(hit);
+                continue;
+            }
+
+            if (wld_focus_follow_pointer &&
+                (ev.flags & MOUSE_EVT_MOVE) &&
+                hit != wld_focus_idx) {
+                wld_focus_set(hit);
+            }
+        }
+    }
+}
+
 /* ── Compositor logic ───────────────────────────────────────────── */
 static void composite_and_present(void)
 {
-    const uint32_t border = 2U;
-    const uint32_t title_h = 22U;
+    const uint32_t border = WLD_FRAME_BORDER;
+    const uint32_t title_h = WLD_TITLE_H;
 
     if (wld_composite == WLD_MAP_FAILED) return;
 
@@ -742,6 +1211,36 @@ static void composite_and_present(void)
         wld_fill_rect(dst, sx, sy, frame_w, frame_h, frame);
         wld_fill_rect(dst, sx + (int32_t)border, sy + (int32_t)border,
                       frame_w - border * 2U, title_h, deco);
+        wld_fill_rect(dst,
+                      sx + (int32_t)WLD_TITLE_BTN_PAD,
+                      sy + (int32_t)WLD_TITLE_BTN_PAD,
+                      WLD_TITLE_BTN_SZ,
+                      WLD_TITLE_BTN_SZ,
+                      0x00D64545U);
+        wld_fill_rect(dst,
+                      sx + (int32_t)frame_w - (int32_t)WLD_TITLE_BTN_PAD - (int32_t)WLD_TITLE_BTN_SZ,
+                      sy + (int32_t)WLD_TITLE_BTN_PAD,
+                      WLD_TITLE_BTN_SZ,
+                      WLD_TITLE_BTN_SZ,
+                      0x0034D17BU);
+        wld_fill_rect(dst,
+                      sx + (int32_t)WLD_TITLE_BTN_PAD + 3,
+                      sy + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)(WLD_TITLE_BTN_SZ / 2U),
+                      WLD_TITLE_BTN_SZ - 6U,
+                      2U,
+                      0x00FFFFFFU);
+        wld_fill_rect(dst,
+                      sx + (int32_t)frame_w - (int32_t)WLD_TITLE_BTN_PAD - (int32_t)WLD_TITLE_BTN_SZ + (int32_t)(WLD_TITLE_BTN_SZ / 2U) - 1,
+                      sy + (int32_t)WLD_TITLE_BTN_PAD + 2,
+                      2U,
+                      WLD_TITLE_BTN_SZ - 4U,
+                      0x00FFFFFFU);
+        wld_fill_rect(dst,
+                      sx + (int32_t)frame_w - (int32_t)WLD_TITLE_BTN_PAD - (int32_t)WLD_TITLE_BTN_SZ + 2,
+                      sy + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)(WLD_TITLE_BTN_SZ / 2U) - 1,
+                      WLD_TITLE_BTN_SZ - 4U,
+                      2U,
+                      0x00FFFFFFU);
 
         content_x = (uint32_t)(sx + (int32_t)border);
         content_y = (uint32_t)(sy + (int32_t)title_h + (int32_t)border);
@@ -751,7 +1250,10 @@ static void composite_and_present(void)
                       content_w, content_h, 0x00070a10U);
 
         if (surf->fade_ticks > 0U) {
-            alpha = ((uint32_t)(9U - surf->fade_ticks) * 255U) / 8U;
+            if (surf->closing)
+                alpha = ((uint32_t)surf->fade_ticks * 255U) / 8U;
+            else
+                alpha = ((uint32_t)(9U - surf->fade_ticks) * 255U) / 8U;
             if (alpha > 255U)
                 alpha = 255U;
         }
@@ -764,6 +1266,8 @@ static void composite_and_present(void)
             surf->fade_ticks--;
     }
     }
+
+    wld_draw_cursor(dst, wld_pointer_x, wld_pointer_y, wld_pointer_buttons);
 
     wld_present((long)WLD_FB_W, (long)WLD_FB_H, (long)(WLD_FB_W * 4U));
     wld_present_count++;
@@ -807,6 +1311,7 @@ static void send_globals(wclient_t *c, uint32_t reg_id)
         { GLOBAL_SEAT,       "wl_seat",         5U },
         { GLOBAL_OUTPUT,     "wl_output",       3U },
         { GLOBAL_ENLIL_WM,   "enlil_wm_v1",    1U },
+        { GLOBAL_ENLIL_TERM, "enlil_term_v1",  1U },
     };
     for (uint32_t i = 0U; i < (uint32_t)(sizeof(globals) / sizeof(globals[0])); i++) {
         uint32_t slen  = (uint32_t)(wld_strlen(globals[i].iface) + 1U);
@@ -963,6 +1468,8 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             } else if (name == GLOBAL_ENLIL_WM) {
                 wobj_alloc(c, new_id, WOBJ_ENLIL_WM, 0U);
                 wld_send_wm_state(c, new_id);
+            } else if (name == GLOBAL_ENLIL_TERM) {
+                wobj_alloc(c, new_id, WOBJ_ENLIL_TERM, 0U);
             }
         }
         return;
@@ -1068,6 +1575,8 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             surf->frame_cb_id = cb_id;
         } else if (opcode == WL_SURFACE_COMMIT && surf) {
             surf->current_buf = surf->pending_buf;
+            surf->closing = 0U;
+            surf->close_sent = 0U;
             surf->fade_ticks = 8U;
             if (wld_focus_idx >= WLD_MAX_SURFACES || !wsurf_is_viewable(&wld_surfs[wld_focus_idx]))
                 wld_focus_idx = si;
@@ -1078,6 +1587,8 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
                 send_configure(c, surf);
             }
         } else if (opcode == WL_SURFACE_DESTROY && surf) {
+            if (c->term_surface_obj == surf->surface_obj)
+                c->term_surface_obj = 0U;
             surf->alive = 0U;
             obj->alive  = 0U;
             wld_relayout(1);
@@ -1153,6 +1664,26 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             wld_send_wm_state(c, obj_id);
         } else if (opcode == ENLIL_WM_GET_STATE) {
             wld_send_wm_state(c, obj_id);
+        } else if (opcode == ENLIL_WM_SET_FOCUS_POLICY && payload_len >= 4U) {
+            uint32_t policy = in_u32(payload);
+            wld_focus_follow_pointer = (policy == ENLIL_WM_FOCUS_POINTER) ? 1U : 0U;
+            wld_send_wm_state(c, obj_id);
+        }
+        return;
+    }
+
+    if (obj->type == WOBJ_ENLIL_TERM) {
+        if (opcode == ENLIL_TERM_ATTACH_SURFACE && payload_len >= 4U) {
+            uint32_t surf_id = in_u32(payload);
+            wobj_t   *so = wobj_find(c, surf_id);
+
+            if (so && so->type == WOBJ_SURFACE) {
+                c->term_obj_id = obj_id;
+                c->term_surface_obj = surf_id;
+            }
+        } else if (opcode == ENLIL_TERM_RELEASE) {
+            c->term_obj_id = 0U;
+            c->term_surface_obj = 0U;
         }
         return;
     }
@@ -1323,11 +1854,15 @@ static int wld_main(void)
             }
         }
 
+        wld_handle_keyboard();
+        wld_handle_mouse();
+
         /* Frame: ogni ~16ms componi e presenta */
         long now_ms = wld_gettimeofday_ms();
         if (now_ms - last_frame_ms >= 16L) {
             last_frame_ms = now_ms;
             composite_and_present();
+            wld_process_pending_closes();
             send_frame_dones();
         }
 
