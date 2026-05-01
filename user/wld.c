@@ -64,7 +64,7 @@
 #define WLD_O_TRUNC   01000
 
 #define WLD_READY_PATH "/data/WLDREADY.TXT"
-#define WLD_WTERM_PATH "/WTERM.ELF"
+#define WLD_HELLO_PATH "/HELLO.ELF"
 
 #define WLD_KEY_HOME       102U
 #define WLD_KEY_UP         103U
@@ -85,13 +85,26 @@
 #define WLD_FRAME_BORDER 2U
 #define WLD_TITLE_BTN_SZ 12U
 #define WLD_TITLE_BTN_PAD 5U
+#define WLD_INPUT_BUDGET_PER_TICK 32U
 
 /* ── Mini strlib ────────────────────────────────────────────────── */
 static void wld_memcpy(void *d, const void *s, long n)
 {
     char *dd = (char *)d;
     const char *ss = (const char *)s;
-    while (n-- > 0) *dd++ = *ss++;
+    if (dd == ss || n <= 0L)
+        return;
+
+    if (dd < ss || dd >= ss + n) {
+        while (n-- > 0)
+            *dd++ = *ss++;
+        return;
+    }
+
+    dd += n;
+    ss += n;
+    while (n-- > 0)
+        *--dd = *--ss;
 }
 static void wld_memset(void *d, int v, long n)
 {
@@ -281,11 +294,14 @@ typedef struct {
     uint32_t view_w;
     uint32_t view_h;
     char     title[64];
+    char     app_id[32];
     uint8_t  configured;
     uint8_t  focused;
     uint8_t  fade_ticks;
     uint8_t  closing;
     uint8_t  close_sent;
+    uint8_t  floating;
+    uint8_t  placed;
     uint8_t  _pad0[2];
 } wsurf_t;
 
@@ -320,7 +336,50 @@ static uint32_t wld_focus_idx = 0xFFFFU;
 static int32_t  wld_pointer_x = (int32_t)(WLD_FB_W / 2U);
 static int32_t  wld_pointer_y = (int32_t)(WLD_FB_H / 2U);
 static uint32_t wld_pointer_buttons;
-static uint8_t  wld_focus_follow_pointer = 1U;
+static uint8_t  wld_focus_follow_pointer = 0U;
+static uint8_t  wld_drag_active;
+static uint32_t wld_drag_idx = 0xFFFFU;
+static int32_t  wld_drag_off_x;
+static int32_t  wld_drag_off_y;
+static uint32_t wld_mouse_log_budget = 0U;
+static uint32_t wld_hello_debug_budget = 0U;
+
+static void wld_write_log(const char *s);
+static void wld_log_u32(uint32_t value);
+static void wld_log_i32(int32_t value);
+
+static int wld_is_hello_surface(const wsurf_t *surf)
+{
+    return surf &&
+           surf->app_id[0] == 'e' && surf->app_id[1] == 'n' && surf->app_id[2] == 'l' &&
+           surf->app_id[3] == 'i' && surf->app_id[4] == 'l' && surf->app_id[5] == '-' &&
+           surf->app_id[6] == 'h' && surf->app_id[7] == 'e' && surf->app_id[8] == 'l' &&
+           surf->app_id[9] == 'l' && surf->app_id[10] == 'o' && surf->app_id[11] == '\0';
+}
+
+static void wld_log_hello_surface(const char *tag, const wsurf_t *surf)
+{
+    if (!surf || wld_hello_debug_budget == 0U)
+        return;
+    wld_hello_debug_budget--;
+    wld_write_log("[WLD] hello ");
+    wld_write_log(tag);
+    wld_write_log(" x=");
+    wld_log_i32(surf->x);
+    wld_write_log(" y=");
+    wld_log_i32(surf->y);
+    wld_write_log(" vw=");
+    wld_log_u32(surf->view_w);
+    wld_write_log(" vh=");
+    wld_log_u32(surf->view_h);
+    wld_write_log(" cur=");
+    wld_log_u32(surf->current_buf);
+    wld_write_log(" cfg=");
+    wld_log_u32(surf->configured ? 1U : 0U);
+    wld_write_log(" float=");
+    wld_log_u32(surf->floating ? 1U : 0U);
+    wld_write_log("\n");
+}
 
 /* ── sockaddr_un ────────────────────────────────────────────────── */
 typedef struct {
@@ -400,6 +459,63 @@ static void wld_write_log(const char *s)
 {
     long len = wld_strlen(s);
     (void)user_svc3(WLD_SYS_WRITE, 2, (long)s, len); /* stderr fd=2 */
+}
+
+static void wld_log_u32(uint32_t value)
+{
+    char     buf[16];
+    uint32_t pos = 0U;
+
+    if (value == 0U) {
+        wld_write_log("0");
+        return;
+    }
+    while (value != 0U && pos < sizeof(buf)) {
+        buf[pos++] = (char)('0' + (value % 10U));
+        value /= 10U;
+    }
+    while (pos > 0U) {
+        char out[2];
+        out[0] = buf[--pos];
+        out[1] = '\0';
+        wld_write_log(out);
+    }
+}
+
+static void wld_log_i32(int32_t value)
+{
+    if (value < 0) {
+        wld_write_log("-");
+        wld_log_u32((uint32_t)(-value));
+        return;
+    }
+    wld_log_u32((uint32_t)value);
+}
+
+static void wld_log_mouse_event(const mouse_event_t *ev, uint32_t hit)
+{
+    if (!ev || wld_mouse_log_budget == 0U)
+        return;
+
+    wld_mouse_log_budget--;
+    wld_write_log("[WLD] mouse flags=");
+    wld_log_u32(ev->flags);
+    wld_write_log(" btn=");
+    wld_log_u32(ev->buttons);
+    wld_write_log(" x=");
+    wld_log_u32((uint32_t)wld_pointer_x);
+    wld_write_log(" y=");
+    wld_log_u32((uint32_t)wld_pointer_y);
+    wld_write_log(" dx=");
+    wld_log_i32(ev->dx);
+    wld_write_log(" dy=");
+    wld_log_i32(ev->dy);
+    wld_write_log(" hit=");
+    if (hit == 0xFFFFU)
+        wld_write_log("none");
+    else
+        wld_log_u32(hit);
+    wld_write_log("\n");
 }
 
 static void wld_write_ready_marker(void)
@@ -748,19 +864,23 @@ static void wld_request_close_focused(void)
     surf->fade_ticks = 8U;
 }
 
+static uint32_t wld_count_tiled_viewable(void);
+
 static void wld_relayout(int send_cfg)
 {
-    uint32_t count = wld_count_viewable();
+    uint32_t count = wld_count_tiled_viewable();
     uint32_t visible = 0U;
     const uint32_t gap = 12U;
     uint32_t avail_w;
     uint32_t col_w;
+    const uint32_t border = WLD_FRAME_BORDER;
+    const uint32_t title_h = WLD_TITLE_H;
 
     wld_focus_sanitize();
-    if (count == 0U)
-        return;
-
-    if (count == 1U) {
+    if (count == 0U) {
+        avail_w = 0U;
+        col_w = 0U;
+    } else if (count == 1U) {
         avail_w = WLD_FB_W - (gap * 2U);
         col_w = avail_w;
     } else {
@@ -779,13 +899,48 @@ static void wld_relayout(int send_cfg)
         if (!wsurf_is_viewable(surf))
             continue;
 
-        x = gap + visible * (col_w + gap);
-        surf->x = (int32_t)x;
-        surf->y = (int32_t)y;
-        surf->view_w = col_w;
-        surf->view_h = h;
+        if (wld_is_hello_surface(surf)) {
+            if (surf->current_buf < WLD_MAX_BUFFERS && wld_buffers[surf->current_buf].alive) {
+                wbuf_t *buf = &wld_buffers[surf->current_buf];
+                surf->view_w = buf->width + border * 2U;
+                surf->view_h = buf->height + title_h + border * 2U;
+            } else {
+                if (surf->view_w == 0U)
+                    surf->view_w = 364U;
+                if (surf->view_h == 0U)
+                    surf->view_h = 246U;
+            }
+            surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
+            surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
+        } else if (surf->floating) {
+            if (surf->current_buf < WLD_MAX_BUFFERS && wld_buffers[surf->current_buf].alive) {
+                wbuf_t *buf = &wld_buffers[surf->current_buf];
+                surf->view_w = buf->width + border * 2U;
+                surf->view_h = buf->height + title_h + border * 2U;
+            } else {
+                if (surf->view_w == 0U)
+                    surf->view_w = 320U;
+                if (surf->view_h == 0U)
+                    surf->view_h = 220U;
+            }
+            if (!surf->placed) {
+                uint32_t max_x = (WLD_FB_W > surf->view_w) ? (WLD_FB_W - surf->view_w) : 0U;
+                uint32_t max_y = (WLD_FB_H > surf->view_h) ? (WLD_FB_H - surf->view_h) : 0U;
+                surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
+                surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
+                if ((uint32_t)surf->x > max_x) surf->x = (int32_t)max_x;
+                if ((uint32_t)surf->y > max_y) surf->y = (int32_t)max_y;
+                surf->placed = 1U;
+            }
+        } else {
+            x = gap + visible * (col_w + gap);
+            surf->x = (int32_t)x;
+            surf->y = (int32_t)y;
+            surf->view_w = col_w;
+            surf->view_h = h;
+            visible++;
+        }
         surf->focused = (i == wld_focus_idx) ? 1U : 0U;
-        visible++;
 
         if (!send_cfg)
             continue;
@@ -896,6 +1051,25 @@ static int wld_surface_spawn_hit(const wsurf_t *surf, int32_t px, int32_t py)
            px < left + (int32_t)WLD_TITLE_BTN_SZ &&
            py >= sy + (int32_t)WLD_TITLE_BTN_PAD &&
            py < sy + (int32_t)WLD_TITLE_BTN_PAD + (int32_t)WLD_TITLE_BTN_SZ;
+}
+
+static int wld_surface_title_hit(const wsurf_t *surf, int32_t px, int32_t py)
+{
+    int32_t sx;
+    int32_t sy;
+    uint32_t frame_w;
+
+    if (!surf)
+        return 0;
+    wld_surface_frame_box(surf, &sx, &sy, &frame_w, NULL);
+    if (py < sy + (int32_t)WLD_FRAME_BORDER ||
+        py >= sy + (int32_t)WLD_FRAME_BORDER + (int32_t)WLD_TITLE_H)
+        return 0;
+    if (px < sx || px >= sx + (int32_t)frame_w)
+        return 0;
+    if (wld_surface_close_hit(surf, px, py) || wld_surface_spawn_hit(surf, px, py))
+        return 0;
+    return 1;
 }
 
 static uint32_t wld_hit_test_surface(int32_t px, int32_t py)
@@ -1030,11 +1204,11 @@ static uint32_t wld_key_to_term_bytes(const keyboard_event_t *ev, uint8_t out[8]
     return 0U;
 }
 
-static void wld_launch_terminal_window(void)
+static void wld_launch_hello_window(void)
 {
     uint32_t pid = 0U;
 
-    (void)wld_spawn(WLD_WTERM_PATH, &pid, 32U);
+    (void)wld_spawn(WLD_HELLO_PATH, &pid, 32U);
 }
 
 static void wld_process_pending_closes(void)
@@ -1063,14 +1237,34 @@ static void wld_process_pending_closes(void)
     }
 }
 
-static void wld_handle_keyboard(void)
+static uint32_t wld_count_tiled_viewable(void)
+{
+    uint32_t count = 0U;
+
+    for (uint32_t i = 0U; i < WLD_MAX_SURFACES; i++) {
+        if (!wsurf_is_viewable(&wld_surfs[i]))
+            continue;
+        if (wld_is_hello_surface(&wld_surfs[i]))
+            continue;
+        if (wld_surfs[i].floating)
+            continue;
+        count++;
+    }
+    return count;
+}
+
+static uint8_t wld_handle_keyboard(void)
 {
     keyboard_event_t ev;
+    uint32_t         budget = WLD_INPUT_BUDGET_PER_TICK;
+    uint8_t          dirty = 0U;
 
-    while (wld_kbd_get_event(&ev) > 0L) {
+    while (budget-- != 0U && wld_kbd_get_event(&ev) > 0L) {
         uint8_t   bytes[8];
         uint32_t  nbytes;
         wclient_t *term_client;
+
+        dirty = 1U;
 
         if (!ev.pressed)
             continue;
@@ -1079,7 +1273,7 @@ static void wld_handle_keyboard(void)
             if (ev.repeat)
                 continue;
             if (ev.keycode == KEY_ENTER || ev.unicode == '\n') {
-                wld_launch_terminal_window();
+                wld_launch_hello_window();
                 continue;
             }
             if (ev.keycode == KEY_Q || ev.unicode == 'q' || ev.unicode == 'Q') {
@@ -1100,16 +1294,22 @@ static void wld_handle_keyboard(void)
         if (nbytes > 0U)
             wld_send_term_input(term_client, bytes, nbytes);
     }
+
+    return dirty;
 }
 
-static void wld_handle_mouse(void)
+static uint8_t wld_handle_mouse(void)
 {
     mouse_event_t ev;
+    uint32_t      budget = WLD_INPUT_BUDGET_PER_TICK;
+    uint8_t       dirty = 0U;
 
-    while (wld_mouse_get_event(&ev) > 0L) {
+    while (budget-- != 0U && wld_mouse_get_event(&ev) > 0L) {
         uint32_t old_buttons = wld_pointer_buttons;
         uint32_t hit;
         uint32_t pressed_mask;
+
+        dirty = 1U;
 
         if (ev.flags & MOUSE_EVT_ABS) {
             wld_pointer_x = (int32_t)ev.x;
@@ -1126,17 +1326,37 @@ static void wld_handle_mouse(void)
 
         hit = wld_hit_test_surface(wld_pointer_x, wld_pointer_y);
         pressed_mask = (old_buttons ^ ev.buttons) & ev.buttons;
+        wld_log_mouse_event(&ev, hit);
 
         if (hit != 0xFFFFU) {
             if ((pressed_mask & MOUSE_BTN_LEFT) != 0U) {
                 if (wld_surface_close_hit(&wld_surfs[hit], wld_pointer_x, wld_pointer_y)) {
+                    if (wld_mouse_log_budget != 0U)
+                        wld_write_log("[WLD] mouse close button\n");
                     wld_focus_set(hit);
                     wld_request_close_focused();
                     continue;
                 }
                 if (wld_surface_spawn_hit(&wld_surfs[hit], wld_pointer_x, wld_pointer_y)) {
+                    if (wld_mouse_log_budget != 0U)
+                        wld_write_log("[WLD] mouse spawn button\n");
                     wld_focus_set(hit);
-                    wld_launch_terminal_window();
+                    wld_launch_hello_window();
+                    continue;
+                }
+                if (wld_surface_title_hit(&wld_surfs[hit], wld_pointer_x, wld_pointer_y)) {
+                    if (wld_mouse_log_budget != 0U)
+                        wld_write_log("[WLD] mouse drag start\n");
+                    wld_focus_set(hit);
+                    /* Se tiled: "stacca" dal layout e rendi floating */
+                    if (!wld_surfs[hit].floating) {
+                        wld_surfs[hit].floating = 1U;
+                        wld_surfs[hit].placed   = 1U;
+                    }
+                    wld_drag_active = 1U;
+                    wld_drag_idx = hit;
+                    wld_drag_off_x = wld_pointer_x - wld_surfs[hit].x;
+                    wld_drag_off_y = wld_pointer_y - wld_surfs[hit].y;
                     continue;
                 }
                 wld_focus_set(hit);
@@ -1146,10 +1366,47 @@ static void wld_handle_mouse(void)
             if (wld_focus_follow_pointer &&
                 (ev.flags & MOUSE_EVT_MOVE) &&
                 hit != wld_focus_idx) {
+                if (wld_mouse_log_budget != 0U)
+                    wld_write_log("[WLD] mouse focus follow\n");
                 wld_focus_set(hit);
             }
         }
+
+        if ((ev.flags & MOUSE_EVT_MOVE) && wld_drag_active &&
+            wld_drag_idx < WLD_MAX_SURFACES &&
+            wld_surfs[wld_drag_idx].alive && wld_surfs[wld_drag_idx].floating &&
+            (ev.buttons & MOUSE_BTN_LEFT) != 0U) {
+            wsurf_t *surf = &wld_surfs[wld_drag_idx];
+            int32_t nx = wld_pointer_x - wld_drag_off_x;
+            int32_t ny = wld_pointer_y - wld_drag_off_y;
+            int32_t max_x = (surf->view_w < WLD_FB_W) ? (int32_t)(WLD_FB_W - surf->view_w) : 0;
+            int32_t max_y = (surf->view_h < WLD_FB_H) ? (int32_t)(WLD_FB_H - surf->view_h) : 0;
+
+            if (nx < 0) nx = 0;
+            if (ny < 0) ny = 0;
+            if (nx > max_x) nx = max_x;
+            if (ny > max_y) ny = max_y;
+            surf->x = nx;
+            surf->y = ny;
+            surf->placed = 1U;
+            if (wld_mouse_log_budget != 0U) {
+                wld_write_log("[WLD] mouse drag move to ");
+                wld_log_i32(nx);
+                wld_write_log(",");
+                wld_log_i32(ny);
+                wld_write_log("\n");
+            }
+        }
+
+        if (wld_drag_active && (ev.buttons & MOUSE_BTN_LEFT) == 0U) {
+            if (wld_mouse_log_budget != 0U)
+                wld_write_log("[WLD] mouse drag stop\n");
+            wld_drag_active = 0U;
+            wld_drag_idx = 0xFFFFU;
+        }
     }
+
+    return dirty;
 }
 
 /* ── Compositor logic ───────────────────────────────────────────── */
@@ -1188,11 +1445,23 @@ static void composite_and_present(void)
             continue;
 
         wbuf_t *buf = &wld_buffers[surf->current_buf];
-        if (!buf->alive) continue;
-        if (buf->pool_idx >= WLD_MAX_POOLS) continue;
+        if (!buf->alive) {
+            if (wld_is_hello_surface(surf))
+                wld_log_hello_surface("skip-dead-buf", surf);
+            continue;
+        }
+        if (buf->pool_idx >= WLD_MAX_POOLS) {
+            if (wld_is_hello_surface(surf))
+                wld_log_hello_surface("skip-bad-pool", surf);
+            continue;
+        }
 
         wpool_t *pool = &wld_pools[buf->pool_idx];
-        if (!pool->alive || !pool->ptr) continue;
+        if (!pool->alive || !pool->ptr) {
+            if (wld_is_hello_surface(surf))
+                wld_log_hello_surface("skip-dead-pool", surf);
+            continue;
+        }
 
         uint8_t *src = (uint8_t *)pool->ptr + buf->offset;
         uint32_t w   = buf->width;
@@ -1270,12 +1539,14 @@ static void composite_and_present(void)
 
         if (surf->fade_ticks > 0U)
             surf->fade_ticks--;
+        if (wld_is_hello_surface(surf))
+            wld_log_hello_surface("draw", surf);
+
     }
     }
 
     wld_draw_cursor(dst, wld_pointer_x, wld_pointer_y, wld_pointer_buttons);
-
-    wld_present((long)WLD_FB_W, (long)WLD_FB_H, (long)(WLD_FB_W * 4U));
+    (void)wld_present((long)WLD_FB_W, (long)WLD_FB_H, (long)(WLD_FB_W * 4U));
     wld_present_count++;
 }
 
@@ -1587,6 +1858,8 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             if (wld_focus_idx >= WLD_MAX_SURFACES || !wsurf_is_viewable(&wld_surfs[wld_focus_idx]))
                 wld_focus_idx = si;
             wld_relayout(1);
+            if (wld_is_hello_surface(surf))
+                wld_log_hello_surface("commit", surf);
             /* If xdg_surface not yet configured, do it now */
             if (surf->xdg_surf_obj && !surf->configured) {
                 surf->configured = 1U;
@@ -1595,6 +1868,10 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
         } else if (opcode == WL_SURFACE_DESTROY && surf) {
             if (c->term_surface_obj == surf->surface_obj)
                 c->term_surface_obj = 0U;
+            if (wld_drag_active && wld_drag_idx == si) {
+                wld_drag_active = 0U;
+                wld_drag_idx = 0xFFFFU;
+            }
             surf->alive = 0U;
             obj->alive  = 0U;
             wld_relayout(1);
@@ -1648,6 +1925,21 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             parse_str(payload, payload_len, title, sizeof(title), &cons);
             if (cons > 0U && si < WLD_MAX_SURFACES)
                 wld_memcpy(wld_surfs[si].title, title, (long)(wld_strlen(title)+1));
+        } else if (opcode == XDG_TOP_SET_APP_ID && payload_len >= 4U) {
+            char app_id[32];
+            uint32_t cons = 0U;
+            parse_str(payload, payload_len, app_id, sizeof(app_id), &cons);
+            if (cons > 0U && si < WLD_MAX_SURFACES) {
+                wld_memcpy(wld_surfs[si].app_id, app_id,
+                           (long)(wld_strlen(app_id) + 1U));
+                if (wld_is_hello_surface(&wld_surfs[si])) {
+                    wld_surfs[si].floating = 1U;
+                    wld_surfs[si].placed = 0U;
+                    if (wsurf_is_viewable(&wld_surfs[si]))
+                        wld_relayout(1);
+                    wld_log_hello_surface("app-id", &wld_surfs[si]);
+                }
+            }
         }
         return;
     }
@@ -1835,12 +2127,11 @@ static int wld_main(void)
     /* Primo frame vuoto */
     composite_and_present();
 
-    /* Auto-lancia terminale: utente vede subito una finestra bash */
-    wld_launch_terminal_window();
-
-    long last_frame_ms = wld_gettimeofday_ms();
+    uint32_t frame_ticks = 0U;
 
     while (1) {
+        uint8_t dirty = 0U;
+
         /* Accetta nuovi client */
         accept_clients();
 
@@ -1850,26 +2141,36 @@ static int wld_main(void)
             if (!c->alive || c->fd < 0) continue;
 
             uint32_t avail = (uint32_t)(sizeof(c->ibuf) - c->ilen);
-            if (avail == 0U) { client_process_input(c); continue; }
+            if (avail == 0U) {
+                client_process_input(c);
+                dirty = 1U;
+                continue;
+            }
 
             long n = wld_recv(c->fd, c->ibuf + c->ilen, (long)avail,
                               0x40 /* MSG_DONTWAIT */);
             if (n > 0) {
                 c->ilen += (uint32_t)n;
                 client_process_input(c);
+                dirty = 1U;
             } else if (n == 0 || (n < 0 && n != -11 /* EAGAIN */)) {
                 /* connessione chiusa o errore */
                 client_close(c);
+                dirty = 1U;
             }
         }
 
-        wld_handle_keyboard();
-        wld_handle_mouse();
+        if (wld_handle_keyboard())
+            dirty = 1U;
+        if (wld_handle_mouse())
+            dirty = 1U;
 
-        /* Frame: ogni ~16ms componi e presenta */
-        long now_ms = wld_gettimeofday_ms();
-        if (now_ms - last_frame_ms >= 16L) {
-            last_frame_ms = now_ms;
+        /*
+         * Presenta subito quando lo stato cambia (commit/input/focus/drag),
+         * con un fallback periodico a ~60Hz per animazioni leggere.
+         */
+        if (dirty || ++frame_ticks >= 16U) {
+            frame_ticks = 0U;
             composite_and_present();
             wld_process_pending_closes();
             send_frame_dones();
