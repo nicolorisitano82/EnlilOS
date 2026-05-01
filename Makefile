@@ -252,6 +252,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/arksh_plugin_demo.c \
                         toolchain/smoke/wayland_demo.c \
                         toolchain/smoke/hello_wayland.c \
+                        toolchain/smoke/desktop_shell.c \
                         toolchain/smoke/wm_manager.c \
                         toolchain/smoke/wm_demo.c \
                         toolchain/smoke/wterm_demo.c
@@ -637,6 +638,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		WLD.ELF=user/wld.elf \
 		WLDDEMO.ELF=toolchain/smoke/wayland_demo.elf \
 		HELLO.ELF=toolchain/smoke/hello_wayland.elf \
+		DESKTOP.ELF=toolchain/smoke/desktop_shell.elf \
 		WM.ELF=toolchain/smoke/wm_manager.elf \
 		WMDEMO.ELF=toolchain/smoke/wm_demo.elf \
 		WTERM.ELF=toolchain/smoke/wterm_demo.elf \
@@ -683,6 +685,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
 		bin/wld=user/wld.elf \
 		bin/hello=toolchain/smoke/hello_wayland.elf \
+		bin/desktop=toolchain/smoke/desktop_shell.elf \
 		bin/wm=toolchain/smoke/wm_manager.elf \
 		bin/wterm=toolchain/smoke/wterm_demo.elf \
 		$(ARKSH_REAL_INITRD) \

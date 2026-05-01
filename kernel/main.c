@@ -2054,7 +2054,7 @@ static void bootcli_execute_command(void)
         bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("sysvipcdemo lancia un ELF che verifica shmget/shmat/semget/semop");
         bootcli_push_line("wm        lancia il window manager Wayland v1");
-        bootcli_push_line("desktop   apre una sessione Wayland persistente con la finestra Hello");
+        bootcli_push_line("desktop   apre desktop shell: dock + finder stile macOS (M12-02)");
         bootcli_push_line("hello     lancia la finestra Hello Wayland singola");
         bootcli_push_line("wmdemo    lancia due finestre Wayland per validare focus/close/layout");
         bootcli_push_line("wtermdemo lancia un terminale Wayland PTY con bash");
@@ -2520,23 +2520,23 @@ static void bootcli_execute_command(void)
     } else if (bootcli_streq(bootcli_input, "desktop") ||
                bootcli_streq(bootcli_input, "wayland")) {
         uint32_t     pid = 0U;
-        const char  *argv[3] = { "/HELLO.ELF", "--session", NULL };
+        const char  *argv[3] = { "/DESKTOP.ELF", "--session", NULL };
 
         if (!boot_restart_wayland(1500ULL)) {
             bootcli_push_line("desktop: Wayland non pronto.");
         } else {
             (void)vfs_unlink("/data/HELLOREADY.TXT");
             (void)vfs_unlink("/data/HELLOFAIL.TXT");
-            if (elf64_spawn_path_argv("/HELLO.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
+            if (elf64_spawn_path_argv("/DESKTOP.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
                 bootcli_push_line(elf64_last_error());
-            } else if (!boot_wait_regular_file("/data/HELLOREADY.TXT", 1500ULL)) {
+            } else if (!boot_wait_regular_file("/data/HELLOREADY.TXT", 2500ULL)) {
                 if (boot_task_alive(pid))
                     (void)signal_send_pid(pid, SIGTERM);
-                bootcli_push_line("desktop: finestra Hello non pronta.");
+                bootcli_push_line("desktop: shell non pronta.");
             } else {
                 bootcli_enter_wayland(pid, "desktop");
                 line[0] = '\0';
-                bootcli_buf_append(line, sizeof(line), "desktop Wayland avviato, pid=");
+                bootcli_buf_append(line, sizeof(line), "desktop shell avviata, pid=");
                 bootcli_buf_append_u32(line, sizeof(line), pid);
                 bootcli_push_line(line);
             }
@@ -2896,7 +2896,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-02e: prova 'tlsmtdemo' per TLS multi-thread, __thread ed errno per-thread.");
     bootcli_push_line("M11-05b: prova 'epolldemo' per epoll_create1(), ctl(), edge-trigger e timeout.");
     bootcli_push_line("M11-05c: prova 'sysvipcdemo' per shmget/shmat/shmdt e semget/semop/semctl.");
-    bootcli_push_line("M12-02: prova 'desktop' o 'hello' per la finestra Wayland trascinabile, 'wmdemo' per due finestre demo.");
+    bootcli_push_line("M12-02: prova 'desktop' per desktop shell (dock+finder), 'hello' per finestra singola, 'wmdemo' per demo WM.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");

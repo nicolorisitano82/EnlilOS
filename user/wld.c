@@ -158,6 +158,7 @@ static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha);
 #define WOBJ_REGION        14
 #define WOBJ_ENLIL_WM      15
 #define WOBJ_ENLIL_TERM    16
+#define WOBJ_POINTER       17
 
 /* ── Global registry names ──────────────────────────────────────── */
 #define GLOBAL_COMPOSITOR  1U
@@ -165,8 +166,9 @@ static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha);
 #define GLOBAL_XDG_WM      3U
 #define GLOBAL_SEAT        4U
 #define GLOBAL_OUTPUT      5U
-#define GLOBAL_ENLIL_WM    6U
-#define GLOBAL_ENLIL_TERM  7U
+#define GLOBAL_ENLIL_WM      6U
+#define GLOBAL_ENLIL_TERM    7U
+#define GLOBAL_ENLIL_POINTER 8U
 
 /* ── Pixel formats ──────────────────────────────────────────────── */
 #define WL_SHM_FORMAT_ARGB8888  0U
@@ -199,6 +201,10 @@ static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha);
 #define ENLIL_WM_STATE           0U
 /* enlil_term_v1 events */
 #define ENLIL_TERM_INPUT         0U
+/* enlil_pointer_v1 events */
+#define ENLIL_POINTER_EVENT      0U
+/* enlil_pointer_v1 requests */
+#define ENLIL_POINTER_REGISTER   0U
 
 /* ── Wayland message opcodes (client requests) ──────────────────── */
 /* wl_display */
@@ -311,6 +317,7 @@ typedef struct {
     uint32_t serial;
     uint32_t term_obj_id;
     uint32_t term_surface_obj;
+    uint32_t pointer_obj_id;   /* enlil_pointer_v1 listener, 0=none */
     wobj_t   objs[WLD_MAX_OBJS];
     uint32_t obj_count;
     /* input buffer */
@@ -355,6 +362,25 @@ static int wld_is_hello_surface(const wsurf_t *surf)
            surf->app_id[3] == 'i' && surf->app_id[4] == 'l' && surf->app_id[5] == '-' &&
            surf->app_id[6] == 'h' && surf->app_id[7] == 'e' && surf->app_id[8] == 'l' &&
            surf->app_id[9] == 'l' && surf->app_id[10] == 'o' && surf->app_id[11] == '\0';
+}
+
+static int wld_is_dock_surface(const wsurf_t *surf)
+{
+    return surf &&
+           surf->app_id[0] == 'e' && surf->app_id[1] == 'n' && surf->app_id[2] == 'l' &&
+           surf->app_id[3] == 'i' && surf->app_id[4] == 'l' && surf->app_id[5] == '-' &&
+           surf->app_id[6] == 'd' && surf->app_id[7] == 'o' && surf->app_id[8] == 'c' &&
+           surf->app_id[9] == 'k' && surf->app_id[10] == '\0';
+}
+
+static int wld_is_finder_surface(const wsurf_t *surf)
+{
+    return surf &&
+           surf->app_id[0] == 'e' && surf->app_id[1] == 'n' && surf->app_id[2] == 'l' &&
+           surf->app_id[3] == 'i' && surf->app_id[4] == 'l' && surf->app_id[5] == '-' &&
+           surf->app_id[6] == 'f' && surf->app_id[7] == 'i' && surf->app_id[8] == 'n' &&
+           surf->app_id[9] == 'd' && surf->app_id[10] == 'e' && surf->app_id[11] == 'r' &&
+           surf->app_id[12] == '\0';
 }
 
 static void wld_log_hello_surface(const char *tag, const wsurf_t *surf)
@@ -832,6 +858,8 @@ static void wld_focus_sanitize(void)
     for (uint32_t i = 0U; i < WLD_MAX_SURFACES; i++) {
         if (!wsurf_is_viewable(&wld_surfs[i]))
             continue;
+        if (wld_is_dock_surface(&wld_surfs[i]))
+            continue;
         wld_focus_idx = i;
         return;
     }
@@ -845,6 +873,21 @@ static void wld_send_wm_state(wclient_t *c, uint32_t obj_id)
     out_u32(c, wld_focus_idx);
     out_u32(c, wld_present_count);
     client_flush(c);
+}
+
+static void wld_broadcast_pointer(int32_t px, int32_t py, uint32_t buttons)
+{
+    for (uint32_t ci = 0U; ci < WLD_MAX_CLIENTS; ci++) {
+        wclient_t *c = &wld_clients[ci];
+        if (!c->alive || c->pointer_obj_id == 0U)
+            continue;
+        /* enlil_pointer_v1.pointer_event(x, y, buttons) */
+        msg_begin(c, c->pointer_obj_id, ENLIL_POINTER_EVENT, 12U);
+        out_u32(c, (uint32_t)px);
+        out_u32(c, (uint32_t)py);
+        out_u32(c, buttons);
+        client_flush(c);
+    }
 }
 
 static void wld_request_close_focused(void)
@@ -899,7 +942,26 @@ static void wld_relayout(int send_cfg)
         if (!wsurf_is_viewable(surf))
             continue;
 
-        if (wld_is_hello_surface(surf)) {
+        if (wld_is_dock_surface(surf)) {
+            /* Dock: pinned bottom, no decoration, exact buffer size */
+            if (surf->current_buf < WLD_MAX_BUFFERS && wld_buffers[surf->current_buf].alive) {
+                wbuf_t *buf = &wld_buffers[surf->current_buf];
+                surf->view_w = buf->width;
+                surf->view_h = buf->height;
+            } else {
+                if (surf->view_w == 0U) surf->view_w = WLD_FB_W;
+                if (surf->view_h == 0U) surf->view_h = 56U;
+            }
+            surf->x = 0;
+            surf->y = (int32_t)(WLD_FB_H - surf->view_h);
+            surf->placed = 1U;
+            /* No focus for dock */
+            if (send_cfg) {
+                if (surf->client_idx < WLD_MAX_CLIENTS && wld_clients[surf->client_idx].alive)
+                    send_configure(&wld_clients[surf->client_idx], surf);
+            }
+            continue;
+        } else if (wld_is_hello_surface(surf)) {
             if (surf->current_buf < WLD_MAX_BUFFERS && wld_buffers[surf->current_buf].alive) {
                 wbuf_t *buf = &wld_buffers[surf->current_buf];
                 surf->view_w = buf->width + border * 2U;
@@ -1249,6 +1311,8 @@ static uint32_t wld_count_tiled_viewable(void)
             continue;
         if (wld_is_hello_surface(&wld_surfs[i]))
             continue;
+        if (wld_is_dock_surface(&wld_surfs[i]))
+            continue;
         if (wld_surfs[i].floating)
             continue;
         count++;
@@ -1330,6 +1394,18 @@ static uint8_t wld_handle_mouse(void)
         hit = wld_hit_test_surface(wld_pointer_x, wld_pointer_y);
         pressed_mask = (old_buttons ^ ev.buttons) & ev.buttons;
         wld_log_mouse_event(&ev, hit);
+
+        /* Broadcast pointer to enlil_pointer_v1 listeners on any button event */
+        if ((pressed_mask | ((old_buttons ^ ev.buttons) & old_buttons)) != 0U)
+            wld_broadcast_pointer(wld_pointer_x, wld_pointer_y, ev.buttons);
+        /* Also broadcast on move so dock can do hover */
+        else if ((ev.flags & MOUSE_EVT_MOVE) && wld_pointer_buttons != 0U)
+            wld_broadcast_pointer(wld_pointer_x, wld_pointer_y, ev.buttons);
+
+        if (hit != 0xFFFFU && wld_is_dock_surface(&wld_surfs[hit])) {
+            /* Dock: pointer already broadcast above; no focus change */
+            continue;
+        }
 
         if (hit != 0xFFFFU) {
             if ((pressed_mask & MOUSE_BTN_LEFT) != 0U) {
@@ -1441,6 +1517,8 @@ static void composite_and_present(void)
 
         if (!wsurf_is_viewable(surf))
             continue;
+        if (wld_is_dock_surface(surf))
+            continue;  /* dock rendered in separate pass below */
         focused = (si == wld_focus_idx) ? 1U : 0U;
         if ((pass == 0U && focused) || (pass == 1U && !focused))
             continue;
@@ -1546,6 +1624,27 @@ static void composite_and_present(void)
     }
     }
 
+    /* ── Pass 3: dock on top, no decoration ────────────────────────── */
+    for (uint32_t si = 0U; si < WLD_MAX_SURFACES; si++) {
+        wsurf_t *surf = &wld_surfs[si];
+
+        if (!wsurf_is_viewable(surf) || !wld_is_dock_surface(surf))
+            continue;
+
+        wbuf_t *buf = &wld_buffers[surf->current_buf];
+        if (!buf->alive || buf->pool_idx >= WLD_MAX_POOLS)
+            continue;
+        wpool_t *pool = &wld_pools[buf->pool_idx];
+        if (!pool->alive || !pool->ptr)
+            continue;
+
+        uint8_t *src = (uint8_t *)pool->ptr + buf->offset;
+        wld_blit_scaled(dst, surf->x, surf->y,
+                        surf->view_w, surf->view_h,
+                        (const uint32_t *)src,
+                        buf->width, buf->height, buf->stride / 4U, 255U);
+    }
+
     wld_draw_cursor(dst, wld_pointer_x, wld_pointer_y, wld_pointer_buttons);
     (void)wld_present((long)WLD_FB_W, (long)WLD_FB_H, (long)(WLD_FB_W * 4U));
     wld_present_count++;
@@ -1583,13 +1682,14 @@ static void send_frame_dones(void)
 static void send_globals(wclient_t *c, uint32_t reg_id)
 {
     struct { uint32_t name; const char *iface; uint32_t ver; } globals[] = {
-        { GLOBAL_COMPOSITOR, "wl_compositor",  4U },
-        { GLOBAL_SHM,        "wl_shm",         1U },
-        { GLOBAL_XDG_WM,     "xdg_wm_base",    1U },
-        { GLOBAL_SEAT,       "wl_seat",         5U },
-        { GLOBAL_OUTPUT,     "wl_output",       3U },
-        { GLOBAL_ENLIL_WM,   "enlil_wm_v1",    1U },
-        { GLOBAL_ENLIL_TERM, "enlil_term_v1",  1U },
+        { GLOBAL_COMPOSITOR,    "wl_compositor",      4U },
+        { GLOBAL_SHM,           "wl_shm",             1U },
+        { GLOBAL_XDG_WM,        "xdg_wm_base",        1U },
+        { GLOBAL_SEAT,          "wl_seat",             5U },
+        { GLOBAL_OUTPUT,        "wl_output",           3U },
+        { GLOBAL_ENLIL_WM,      "enlil_wm_v1",        1U },
+        { GLOBAL_ENLIL_TERM,    "enlil_term_v1",      1U },
+        { GLOBAL_ENLIL_POINTER, "enlil_pointer_v1",   1U },
     };
     for (uint32_t i = 0U; i < (uint32_t)(sizeof(globals) / sizeof(globals[0])); i++) {
         uint32_t slen  = (uint32_t)(wld_strlen(globals[i].iface) + 1U);
@@ -1748,6 +1848,9 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
                 wld_send_wm_state(c, new_id);
             } else if (name == GLOBAL_ENLIL_TERM) {
                 wobj_alloc(c, new_id, WOBJ_ENLIL_TERM, 0U);
+            } else if (name == GLOBAL_ENLIL_POINTER) {
+                wobj_alloc(c, new_id, WOBJ_POINTER, 0U);
+                c->pointer_obj_id = new_id;
             }
         }
         return;
@@ -1933,15 +2036,28 @@ static void dispatch_msg(wclient_t *c, uint32_t obj_id, uint32_t opcode,
             if (cons > 0U && si < WLD_MAX_SURFACES) {
                 wld_memcpy(wld_surfs[si].app_id, app_id,
                            (long)(wld_strlen(app_id) + 1U));
-                if (wld_is_hello_surface(&wld_surfs[si])) {
+                if (wld_is_hello_surface(&wld_surfs[si]) ||
+                    wld_is_finder_surface(&wld_surfs[si])) {
                     wld_surfs[si].floating = 1U;
                     wld_surfs[si].placed = 0U;
                     if (wsurf_is_viewable(&wld_surfs[si]))
                         wld_relayout(1);
-                    wld_log_hello_surface("app-id", &wld_surfs[si]);
+                    if (wld_is_hello_surface(&wld_surfs[si]))
+                        wld_log_hello_surface("app-id", &wld_surfs[si]);
+                } else if (wld_is_dock_surface(&wld_surfs[si])) {
+                    /* Dock stays pinned — relayout will position it */
+                    wld_surfs[si].floating = 0U;
+                    wld_surfs[si].placed = 0U;
+                    if (wsurf_is_viewable(&wld_surfs[si]))
+                        wld_relayout(1);
                 }
             }
         }
+        return;
+    }
+
+    if (obj->type == WOBJ_POINTER) {
+        /* enlil_pointer_v1 has no client→server requests in v1 */
         return;
     }
 
