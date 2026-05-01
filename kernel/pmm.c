@@ -279,33 +279,24 @@ uint64_t phys_alloc_page(void)
         while (1) __asm__ volatile("wfe");
     }
 
-    /* Splitta da 'order' fino a 0, reinserendo la metà superiore */
-    while (order > 0) {
-        blk_node_t *node = list_pop(&buddy_sent[order]);
-        uint64_t pa      = (uint64_t)(uintptr_t)node;
-
-        buddy_count[order]--;
-        total_free_pages -= (1U << order);
-
-        /* Marca la testa come non-free (sarà ri-settato se torna libera) */
-        uint32_t idx = (uint32_t)PA_TO_IDX(pa);
-        page_state[idx] = PAGE_ALLOC;
-        page_ord[idx]   = 0xFF;
-
-        order--;
-        uint64_t half = (uint64_t)PAGE_SIZE << order;
-
-        /* Rimetti la metà superiore nell'ordine inferiore */
-        buddy_add_block(pa + half, order);
-    }
-
-    /* Ora ordine 0 ha almeno un blocco */
-    blk_node_t *node = list_pop(&buddy_sent[0]);
+    /* Pop il blocco all'ordine trovato */
+    blk_node_t *node = list_pop(&buddy_sent[order]);
     uint64_t pa      = (uint64_t)(uintptr_t)node;
 
-    buddy_count[0]--;
-    total_free_pages--;
+    buddy_count[order]--;
+    total_free_pages -= (1U << order);
 
+    /* Splitta pa da 'order' fino a 0, tenendo la metà inferiore (pa)
+     * e rimettendo la metà superiore nella free list al giusto ordine.
+     * CORRETTO: pa non cambia — split in-place senza re-pop. */
+    while (order > 0) {
+        order--;
+        uint64_t half = (uint64_t)PAGE_SIZE << order;
+        buddy_add_block(pa + half, order);   /* metà superiore → free list */
+        /* pa = metà inferiore, continua split */
+    }
+
+    /* pa è ora una singola pagina (ordine 0) */
     uint32_t idx = (uint32_t)PA_TO_IDX(pa);
     page_state[idx] = PAGE_ALLOC;
     page_ord[idx]   = 0xFF;
@@ -335,28 +326,22 @@ uint64_t phys_alloc_pages(uint32_t order)
         while (1) __asm__ volatile("wfe");
     }
 
-    /* Splitta da 'found' fino a 'order' */
-    while (found > order) {
-        blk_node_t *node = list_pop(&buddy_sent[found]);
-        uint64_t pa      = (uint64_t)(uintptr_t)node;
-
-        buddy_count[found]--;
-        total_free_pages -= (1U << found);
-
-        uint32_t idx = (uint32_t)PA_TO_IDX(pa);
-        page_state[idx] = PAGE_ALLOC;
-        page_ord[idx]   = 0xFF;
-
-        found--;
-        buddy_add_block(pa + ((uint64_t)PAGE_SIZE << found), found);
-    }
-
-    blk_node_t *node = list_pop(&buddy_sent[order]);
+    /* Pop il blocco all'ordine trovato */
+    blk_node_t *node = list_pop(&buddy_sent[found]);
     uint64_t pa      = (uint64_t)(uintptr_t)node;
 
-    buddy_count[order]--;
-    total_free_pages -= (1U << order);
+    buddy_count[found]--;
+    total_free_pages -= (1U << found);
 
+    /* Splitta pa da 'found' fino a 'order', tenendo la metà inferiore (pa).
+     * CORRETTO: pa non cambia — split in-place senza re-pop. */
+    while (found > order) {
+        found--;
+        buddy_add_block(pa + ((uint64_t)PAGE_SIZE << found), found);
+        /* pa = metà inferiore */
+    }
+
+    /* pa è ora un blocco di 2^order pagine — nessun altro pop necessario */
     uint32_t idx = (uint32_t)PA_TO_IDX(pa);
     page_state[idx] = PAGE_ALLOC;
     page_ord[idx]   = 0xFF;
