@@ -1718,6 +1718,13 @@ static int bootcli_poll_wayland(void)
         have_exit_code = 1;
 
     bootcli_copy_trunc(wayland_name, bootcli_wayland_name, sizeof(wayland_name));
+
+    /* Termina wm e wld prima di tornare in UI mode (evita blink) */
+    boot_stop_task(&bootcli_wm_pid,  200ULL);
+    boot_stop_task(&bootcli_wld_pid, 350ULL);
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+
     bootcli_mode = BOOTCLI_MODE_UI;
     gpu_set_2d_present_enabled(true);
     bootcli_wayland_pid = 0U;
@@ -1773,6 +1780,14 @@ static int bootcli_abort_wayland_session(const char *reason)
     task = sched_task_find(pid);
     if (task && sched_task_get_exit_code(task, &exit_code) == 0)
         have_exit_code = 1;
+
+    /* Termina wm e wld PRIMA di tornare in UI mode, altrimenti wld
+     * continua a scrivere sul framebuffer → bootcli + wld si alternano
+     * → sfarfallio (blink). */
+    boot_stop_task(&bootcli_wm_pid,  200ULL);
+    boot_stop_task(&bootcli_wld_pid, 350ULL);
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
 
     bootcli_mode = BOOTCLI_MODE_UI;
     gpu_set_2d_present_enabled(true);

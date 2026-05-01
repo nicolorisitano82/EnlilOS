@@ -910,8 +910,11 @@ static void wld_relayout(int send_cfg)
                 if (surf->view_h == 0U)
                     surf->view_h = 246U;
             }
-            surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
-            surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
+            if (!surf->placed) {
+                surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
+                surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
+                surf->placed = 1U;
+            }
         } else if (surf->floating) {
             if (surf->current_buf < WLD_MAX_BUFFERS && wld_buffers[surf->current_buf].alive) {
                 wbuf_t *buf = &wld_buffers[surf->current_buf];
@@ -1348,11 +1351,9 @@ static uint8_t wld_handle_mouse(void)
                     if (wld_mouse_log_budget != 0U)
                         wld_write_log("[WLD] mouse drag start\n");
                     wld_focus_set(hit);
-                    /* Se tiled: "stacca" dal layout e rendi floating */
-                    if (!wld_surfs[hit].floating) {
-                        wld_surfs[hit].floating = 1U;
-                        wld_surfs[hit].placed   = 1U;
-                    }
+                    /* Stacca dal layout tiled (se necessario) e marca placed */
+                    wld_surfs[hit].floating = 1U;
+                    wld_surfs[hit].placed   = 1U;
                     wld_drag_active = 1U;
                     wld_drag_idx = hit;
                     wld_drag_off_x = wld_pointer_x - wld_surfs[hit].x;
