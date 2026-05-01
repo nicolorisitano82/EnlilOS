@@ -747,7 +747,7 @@ int main(int argc, char **argv)
                     /* Dock click */
                     if (dock_btn_hit(px, py, &btn)) {
                         if (btn == 0)       /* Terminale */
-                            ds_spawn("/WTERMDEMO.ELF");
+                            ds_spawn("/WTERM.ELF");
                         else if (btn == 1)  /* File — navigate to root */
                             strcpy(st.cwd, "/");
                         /* btn==2 Opzioni: no-op v1 */
