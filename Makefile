@@ -264,6 +264,11 @@ ARKSH_CMAKE_FLAGS     = -DCMAKE_TOOLCHAIN_FILE=$(abspath $(ARKSH_TOOLCHAIN_FILE)
                         -DENLILOS_COMPAT_DIR=$(abspath $(ARKSH_COMPAT_DIR))
 ARKSH_REAL_INITRD     = $(if $(wildcard $(ARKSH_REAL_ELF)),bin/arksh.real=$(ARKSH_REAL_ELF),)
 BASH_NATIVE_INITRD    = $(if $(wildcard $(BASH_NATIVE_ELF)),BASH.ELF=$(BASH_NATIVE_ELF) bin/bash=$(BASH_NATIVE_ELF),)
+# Populate sysroot/usr/bin/bash with the native bash when linux-compat is NOT
+# staged. This prevents spurious boot_open fail: /sysroot/usr/bin/bash log
+# messages when mount-6 (linux_compat) tries that backend path.
+# When linux-compat IS staged, tree:sysroot provides the real glibc bash there.
+BASH_SYSROOT_FALLBACK = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),,$(if $(wildcard $(BASH_NATIVE_ELF)),sysroot/usr/bin/bash=$(BASH_NATIVE_ELF),))
 LINUX_COMPAT_INITRD   = $(if $(wildcard $(LINUX_COMPAT_STAGE_MARK)),tree:sysroot=$(LINUX_COMPAT_STAGE_DIR),)
 BASH_LINUX_BINARY     = bash-linux/bash-linux-aarch64
 BASH_LINUX_INITRD     = $(if $(wildcard $(BASH_LINUX_BINARY)),BASH-LINUX.ELF=$(BASH_LINUX_BINARY),)
@@ -727,6 +732,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		libdyn.so=user/libdyn.so \
 		LD-ENLIL.SO=user/ld_enlil.so \
 		$(BASH_LINUX_INITRD) \
+		$(BASH_SYSROOT_FALLBACK) \
 		$(LINUX_COMPAT_INITRD) NSH.ELF=user/nsh.elf
 
 $(INITRD_EMBEDOBJ): $(INITRD_CPIO)

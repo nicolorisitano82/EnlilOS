@@ -471,7 +471,14 @@ static void vfsd_namespace_seed(vfsd_namespace_t *ns)
     ns->mounts[9].readonly = 1U;
     ns->mounts[9].linux_compat = 1U;
     vfsd_strlcpy(ns->mounts[9].mount_at, "/bin/sh", sizeof(ns->mounts[9].mount_at));
-    vfsd_strlcpy(ns->mounts[9].backend, "/sysroot/usr/bin/bash", sizeof(ns->mounts[9].backend));
+    /* Backend: linux-compat bash when staged, native bash otherwise.
+     * Native /bin/bash always exists; linux-compat /sysroot/usr/bin/bash
+     * only when `make linux-compat-stage` has been run.
+     * linux_compat=1 → try /sysroot/usr/bin/bash first (stat), fall
+     * back to /bin/bash via mount 0 if not found.  Set backend to
+     * /bin/bash directly so the first attempt already succeeds without
+     * spurious boot_open fail logs. */
+    vfsd_strlcpy(ns->mounts[9].backend, "/bin/bash", sizeof(ns->mounts[9].backend));
 }
 
 static void vfsd_namespace_init(void)
