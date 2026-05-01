@@ -2546,17 +2546,26 @@ delle superfici e invia il frame finale al display engine.
 
 ---
 
-### ⬜ M12-02 · Window Manager RT (`wm`)
+### ✅ M12-02 · Window Manager RT (`wm`)
 **Priorità:** MEDIA (dipende da M12-01)
 
 Window manager separato dal compositor (Wayland standard: WM è un client speciale).
 
-- Decorazioni server-side: barra titolo, bordi, ombra (renderizzati via M5b-04)
-- Tiling layout: suddivisione schermo in colonne/righe (stile `sway`/`i3`)
-- Focus: click-to-focus, segue il puntatore opzionale
-- Animazioni: fade-in/out con alpha blend GPU — bounded latency, massimo 8 frame
-- Shortcut globali: `SUPER+ENTER` apre terminale, `SUPER+Q` chiude finestra
+Chiusa in `v1`: client WM separato `WM.ELF`, decorazioni server-side, tiling
+base, focus ciclico via protocollo privato `enlil_wm_v1`, click-to-focus,
+focus-follows-pointer opzionale, shortcut globali `SUPER+ENTER` e `SUPER+Q`,
+fade-in/fade-out bounded, demo `WMDEMO.ELF`, placeholder terminal-style
+`WTERM.ELF`, comando boot `wmdemo` e selftest `wm-core` verde.
+
+- Decorazioni server-side: barra titolo, bordi, ombra (renderizzati da `wld`)
+- Tiling layout: suddivisione base in colonne equal-width
+- Focus: click-to-focus e segue il puntatore opzionale
+- Animazioni: fade-in/out bounded, massimo 8 frame
+- Shortcut globali:
+  - `SUPER+ENTER` apre `WTERM.ELF`
+  - `SUPER+Q` chiude la finestra focalizzata
 - Comunicazione con `wld` via protocollo `xdg_wm_base` + estensione privata `enlil_wm_v1`
+- Validazione: `wm-core` + smoke interattivo `wmdemo`
 
 ---
 
@@ -3657,7 +3666,7 @@ FASE 10 ──► container + io_uring + power (opzionale)
 ## Prossimi passi — Progress Log Operativo Aggiornato
 
 > Questa sezione sostituisce operativamente gli snapshot piu' vecchi sopra.
-> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1`, `M8-08 plugin`, `M11-08` e `M12-01`: suite `selftest` a `61/61`.
+> Stato verificato dopo la chiusura di `M11-05a/b/c/d/e/f/g v1`, `M8-08 plugin`, `M11-08`, `M12-01` e `M12-02`: suite `selftest` a `62/62`.
 
 ### 1. Cosa e' gia' stato completato
 
@@ -3674,24 +3683,27 @@ FASE 10 ──► container + io_uring + power (opzionale)
   `ENLIL_BUNDLE_ROOT`, bundle demo `hello.enlil`, ricerca librerie bundled con priorità su `<bundle>/lib`
 - ✅ **Desktop bootstrap v1**: `M12-01` — compositor Wayland minimale `wld`, protocol subset base,
   socket `/run/wayland-0`, SHM via SysV IPC, present framebuffer e selftest `wayland-core`
+- ✅ **Window manager RT v1**: `M12-02` — `WM.ELF` separato da `wld`, decorazioni server-side,
+  tiling base, click-to-focus, focus-follows-pointer opzionale, shortcut `SUPER+ENTER`/`SUPER+Q`,
+  fade bounded, `WMDEMO.ELF`, `WTERM.ELF` e selftest `wm-core`
 - ✅ **Runtime C / POSIX bootstrap v1**: `M8-02`, `M8-08a`, `M8-08b`, `M8-08c`, `M8-08d`, `M8-08e`, `M8-08f`, `M8-08g`, `M11-01a`, `M11-01b`, `M11-01c`, `M11-03`
 - ✅ **Shell dinamica v1**: `M8-08 plugin` — `arksh` carica plugin `.so` nativi via `dlopen()`, con path runtime `/usr/lib/arksh/plugins/`, smoke `ARKSHPLUGIN.ELF` e selftest `arksh-plugin`
 - ✅ **Threading POSIX bootstrap v1**: `M11-02a`, `M11-02b`, `M11-02c`, `M11-02d`, `M11-02e`
-- ✅ **Stato validato**: `SUMMARY total=61 pass=61 fail=0`
+- ✅ **Stato validato**: `SUMMARY total=62 pass=62 fail=0`
 
 ### 2. Cosa resta da fare ad alta priorita'
 
 | Priorita' | Milestone | Dipende da | Perche' viene adesso |
 |-----------|-----------|------------|----------------------|
 | 1 | **M8-08h** i18n stringhe | `M8-08g` | Evita UX shell hardcoded `en_US` dopo layout chiusi |
-| 2 | **M12-02** Window manager RT | `M12-01 + M5b-04` | Il compositor base ora c'e': si puo' passare a focus, decorazioni e layout |
+| 2 | **M12-03** GPU shader compositor | `M12-01 + M12-02 + M5b-04` | Il desktop v1 ora c'e': il prossimo salto e' spostare il compositing sul path GPU |
 | 3 | **M11-07** Container primitives | `M11-05 + M9-04 + M10-01` | Namespace net/pid/uts, `pivot_root` hardening, cgroups v1 |
 | 4 | **M13-02** SMP bootstrap | kernel | Multicore + scheduler multicore |
 
 ### 3. Sequenza raccomandata per dipendenze
 
 1. **Migliorare l'usabilita' shell/input**: `M8-08h`
-2. **Desktop grafico**: `M12-02 -> M12-03`
+2. **Desktop grafico**: `M12-03`
 3. **Container e isolamento**: `M11-07`
 4. **Scalare su multicore e RT avanzato**: `M13-02 -> M13-03 -> (M13-01 || M13-04) -> M13-05`
 

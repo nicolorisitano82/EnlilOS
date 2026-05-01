@@ -3671,26 +3671,49 @@ static uint64_t sys_ioctl(uint64_t args[6])
     }
     case TIOCGPGRP: {
         uint32_t pgid;
+        pty_t    *pty_obj;
 
         if (!arg_uva)
             return ERR(EFAULT);
-        if (!fd_is_tty_object(obj))
-            return ERR(ENOTTY);
-        pgid = tty_tcgetpgrp();
+        pty_obj = fd_get_pty(obj);
+        if (pty_obj) {
+            pgid = pty_tcgetpgrp(pty_obj);
+        } else {
+            if (!fd_is_tty_object(obj))
+                return ERR(ENOTTY);
+            pgid = tty_tcgetpgrp();
+        }
         rc = user_store_bytes(arg_uva, &pgid, sizeof(pgid));
         return (rc < 0) ? ERR(-rc) : 0ULL;
     }
     case TIOCSPGRP: {
         uint32_t pgid;
+        pty_t    *pty_obj;
 
         if (!arg_uva)
             return ERR(EFAULT);
-        if (!fd_is_tty_object(obj))
-            return ERR(ENOTTY);
         rc = user_copy_bytes(arg_uva, &pgid, sizeof(pgid));
         if (rc < 0)
             return ERR(-rc);
-        rc = tty_tcsetpgrp_current(pgid);
+        pty_obj = fd_get_pty(obj);
+        if (pty_obj) {
+            uint32_t sid = current_task ? sched_task_sid(current_task) : 0U;
+            rc = pty_tcsetpgrp(pty_obj, sid, pgid);
+        } else {
+            if (!fd_is_tty_object(obj))
+                return ERR(ENOTTY);
+            rc = tty_tcsetpgrp_current(pgid);
+        }
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
+    case TIOCSCTTY: {
+        pty_t *pty_obj = fd_get_pty(obj);
+
+        if (!pty_obj)
+            return ERR(ENOTTY);
+        rc = pty_set_ctty(pty_obj,
+                          current_task ? sched_task_sid(current_task) : 0U,
+                          current_task ? sched_task_pgid(current_task) : 0U);
         return (rc < 0) ? ERR(-rc) : 0ULL;
     }
     case TIOCGWINSZ: {
@@ -4792,6 +4815,7 @@ static uint64_t sys_tcsetpgrp(uint64_t args[6])
     int         fd      = (int)args[0];
     uint32_t    pgid    = (uint32_t)args[1];
     fd_object_t *obj    = NULL;
+    pty_t       *pty_obj = NULL;
     int         rc;
 
     /*
@@ -4803,6 +4827,11 @@ static uint64_t sys_tcsetpgrp(uint64_t args[6])
      * facciamo fallback al vecchio one-arg ABI su stdin.
      */
     obj = fd_get(fd);
+    pty_obj = fd_get_pty(obj);
+    if (pty_obj && current_task && sched_task_is_user(current_task)) {
+        rc = pty_tcsetpgrp(pty_obj, sched_task_sid(current_task), pgid);
+        return (rc < 0) ? ERR(-rc) : 0ULL;
+    }
     if (obj && fd_is_tty_object(obj) &&
         current_task && sched_task_is_user(current_task) &&
         sched_task_has_pgrp(sched_task_sid(current_task), pgid)) {
@@ -4825,15 +4854,21 @@ static uint64_t sys_tcgetpgrp(uint64_t args[6])
 {
     int         fd = (int)args[0];
     fd_object_t *obj = fd_get(fd);
+    pty_t       *pty_obj = fd_get_pty(obj);
 
     /*
      * ABI moderno: tcgetpgrp(fd)
      * ABI legacy/raw: tcgetpgrp() su fd 0
      */
+    if (pty_obj)
+        return (uint64_t)pty_tcgetpgrp(pty_obj);
     if (!obj || !fd_is_tty_object(obj)) {
         fd = 0;
         obj = fd_get(fd);
+        pty_obj = fd_get_pty(obj);
     }
+    if (pty_obj)
+        return (uint64_t)pty_tcgetpgrp(pty_obj);
     if (!obj)
         return ERR(EBADF);
     if (!fd_is_tty_object(obj))
@@ -8773,6 +8808,26 @@ static uint64_t sys_wld_present(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * SYS_CACHE_FLUSH (228) — flush esplicito D-cache su un range user VA
+ *
+ * Utile per buffer condivisi tra task EL0 distinti (es. wl_shm SysV) dove
+ * il writer deve rendere visibili i pixel al reader senza passare dal kernel.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_cache_flush(uint64_t args[6])
+{
+    uintptr_t start = (uintptr_t)args[0];
+    size_t    size = (size_t)args[1];
+
+    if (!start)
+        return ERR(EFAULT);
+    if (size == 0U)
+        return ERR(EINVAL);
+
+    cache_flush_range(start, size);
+    return 0ULL;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * syscall_init — popola la tabella e inizializza le strutture dati
  * ════════════════════════════════════════════════════════════════════ */
 void syscall_init(void)
@@ -9205,6 +9260,7 @@ void syscall_init(void)
     syscall_table[SYS_SEMOP]         = (syscall_entry_t){ sys_semop,         0, "semop" };
     syscall_table[SYS_SEMCTL]        = (syscall_entry_t){ sys_semctl,        0, "semctl" };
     syscall_table[SYS_WLD_PRESENT]   = (syscall_entry_t){ sys_wld_present,   0, "wld_present" };
+    syscall_table[SYS_CACHE_FLUSH]   = (syscall_entry_t){ sys_cache_flush,   0, "cache_flush" };
 
     /* ── Linux AArch64 compat ABI (M11-05 v1) ── */
     linux_syscall_bind(LINUX_NR_read, sys_linux_read,

@@ -27,11 +27,12 @@ Le milestone completate oggi coprono:
 - **M11-05e**: Linux filesystem environment — `/proc/sys` subtree, `/etc/locale.conf`, `/etc/ld.so.cache` stub, `/etc/localtime` TZif2 UTC, `/proc/<pid>/maps` stub.
 - **M11-05f**: PTY pseudo-terminal `v1` — `posix_openpt/grantpt/unlockpt/ptsname_r`, `/dev/ptmx` e `/dev/pts/N`, line discipline completa (ICANON, ECHO, ISIG, ICRNL, OPOST/ONLCR), `TIOCGWINSZ/TIOCSWINSZ`, `SIGWINCH` (default ignore POSIX), musl bootstrap con `openpty`.
 - **M12-01**: server Wayland minimale `wld` in user-space, trasporto `AF_UNIX` su `/run/wayland-0`, protocol subset `wl_compositor` / `wl_surface` / `wl_shm` / `xdg_wm_base` / `wl_output` / `wl_seat`, compositing CPU-bound con present al framebuffer e demo client `WLDDEMO.ELF`.
+- **M12-02**: window manager `wm` separato dal compositor, con decorazioni server-side, tiling base, click-to-focus, focus-follows-pointer opzionale, shortcut globali `SUPER+ENTER`/`SUPER+Q`, fade-in/fade-out bounded, demo `WMDEMO.ELF` e terminal-style placeholder `WTERM.ELF`.
 - **M14**: `procfs` core montato su `/proc` e crash reporter con stack trace simbolico.
 
 Il backlog principale `BACKLOG.md` e' chiuso e il backlog esteso `BACKLOG2.md`
 ha diverse milestone reali implementate. Il selftest QEMU corrente passa con
-`SUMMARY total=61 pass=61 fail=0`.
+`SUMMARY total=62 pass=62 fail=0`.
 
 ---
 

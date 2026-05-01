@@ -375,7 +375,7 @@ int main(void)
     commit_buffer(&conn, 13U, 12U);
 
     {
-        int polls = 800; /* ~8s a passi da 10ms */
+        int polls = 400; /* ~4s a passi da 10ms */
         while (polls-- > 0) {
             wl_event_t ev;
             ssize_t n = recv(conn.fd, conn.ibuf + conn.ilen,

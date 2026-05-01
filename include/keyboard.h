@@ -29,6 +29,7 @@ enum {
     KBD_MOD_CTRL  = 1U << 1,
     KBD_MOD_ALT   = 1U << 2,
     KBD_MOD_ALTGR = 1U << 3,
+    KBD_MOD_SUPER = 1U << 4,
 };
 
 typedef struct {

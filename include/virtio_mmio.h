@@ -184,6 +184,8 @@ typedef struct {
 #define KEY_102ND       86U
 #define KEY_RIGHTCTRL   97U
 #define KEY_RIGHTALT    100U
+#define KEY_LEFTMETA    125U
+#define KEY_RIGHTMETA   126U
 
 /* Vring descriptor flags */
 #define VRING_DESC_F_NEXT   1U   /* descriptor continua nella catena */

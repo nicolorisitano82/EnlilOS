@@ -251,6 +251,7 @@ MUSL_SMOKE_SRCS       = toolchain/smoke/musl_hello.c \
                         toolchain/smoke/glibc_compat_demo.c \
                         toolchain/smoke/arksh_plugin_demo.c \
                         toolchain/smoke/wayland_demo.c \
+                        toolchain/smoke/hello_wayland.c \
                         toolchain/smoke/wm_manager.c \
                         toolchain/smoke/wm_demo.c \
                         toolchain/smoke/wterm_demo.c
@@ -446,13 +447,15 @@ $(BASH_CONFIG_STAMP): $(BASH_DIR)/configure $(BASH_DIR)/Makefile.in \
 	@mkdir -p "$(BASH_BUILD_DIR)"
 	cd "$(BASH_BUILD_DIR)" && \
 	env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS \
+	    CONFIG_SHELL=/bin/bash \
+	    SHELL=/bin/bash \
 	    ac_cv_func_killpg=yes \
 	    bash_cv_getcwd_malloc=yes \
 	    bash_cv_func_sigsetjmp=present \
 	    bash_cv_job_control_missing=present \
-	    "$(abspath $(BASH_DIR))/configure" \
+	    /bin/bash "$(abspath $(BASH_DIR))/configure" \
 	        --host=aarch64-unknown-linux-musl \
-	        --build="$$(cd "$(BASH_DIR)" && ./support/config.guess)" \
+	        --build="$$(cd "$(BASH_DIR)" && /bin/bash ./support/config.guess)" \
 	        --disable-nls \
 	        --without-bash-malloc \
 	        CC="$(abspath $(MUSL_WRAPPER_GCC))" \
@@ -483,6 +486,15 @@ $(BASH_CONFIG_STAMP): $(BASH_DIR)/configure $(BASH_DIR)/Makefile.in \
 		"$(BASH_BUILD_DIR)/config.h"
 	@perl -0pi -e 's@/\\* #undef HAVE_GETCWD \\*/@#define HAVE_GETCWD 1@g' \
 		"$(BASH_BUILD_DIR)/config.h"
+	@if grep -q '^#define BASH_SOURCE_FULLPATH_DEFAULT ' "$(BASH_BUILD_DIR)/config.h"; then \
+		perl -0pi -e 's@^#define BASH_SOURCE_FULLPATH_DEFAULT .*@#define BASH_SOURCE_FULLPATH_DEFAULT 0@m' \
+			"$(BASH_BUILD_DIR)/config.h"; \
+	else \
+		perl -0pi -e 's@/\\* #undef BASH_SOURCE_FULLPATH_DEFAULT \\*/@#define BASH_SOURCE_FULLPATH_DEFAULT 0@g' \
+			"$(BASH_BUILD_DIR)/config.h"; \
+		grep -q '^#define BASH_SOURCE_FULLPATH_DEFAULT ' "$(BASH_BUILD_DIR)/config.h" || \
+			echo '#define BASH_SOURCE_FULLPATH_DEFAULT 0' >> "$(BASH_BUILD_DIR)/config.h"; \
+	fi
 	@perl -0pi -e 's@^JOBS_O = nojobs\.o$$@JOBS_O = jobs.o@m' \
 		"$(BASH_BUILD_DIR)/Makefile"
 	@touch $@
@@ -624,6 +636,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		NETD.ELF=user/netd.elf \
 		WLD.ELF=user/wld.elf \
 		WLDDEMO.ELF=toolchain/smoke/wayland_demo.elf \
+		HELLO.ELF=toolchain/smoke/hello_wayland.elf \
 		WM.ELF=toolchain/smoke/wm_manager.elf \
 		WMDEMO.ELF=toolchain/smoke/wm_demo.elf \
 		WTERM.ELF=toolchain/smoke/wterm_demo.elf \
@@ -669,6 +682,7 @@ $(INITRD_CPIO): Makefile tools/mkinitrd.py initrd/README.TXT initrd/BOOT.TXT \
 		bin/nsh=user/nsh.elf \
 		bin/ls=toolchain/smoke/ls_gnu.elf \
 		bin/wld=user/wld.elf \
+		bin/hello=toolchain/smoke/hello_wayland.elf \
 		bin/wm=toolchain/smoke/wm_manager.elf \
 		bin/wterm=toolchain/smoke/wterm_demo.elf \
 		$(ARKSH_REAL_INITRD) \

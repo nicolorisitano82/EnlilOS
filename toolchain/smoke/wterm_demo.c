@@ -63,6 +63,9 @@
 #define SURF_SZ                      (SURF_W * SURF_H * 4)
 #define INPUT_QUEUE_MAX              512U
 
+#define WTERM_READY_PATH             "/data/WTERMREADY.TXT"
+#define WTERM_FAIL_PATH              "/data/WTERMFAIL.TXT"
+
 #define TERM_STATE_NORMAL            0U
 #define TERM_STATE_ESC               1U
 #define TERM_STATE_CSI               2U
@@ -137,6 +140,19 @@ static const uint32_t term_palette[16] = {
 };
 
 #include "wterm_font.inc"
+
+static void write_marker_file(const char *path, const char *text)
+{
+    int fd;
+
+    if (!path || !text)
+        return;
+    fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    (void)write(fd, text, strlen(text));
+    close(fd);
+}
 
 static void sleep_10ms(void)
 {
@@ -964,7 +980,6 @@ static int app_setup_surface(app_t *app)
         app->buf = NULL;
         return -1;
     }
-    (void)shmctl(app->shmid, IPC_RMID, NULL);
 
     bind_global(&app->conn, app->comp_name, "wl_compositor", 4U, OBJ_COMPOSITOR);
     bind_global(&app->conn, app->shm_name, "wl_shm", 1U, OBJ_SHM);
@@ -1044,6 +1059,10 @@ static void app_cleanup(app_t *app)
         shmdt(app->buf);
         app->buf = NULL;
     }
+    if (app->shmid >= 0) {
+        (void)shmctl(app->shmid, IPC_RMID, NULL);
+        app->shmid = -1;
+    }
 }
 
 int main(int argc, char **argv)
@@ -1055,19 +1074,27 @@ int main(int argc, char **argv)
     app.conn.fd = -1;
     app.master_fd = -1;
     app.child_pid = -1;
+    app.shmid = -1;
     app.running = 1;
 
     for (int i = 1; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "--session") == 0)
             session_mode = 1;
     }
-    (void)session_mode;
+    if (session_mode) {
+        (void)unlink(WTERM_READY_PATH);
+        (void)unlink(WTERM_FAIL_PATH);
+    }
 
     if (wl_connect_runtime(&app) < 0) {
+        if (session_mode)
+            write_marker_file(WTERM_FAIL_PATH, "connect\n");
         write(STDERR_FILENO, "wterm: connect fail\n", 20);
         return 1;
     }
     if (app_setup_surface(&app) < 0) {
+        if (session_mode)
+            write_marker_file(WTERM_FAIL_PATH, "surface\n");
         write(STDERR_FILENO, "wterm: surface setup fail\n", 26);
         app_cleanup(&app);
         return 2;
@@ -1079,6 +1106,8 @@ int main(int argc, char **argv)
     wl_present_surface(&app);
 
     if (app_wait_initial_configure(&app) < 0) {
+        if (session_mode)
+            write_marker_file(WTERM_FAIL_PATH, "configure\n");
         write(STDERR_FILENO, "wterm: configure timeout\n", 25);
         app_cleanup(&app);
         return 3;
@@ -1088,10 +1117,15 @@ int main(int argc, char **argv)
         term_feed_bytes(&app.term, (const uint8_t *)"Failed to start shell\r\n", 23U);
         term_render(&app);
         wl_present_surface(&app);
+        if (session_mode)
+            write_marker_file(WTERM_FAIL_PATH, "spawn\n");
         sleep_10ms();
         app_cleanup(&app);
         return 4;
     }
+
+    if (session_mode)
+        write_marker_file(WTERM_READY_PATH, "ready\n");
 
     while (app.running) {
         int status = 0;

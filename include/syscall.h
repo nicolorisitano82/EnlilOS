@@ -168,6 +168,7 @@
 #define SYS_KBD_GET_EVENT   225   /* M12-02: raw keyboard event for wld */
 #define SYS_MOUSE_GET_EVENT 226   /* M12-02: raw mouse event for wld */
 #define SYS_READLINKAT      227
+#define SYS_CACHE_FLUSH     228   /* flush esplicito D-cache su buffer user condivisi */
 
 /* cmd valori (compatibili con Linux reboot(2)) */
 #define REBOOT_CMD_RESTART      0x01234567U
@@ -332,6 +333,7 @@
 #define TCSETS              0x5402UL
 #define TIOCGPGRP           0x540FUL
 #define TIOCSPGRP           0x5410UL
+#define TIOCSCTTY           0x540EUL
 #define TIOCGWINSZ          0x5413UL
 #define TIOCSWINSZ          0x5414UL
 #define FIONBIO             0x5421UL

@@ -19,7 +19,7 @@ Microkernel AArch64 stile GNU Hurd. File cattura conoscenza architetturale per l
   - `make arksh-smoke` — smoke CMake/toolchain per `M8-08e`
   - `make arksh-configure ARKSH_DIR=...` — configura checkout esterno `arksh`
   - `make arksh-build ARKSH_DIR=...` — compila checkout esterno `arksh`
-- Stato validato: `SUMMARY total=61 pass=61 fail=0`
+- Stato validato: `SUMMARY total=64 pass=64 fail=0`
 - `make test` chiude automaticamente QEMU: dopo `SUMMARY ... PASS/FAIL` il kernel esegue `shutdown_system(SHUTDOWN_POWEROFF)` e termina la VM.
 - `disk.img` lockato da QEMU: sessione appesa → successiva fallisce con "Failed to get write lock". Usare `ps ... | rg qemu-system-aarch64` poi `kill <pid>`.
 
@@ -499,13 +499,19 @@ Identico al pattern vfsd: syscall `blk_boot_*` accessibili **solo** al task che 
 49. `musl-dlfcn` — `dlopen/dlsym/dlclose/dlerror`
 50. `gnu-ls` — binario GNU ls statico tramite linux-compat
 51. `bash-linux-fork` — bash-linux fork+execve child
-52. `linux-ld-shim` — PT_INTERP /lib/ld-linux-aarch64.so.1 alias
-53. `epoll-core` — epoll_create1/ctl/pwait
-54. `kbd-layout` — layout tastiera `us/it` e persistenza
-55. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
-56. `pty-core` — PTY master/slave lifecycle, termios, TIOCGWINSZ/TIOCSWINSZ
-57. `glibc-compat` — glibc shim dlopen: gnu_get_libc_version, __libc_start_main, __stack_chk_guard
-58. `mmu-user-va` — mmu_read_user/write_user/remap_user_region kernel-side
+52. `bash-native` — bash-linux esegue script nativo su EnlilOS
+53. `linux-ld-shim` — PT_INTERP /lib/ld-linux-aarch64.so.1 alias
+54. `epoll-core` — epoll_create1/ctl/pwait
+55. `kbd-layout` — layout tastiera `us/it` e persistenza
+56. `socket-api` — BSD socket API `AF_INET` loopback TCP/UDP
+57. `pty-core` — PTY master/slave lifecycle, termios, TIOCGWINSZ/TIOCSWINSZ
+58. `glibc-compat` — glibc shim dlopen: gnu_get_libc_version, __libc_start_main, __stack_chk_guard
+59. `enlil-bundle` — bundle ELF multi-file + loader bundle
+60. `arksh-plugin` — plugin arksh caricato via dlopen
+61. `mmu-user-va` — mmu_read_user/write_user/remap_user_region kernel-side
+62. `wayland-core` — compositor wld: socket, client connect, surface lifecycle
+63. `wm-core` — window manager: protocollo enlil_wm_v1, layout tile/float
+64. `desktop-hello` — sessione desktop end-to-end: wld + wm + HELLO.ELF
 
 ### Helper macro
 ```c
@@ -520,22 +526,83 @@ Per task ausiliari (holder/hog/waiter):
 
 ---
 
-## Milestone completate (stato 2026-04-27)
+## Milestone completate (stato 2026-05-01)
 
-Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f/g`, `M11-08`, `M12-01` e `M8-08d/e/f/g` completi in v1, piu' `M8-08 plugin` chiusa in v1.
+Tutto backlog 1 (M1–M7), backlog 2 fino a `M9-04`, `M10-01/02/03`, `M11-01`, `M11-02a/b/c/d/e`, `M11-03`, `M11-05a/b/c/d/e/f/g`, `M11-08`, `M12-01`, `M12-02` e `M8-08d/e/f/g` completi in v1, piu' `M8-08 plugin` chiusa in v1.
 Aggiunti fuori-milestone: fix kbd ring buffer OOB (62° char freeze), `prlimit64` nativo (SYS_PRLIMIT64=212), shutdown/poweroff completo (PSCI + SYS_REBOOT=213).
 Run di riferimento:
 
 ```text
-SUMMARY total=61 pass=61 fail=0
+SUMMARY total=64 pass=64 fail=0
 ```
 
 **Prossime priorità** (ordine consigliato):
 1. **M8-08h** — i18n / localizzazione stringhe
-2. **M12-02** — Window manager RT sopra `wld`
+2. **M12-03** — GPU shader compositor sopra il desktop Wayland/WM v1
 3. **M11-07** — Container primitives: namespace net, pid, uts; `pivot_root` hardening; `cgroups` v1 minimali
 4. **M13-02** — SMP bootstrap
 5. **M13-03** — scheduler multicore
+
+---
+
+### Stato operativo M12-01 / Wayland Compositor (`wld`)
+
+**File**: [user/wld.c](user/wld.c), [toolchain/smoke/hello_wayland.c](toolchain/smoke/hello_wayland.c),
+[kernel/gpu_syscall.c](kernel/gpu_syscall.c), [kernel/main.c](kernel/main.c)
+
+- `M12-01` chiusa in `v1`.
+- Compositor Wayland freestanding (`WLD.ELF`), gira a EL0. Implementa subset Wayland minimo: `wl_display`, `wl_registry`, `wl_compositor`, `wl_shm`, `xdg_wm_base`, `xdg_surface`, `xdg_toplevel`, protocollo privato `enlil_wm_v1`, `enlil_term_v1`.
+- Socket `/run/wayland-0`, accettazione client asincrona, frame loop ~60fps con `wld_sleep_ms(1)`.
+- Rendering: doppio pass (unfocused poi focused). Decorazioni server-side: titolo 22px, bordi 2px, close button (rosso, "-"), spawn button (verde, "+"). Compositor composita in buffer privato → `sys_wld_present` → GPU VirtIO.
+- Layout `wld_layout_mode`: `TILE` (default) o `FLOAT`. Superfici tile divise in colonne equilarghezza con gap 12px. Superfici floating posizionate con `placed` flag.
+- `wld_is_hello_surface`: verifica `app_id == "enlil-hello"`. HELLO surfaces: `floating=1`, posizionabili liberamente.
+- `sys_wld_present` (syscall GPU): copia buffer user-space nel target GPU; gestito da `gpu_syscall.c`; bloccato quando `gpu_2d_present_enabled = false`.
+- `gpu_set_2d_present_enabled(true/false)`: controlla chi può scrivere al framebuffer. In `BOOTCLI_MODE_WAYLAND` sia bootcli sia wld accedono al target — bootcli però non chiama `bootcli_render` in mode WAYLAND (ritorna immediatamente).
+- Boot mode: `bootcli_enter_wayland` (chiamato quando `/data/HELLOREADY.TXT` appare) imposta `BOOTCLI_MODE_WAYLAND`, registra `bootcli_wayland_pid`.
+- Selftest: `wayland-core` (socket + client), `desktop-hello` (sessione completa). Suite: 64/64.
+
+### Stato operativo M12-02 / Window Manager (`wm`)
+
+**File**: [toolchain/smoke/wm_demo.c](toolchain/smoke/wm_demo.c), [user/wld.c](user/wld.c)
+
+- `M12-02` chiusa in `v1`.
+- `WM.ELF`: client Wayland speciale, comunica con wld via protocollo privato `enlil_wm_v1`. Imposta layout (TILE/FLOAT), gestisce focus cycling, invia configurazioni superfici.
+- Boot: `boot_launch_wld()` poi `boot_launch_wm()` in `kernel/main.c`. wm attende che `/run/wayland-0` esista prima di connettersi.
+- `bootcli_wld_pid` / `bootcli_wm_pid` / `bootcli_wayland_pid`: tre PID distinti. `bootcli_wayland_pid` = PID sessione attiva (es. HELLO.ELF).
+- Shortcut: `SUPER+ENTER` → nuovo HELLO window, `SUPER+Q` → chiude focused, `SUPER+TAB` → focus cycle.
+- Click close button ("-", rosso top-left) → `wld_request_close_focused` → `XDG_TOPLEVEL_CLOSE` → client esce → `bootcli_poll_wayland` rileva zombie → torna a bootcli UI.
+- Click spawn button ("+", verde top-right) → `wld_launch_hello_window` → nuovo HELLO.ELF.
+- Drag finestra: title bar hit → `wld_drag_active=1`, `floating=1`, `placed=1`. Drag move aggiorna `surf->x/y`.
+- Selftest: `wm-core` (protocollo wm), `desktop-hello`. Suite: 64/64.
+
+---
+
+### Knowledge operativa — Desktop (M12-01/M12-02) / boot, drag, teardown
+
+**File**: [user/wld.c](user/wld.c), [kernel/main.c](kernel/main.c),
+[kernel/pty.c](kernel/pty.c), [include/pty.h](include/pty.h), [kernel/sched.c](kernel/sched.c)
+
+#### PTY busy-spin → CPU starvation
+- `pty_slave_read` e `pty_master_read` usavano `sched_yield()` in loop quando nessun dato → shell sempre READY → CPU starvation → desktop non avviava / freeze.
+- **Fix**: cambiati in `sched_block()`. Aggiunti `slave_reader`/`master_reader` in `pty_t`; `m2s_push`/`s2m_push` e close chiamano `sched_unblock()`. `pty_task_cleanup()` rimuove riferimenti al task uscente; chiamata da `sched_task_exit_with_code`.
+
+#### Boot screen "bash lampeggiante" (auto-launch conflitto)
+- Al boot normale, `kernel/main.c` auto-lanciava wld/wm E `bootcli_launch_default_shell` → `BOOTCLI_MODE_TERM` → tastiera occupata, wld e bootcli rendevano entrambi → blink.
+- **Fix**: rimosso auto-launch wld/wm e bash al boot. Bootcli UI mostra prompt; utente digita `desktop` per avviare la sessione.
+
+#### `wld_relayout` reset drag position
+- `wld_relayout(0)` chiamata ogni frame da `composite_and_present`. Il ramo `wld_is_hello_surface` resettava sempre `surf->x/y` al centro senza controllare `surf->placed`. Ogni drag veniva annullato al frame successivo.
+- **Fix** (`user/wld.c`): aggiunto `if (!surf->placed) { ...; surf->placed = 1U; }` nel ramo hello, identico al ramo floating.
+- **Fix drag start**: `wld_surfs[hit].floating = 1U; wld_surfs[hit].placed = 1U;` sempre al drag start, non solo per surface non-floating. Garantisce che `wld_relayout` non reimposti la posizione prima del primo move event.
+
+#### Session teardown blinking (Esc o close button)
+- `bootcli_abort_wayland_session` (Esc) e `bootcli_poll_wayland` (exit naturale HELLO.ELF) tornavano a `BOOTCLI_MODE_UI` senza terminare wld e wm. wld continuava a chiamare `sys_wld_present` → bootcli + wld scrivevano alternati sul framebuffer → sfarfallio.
+- **Fix** (entrambe le funzioni in `kernel/main.c`): `boot_stop_task(&bootcli_wm_pid, 200ULL); boot_stop_task(&bootcli_wld_pid, 350ULL); vfs_unlink("/run/wayland-0"); vfs_unlink("/data/WLDREADY.TXT");` prima di `bootcli_mode = BOOTCLI_MODE_UI`.
+- Pattern generale: **wld e wm devono essere morti prima che bootcli riprenda a renderizzare**.
+- `boot_restart_wayland` (riavvio sessione) usa già lo stesso pattern → unico punto che fa `stop + relaunch`.
+
+---
+
 ### Stato operativo M11-05e / Linux filesystem environment
 
 - `M11-05e` e' chiusa in `v1`.
@@ -565,7 +632,8 @@ SUMMARY total=61 pass=61 fail=0
 - `SIGWINCH=28` default action = **ignore** (POSIX). Critico: mancanza nella lista `signal_default_ignore` causava terminazione del processo demo invece del semplice notify.
 - musl bootstrap: `posix_openpt` (via `openat("/dev/ptmx")`), `grantpt` (no-op), `unlockpt` (TIOCSPTLCK), `ptsname_r` (TIOCGPTN + snprintf), `ptsname` (buffer statico), `openpty`.
 - **Bug critico risolto: double PTY alloc via vfsd+shadow**. Quando vfsd è disponibile, `fd_open_path_current` usa `vfsd_proxy_open` (alloca PTY slot A lato vfsd) E poi `fd_bind_remote_shadow` → `vfs_open` (alloca PTY slot B lato kernel). Le ioctls usano il cookie del shadow (slot B), la slave viene aperta su B, ma `write(master_fd)` usa `vfsd_proxy_write` su slot A che ha `slave_open=0` → -EIO. **Fix**: aggiunta `is_pty_path()` in `kernel/syscall.c`; `/dev/ptmx` e `/dev/pts/*` aprono sempre via kernel-direct VFS, bypassando vfsd.
-- Selftest: `pty-core` con `PTYDEMO.ELF`. Suite: `57/57`.
+- **Bug critico risolto: PTY busy-spin CPU starvation**. `pty_slave_read` e `pty_master_read` usavano `sched_yield()` in loop quando nessun dato disponibile → task shell sempre READY → starvation CPU → desktop non avviava. **Fix**: cambiati in `sched_block()`. Aggiunti campi `slave_reader`/`master_reader` in `pty_t`; `m2s_push`, `s2m_push`, `pty_close_master`, `pty_close_slave` chiamano `sched_unblock()`; `pty_task_cleanup()` azzera i puntatori all'exit del task (chiamato da `sched_task_exit_with_code`).
+- Selftest: `pty-core` con `PTYDEMO.ELF`. Suite: `64/64`.
 
 ### Stato operativo M11-05g / glibc Compatibility Shims
 

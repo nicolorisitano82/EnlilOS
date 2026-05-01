@@ -108,6 +108,57 @@ static int32_t         mi_abs_min_y;
 static int32_t         mi_abs_max_y;
 static uint32_t        mi_abs_px_x;
 static uint32_t        mi_abs_px_y;
+static uint32_t        mi_debug_log_budget;
+
+static void mi_log_u32(uint32_t value)
+{
+    char buf[16];
+    uint32_t pos = 0U;
+
+    if (value == 0U) {
+        uart_putc('0');
+        return;
+    }
+    while (value != 0U && pos < sizeof(buf)) {
+        buf[pos++] = (char)('0' + (value % 10U));
+        value /= 10U;
+    }
+    while (pos > 0U)
+        uart_putc(buf[--pos]);
+}
+
+static void mi_log_i32(int32_t value)
+{
+    if (value < 0) {
+        uart_putc('-');
+        mi_log_u32((uint32_t)(-value));
+        return;
+    }
+    mi_log_u32((uint32_t)value);
+}
+
+static void mi_log_event(const mouse_event_t *ev)
+{
+    if (!ev || mi_debug_log_budget == 0U)
+        return;
+
+    mi_debug_log_budget--;
+    uart_puts("[MOUSE] ev flags=");
+    mi_log_u32(ev->flags);
+    uart_puts(" btn=");
+    mi_log_u32(ev->buttons);
+    uart_puts(" x=");
+    mi_log_u32(ev->x);
+    uart_puts(" y=");
+    mi_log_u32(ev->y);
+    uart_puts(" dx=");
+    mi_log_i32(ev->dx);
+    uart_puts(" dy=");
+    mi_log_i32(ev->dy);
+    uart_puts(" wh=");
+    mi_log_i32(ev->wheel);
+    uart_puts("\n");
+}
 
 static inline uint32_t mi_mmio_read(uint32_t off)
 {
@@ -305,7 +356,10 @@ static void mi_commit_report(void)
     }
 
     if (ev.flags != 0U)
+    {
         mouse_buf_push(&ev);
+        mi_log_event(&ev);
+    }
 
     mi_pending_dx = 0;
     mi_pending_dy = 0;
@@ -534,6 +588,7 @@ void mouse_init(void)
     mi_abs_max_y = FB_HEIGHT - 1;
     mi_abs_px_x = FB_WIDTH / 2U;
     mi_abs_px_y = FB_HEIGHT / 2U;
+    mi_debug_log_budget = 0U;
 
     if (mi_init())
         return;

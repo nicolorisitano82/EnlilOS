@@ -3226,6 +3226,165 @@ static int selftest_case_wm_core(void)
     return 0;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * selftest_case_desktop_hello — M12-02 desktop placeholder surface
+ *
+ * Verifica:
+ *   1. WLD/WM/HELLO presenti
+ *   2. Lancia WLD + WM + HELLO --session
+ *   3. Attende HELLOREADY
+ *   4. Controlla sullo scanout visibile che compaia almeno il frame della
+ *      finestra centrata, non solo il cursore su sfondo nero.
+ * ════════════════════════════════════════════════════════════════════ */
+static int selftest_case_desktop_hello(void)
+{
+    static const char case_name[] = "desktop-hello";
+    stat_t            st;
+    uint64_t          deadline;
+    uint32_t          wld_pid = 0U;
+    uint32_t          wm_pid = 0U;
+    uint32_t          hello_pid = 0U;
+    int               rc;
+    const char       *wm_argv[3] = { "/WM.ELF", "--selftest", NULL };
+    const char       *hello_argv[3] = { "/HELLO.ELF", "--session", NULL };
+    uint32_t         *scan;
+    uint32_t         *target;
+    const uint32_t    frame_px = 0x0000D6B8U;
+    const uint32_t    body_px = 0x00DFF4FFU;
+    const uint32_t    shadow_px = 0x00101822U;
+    const uint32_t    frame_left = (800U - 364U) / 2U;
+    const uint32_t    frame_top = (600U - 246U) / 2U;
+    const uint32_t    sample_frame_x = frame_left + 1U;
+    const uint32_t    sample_frame_y = frame_top + 40U;
+    const uint32_t    sample_body_x = frame_left + 40U;
+    const uint32_t    sample_body_y = frame_top + 80U;
+    const uint32_t    sample_shadow_x = frame_left + 366U;
+    const uint32_t    sample_shadow_y = frame_top + 40U;
+    uint32_t          scan_frame;
+    uint32_t          scan_body;
+    uint32_t          scan_shadow;
+    uint32_t          target_frame;
+    uint32_t          target_body;
+    uint32_t          target_shadow;
+    uint32_t          first_scan_frame = 0xFFFFFFFFU;
+    uint32_t          first_scan_body = 0xFFFFFFFFU;
+    uint32_t          first_target_frame = 0xFFFFFFFFU;
+    uint32_t          first_target_body = 0xFFFFFFFFU;
+
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+    (void)vfs_unlink("/data/HELLOREADY.TXT");
+    (void)vfs_unlink("/data/HELLOFAIL.TXT");
+
+    rc = vfs_lstat("/WLD.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WLD.ELF assente");
+    rc = vfs_lstat("/WM.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "WM.ELF assente");
+    rc = vfs_lstat("/HELLO.ELF", &st);
+    ST_CHECK(case_name, rc == 0, "HELLO.ELF assente");
+
+    rc = elf64_spawn_path("/WLD.ELF", "/WLD.ELF", PRIO_HIGH, &wld_pid);
+    ST_CHECK(case_name, rc == 0, "spawn WLD.ELF fallita");
+    deadline = timer_now_ms() + 300ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = elf64_spawn_path_argv("/WM.ELF", wm_argv, 2ULL, PRIO_HIGH, &wm_pid);
+    ST_CHECK(case_name, rc == 0, "spawn WM.ELF --selftest fallita");
+    deadline = timer_now_ms() + 200ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    rc = elf64_spawn_path_argv("/HELLO.ELF", hello_argv, 2ULL, PRIO_HIGH, &hello_pid);
+    ST_CHECK(case_name, rc == 0, "spawn HELLO.ELF --session fallita");
+
+    deadline = timer_now_ms() + 2500ULL;
+    while (timer_now_ms() < deadline) {
+        if (vfs_lstat("/data/HELLOREADY.TXT", &st) == 0 && st.st_size > 0LL)
+            break;
+        sched_yield();
+    }
+    ST_CHECK(case_name,
+             vfs_lstat("/data/HELLOREADY.TXT", &st) == 0 && st.st_size > 0LL,
+             "HELLOREADY.TXT non creato");
+
+    deadline = timer_now_ms() + 300ULL;
+    while (timer_now_ms() < deadline)
+        sched_yield();
+
+    scan = gpu_get_visible_scanout_ptr();
+    ST_CHECK(case_name, scan != NULL, "scanout visibile non disponibile");
+    target = gpu_get_present_target_ptr();
+    ST_CHECK(case_name, target != NULL, "target present non disponibile");
+    scan_frame = scan[sample_frame_y * FB_WIDTH + sample_frame_x];
+    scan_body = scan[sample_body_y * FB_WIDTH + sample_body_x];
+    scan_shadow = scan[sample_shadow_y * FB_WIDTH + sample_shadow_x];
+    target_frame = target[sample_frame_y * FB_WIDTH + sample_frame_x];
+    target_body = target[sample_body_y * FB_WIDTH + sample_body_x];
+    target_shadow = target[sample_shadow_y * FB_WIDTH + sample_shadow_x];
+    for (uint32_t i = 0U; i < (FB_WIDTH * FB_HEIGHT); i++) {
+        if (first_scan_frame == 0xFFFFFFFFU && (scan[i] & 0x00FFFFFFU) == frame_px)
+            first_scan_frame = i;
+        if (first_scan_body == 0xFFFFFFFFU && (scan[i] & 0x00FFFFFFU) == body_px)
+            first_scan_body = i;
+        if (first_target_frame == 0xFFFFFFFFU && (target[i] & 0x00FFFFFFU) == frame_px)
+            first_target_frame = i;
+        if (first_target_body == 0xFFFFFFFFU && (target[i] & 0x00FFFFFFU) == body_px)
+            first_target_body = i;
+        if (first_scan_frame != 0xFFFFFFFFU &&
+            first_scan_body != 0xFFFFFFFFU &&
+            first_target_frame != 0xFFFFFFFFU &&
+            first_target_body != 0xFFFFFFFFU)
+            break;
+    }
+    if (!(((scan_frame & 0x00FFFFFFU) == frame_px) &&
+          ((target_frame & 0x00FFFFFFU) == frame_px) &&
+          ((scan_body & 0x00FFFFFFU) == body_px) &&
+          ((target_body & 0x00FFFFFFU) == body_px) &&
+          ((scan_shadow & 0x00FFFFFFU) == shadow_px) &&
+          ((target_shadow & 0x00FFFFFFU) == shadow_px))) {
+        uart_puts("[SELFTEST] desktop-hello samples sf=");
+        st_put_u32(scan_frame);
+        uart_puts(" sb=");
+        st_put_u32(scan_body);
+        uart_puts(" ss=");
+        st_put_u32(scan_shadow);
+        uart_puts(" tf=");
+        st_put_u32(target_frame);
+        uart_puts(" tb=");
+        st_put_u32(target_body);
+        uart_puts(" ts=");
+        st_put_u32(target_shadow);
+        uart_puts("\n");
+        uart_puts("[SELFTEST] desktop-hello first scan frame/body=");
+        st_put_u32(first_scan_frame);
+        uart_puts("/");
+        st_put_u32(first_scan_body);
+        uart_puts(" target frame/body=");
+        st_put_u32(first_target_frame);
+        uart_puts("/");
+        st_put_u32(first_target_body);
+        uart_puts("\n");
+    }
+    ST_CHECK(case_name,
+             (scan_frame & 0x00FFFFFFU) == frame_px &&
+             (target_frame & 0x00FFFFFFU) == frame_px &&
+             (scan_body & 0x00FFFFFFU) == body_px &&
+             (target_body & 0x00FFFFFFU) == body_px &&
+             (scan_shadow & 0x00FFFFFFU) == shadow_px &&
+             (target_shadow & 0x00FFFFFFU) == shadow_px,
+             "frame finestra HELLO non visibile sullo scanout");
+
+    st_stop_pid(&hello_pid, 150ULL);
+    st_stop_pid(&wm_pid, 250ULL);
+    st_stop_pid(&wld_pid, 300ULL);
+    (void)vfs_unlink("/run/wayland-0");
+    (void)vfs_unlink("/data/WLDREADY.TXT");
+    (void)vfs_unlink("/data/HELLOREADY.TXT");
+    (void)vfs_unlink("/data/HELLOFAIL.TXT");
+    return 0;
+}
+
 static const selftest_case_t selftest_cases[] = {
     { "vfs-rootfs",  selftest_case_rootfs    },
     { "vfs-devfs",   selftest_case_devfs     },
@@ -3290,6 +3449,7 @@ static const selftest_case_t selftest_cases[] = {
     { "mmu-user-va",   selftest_case_mmu_user_va },
     { "wayland-core",  selftest_case_wayland_core },
     { "wm-core",       selftest_case_wm_core },
+    { "desktop-hello", selftest_case_desktop_hello },
 };
 
 int selftest_run_named(const char *name)

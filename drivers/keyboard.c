@@ -269,6 +269,7 @@ static uint8_t            vi_ctrl;
 static uint8_t            vi_shift;
 static uint8_t            vi_alt;
 static uint8_t            vi_altgr;
+static uint8_t            vi_super;
 static uint32_t           vi_dead_keysym;
 
 static inline uint32_t vi_mmio_read(uint32_t off)
@@ -301,6 +302,7 @@ static uint16_t kbd_current_modifiers(void)
     if (vi_ctrl)  mods |= KBD_MOD_CTRL;
     if (vi_alt)   mods |= KBD_MOD_ALT;
     if (vi_altgr) mods |= KBD_MOD_ALTGR;
+    if (vi_super) mods |= KBD_MOD_SUPER;
     return mods;
 }
 
@@ -465,6 +467,36 @@ static uint32_t kbd_encode_utf8(uint32_t cp, uint8_t out[4])
         return 4U;
     }
     return 0U;
+}
+
+#define KBD_KEY_UP        103U
+#define KBD_KEY_LEFT      105U
+#define KBD_KEY_RIGHT     106U
+#define KBD_KEY_END       107U
+#define KBD_KEY_DOWN      108U
+#define KBD_KEY_PAGEDOWN  109U
+#define KBD_KEY_INSERT    110U
+#define KBD_KEY_DELETE    111U
+#define KBD_KEY_HOME      102U
+#define KBD_KEY_PAGEUP    104U
+
+static int kbd_is_passthrough_key(uint16_t code)
+{
+    switch (code) {
+    case KBD_KEY_HOME:
+    case KBD_KEY_UP:
+    case KBD_KEY_PAGEUP:
+    case KBD_KEY_LEFT:
+    case KBD_KEY_RIGHT:
+    case KBD_KEY_END:
+    case KBD_KEY_DOWN:
+    case KBD_KEY_PAGEDOWN:
+    case KBD_KEY_INSERT:
+    case KBD_KEY_DELETE:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static void kbd_push_utf8_codepoint(uint32_t cp)
@@ -657,6 +689,10 @@ static void vi_process_key(uint16_t code, uint32_t value)
         vi_alt = (value != 0U) ? 1U : 0U;
         vi_altgr = (value != 0U) ? 1U : 0U;
         return;
+    case KEY_LEFTMETA:
+    case KEY_RIGHTMETA:
+        vi_super = (value != 0U) ? 1U : 0U;
+        return;
     default:
         break;
     }
@@ -666,7 +702,7 @@ static void vi_process_key(uint16_t code, uint32_t value)
 
     mods = kbd_current_modifiers();
     keysym = kbd_lookup_keysym(kbd_layout, code, mods);
-    if (keysym == 0U)
+    if (keysym == 0U && !kbd_is_passthrough_key(code))
         return;
 
     ev.keycode   = code;
@@ -677,6 +713,11 @@ static void vi_process_key(uint16_t code, uint32_t value)
     ev.repeat    = (value == 2U) ? 1U : 0U;
     ev.reserved0 = 0U;
     ev.reserved1 = 0U;
+
+    if (keysym == 0U) {
+        kbd_event_push(&ev);
+        return;
+    }
 
     if (kbd_is_dead_keysym(keysym)) {
         vi_dead_keysym = keysym;
