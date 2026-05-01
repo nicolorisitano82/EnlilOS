@@ -87,6 +87,7 @@ static void draw_border(uint32_t cx, uint32_t cy, uint32_t text_w,
 #define BOOTCLI_MOUSE_EVENT_MAX 4U
 
 static int boot_persist_keyboard_layout(const char *name);
+static int boot_path_is_regular_file(const char *path);
 static void bootcli_copy_trunc(char *dst, const char *src, uint32_t max_chars);
 #define BOOTCLI_MOUSE_LINE_MAX  52U
 
@@ -414,6 +415,22 @@ static int boot_ensure_wayland(uint64_t timeout_ms)
     }
 
     return boot_wayland_ready();
+}
+
+static int boot_wait_regular_file(const char *path, uint64_t timeout_ms)
+{
+    uint64_t deadline;
+
+    if (!path)
+        return 0;
+
+    deadline = timer_now_ms() + timeout_ms;
+    while (timer_now_ms() < deadline) {
+        if (boot_path_is_regular_file(path))
+            return 1;
+        sched_yield();
+    }
+    return 0;
 }
 
 static void bootcli_enter_wayland(uint32_t pid, const char *name)
@@ -2022,9 +2039,10 @@ static void bootcli_execute_command(void)
         bootcli_push_line("epolldemo lancia un ELF che verifica epoll_create1/ctl/pwait");
         bootcli_push_line("sysvipcdemo lancia un ELF che verifica shmget/shmat/semget/semop");
         bootcli_push_line("wm        lancia il window manager Wayland v1");
-        bootcli_push_line("desktop   apre una sessione Wayland persistente con una finestra iniziale");
+        bootcli_push_line("desktop   apre una sessione Wayland persistente con la finestra Hello");
+        bootcli_push_line("hello     lancia la finestra Hello Wayland singola");
         bootcli_push_line("wmdemo    lancia due finestre Wayland per validare focus/close/layout");
-        bootcli_push_line("wtermdemo lancia una finestra terminal-style Wayland");
+        bootcli_push_line("wtermdemo lancia un terminale Wayland PTY con bash");
         bootcli_push_line("arkshplugin dlopen enlil.so, query+init plugin M8-08");
         bootcli_push_line("crtdemo   lancia un ELF che verifica crt1/init_array/TLS statico");
         bootcli_push_line("runelf P  carica e lancia un ELF64 da VFS");
@@ -2487,18 +2505,49 @@ static void bootcli_execute_command(void)
     } else if (bootcli_streq(bootcli_input, "desktop") ||
                bootcli_streq(bootcli_input, "wayland")) {
         uint32_t     pid = 0U;
-        const char  *argv[3] = { "/WTERM.ELF", "--session", NULL };
+        const char  *argv[3] = { "/HELLO.ELF", "--session", NULL };
 
         if (!boot_restart_wayland(1500ULL)) {
             bootcli_push_line("desktop: Wayland non pronto.");
-        } else if (elf64_spawn_path_argv("/WTERM.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
-            bootcli_push_line(elf64_last_error());
         } else {
-            bootcli_enter_wayland(pid, "desktop");
-            line[0] = '\0';
-            bootcli_buf_append(line, sizeof(line), "desktop Wayland avviato, pid=");
-            bootcli_buf_append_u32(line, sizeof(line), pid);
-            bootcli_push_line(line);
+            (void)vfs_unlink("/data/HELLOREADY.TXT");
+            (void)vfs_unlink("/data/HELLOFAIL.TXT");
+            if (elf64_spawn_path_argv("/HELLO.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
+                bootcli_push_line(elf64_last_error());
+            } else if (!boot_wait_regular_file("/data/HELLOREADY.TXT", 1500ULL)) {
+                if (boot_task_alive(pid))
+                    (void)signal_send_pid(pid, SIGTERM);
+                bootcli_push_line("desktop: finestra Hello non pronta.");
+            } else {
+                bootcli_enter_wayland(pid, "desktop");
+                line[0] = '\0';
+                bootcli_buf_append(line, sizeof(line), "desktop Wayland avviato, pid=");
+                bootcli_buf_append_u32(line, sizeof(line), pid);
+                bootcli_push_line(line);
+            }
+        }
+    } else if (bootcli_streq(bootcli_input, "hello")) {
+        uint32_t     pid = 0U;
+        const char  *argv[3] = { "/HELLO.ELF", "--session", NULL };
+
+        if (!boot_restart_wayland(1500ULL)) {
+            bootcli_push_line("hello: Wayland non pronto.");
+        } else {
+            (void)vfs_unlink("/data/HELLOREADY.TXT");
+            (void)vfs_unlink("/data/HELLOFAIL.TXT");
+            if (elf64_spawn_path_argv("/HELLO.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
+                bootcli_push_line(elf64_last_error());
+            } else if (!boot_wait_regular_file("/data/HELLOREADY.TXT", 1500ULL)) {
+                if (boot_task_alive(pid))
+                    (void)signal_send_pid(pid, SIGTERM);
+                bootcli_push_line("hello: finestra Wayland non pronta.");
+            } else {
+                bootcli_enter_wayland(pid, "hello");
+                line[0] = '\0';
+                bootcli_buf_append(line, sizeof(line), "hello Wayland lanciata, pid=");
+                bootcli_buf_append_u32(line, sizeof(line), pid);
+                bootcli_push_line(line);
+            }
         }
     } else if (bootcli_streq(bootcli_input, "wmdemo")) {
         uint32_t pid = 0U;
@@ -2515,18 +2564,27 @@ static void bootcli_execute_command(void)
             bootcli_push_line(line);
         }
     } else if (bootcli_streq(bootcli_input, "wtermdemo")) {
-        uint32_t pid = 0U;
+        uint32_t     pid = 0U;
+        const char  *argv[3] = { "/WTERM.ELF", "--session", NULL };
 
         if (!boot_restart_wayland(1500ULL)) {
             bootcli_push_line("wtermdemo: Wayland non pronto.");
-        } else if (elf64_spawn_path("/WTERM.ELF", "/WTERM.ELF", PRIO_HIGH, &pid) < 0) {
-            bootcli_push_line(elf64_last_error());
         } else {
-            bootcli_enter_wayland(pid, "wtermdemo");
-            line[0] = '\0';
-            bootcli_buf_append(line, sizeof(line), "wterm demo lanciato, pid=");
-            bootcli_buf_append_u32(line, sizeof(line), pid);
-            bootcli_push_line(line);
+            (void)vfs_unlink("/data/WTERMREADY.TXT");
+            (void)vfs_unlink("/data/WTERMFAIL.TXT");
+            if (elf64_spawn_path_argv("/WTERM.ELF", argv, 2U, PRIO_HIGH, &pid) < 0) {
+                bootcli_push_line(elf64_last_error());
+            } else if (!boot_wait_regular_file("/data/WTERMREADY.TXT", 1500ULL)) {
+                if (boot_task_alive(pid))
+                    (void)signal_send_pid(pid, SIGTERM);
+                bootcli_push_line("wtermdemo: terminale grafico non pronto.");
+            } else {
+                bootcli_enter_wayland(pid, "wtermdemo");
+                line[0] = '\0';
+                bootcli_buf_append(line, sizeof(line), "wterm demo lanciato, pid=");
+                bootcli_buf_append_u32(line, sizeof(line), pid);
+                bootcli_push_line(line);
+            }
         }
     } else if (bootcli_streq(bootcli_input, "crtdemo")) {
         uint32_t pid = 0U;
@@ -2638,8 +2696,10 @@ static int bootcli_poll_input(void)
         while ((c = keyboard_getc()) >= 0) {
             uint8_t ch = (uint8_t)c;
 
-            if (ch == 0x03U || ch == 0x1DU) {
-                if (bootcli_abort_wayland_session(ch == 0x03U ? "^C" : "^]"))
+            if (ch == 0x1DU || ch == 0x1BU || ch == 0x03U) {
+                const char *reason = (ch == 0x1DU) ? "^]" :
+                                     (ch == 0x1BU) ? "Esc" : "^C";
+                if (bootcli_abort_wayland_session(reason))
                     dirty = 1;
             }
         }
@@ -2821,7 +2881,7 @@ static void bootcli_init(void)
     bootcli_push_line("M11-02e: prova 'tlsmtdemo' per TLS multi-thread, __thread ed errno per-thread.");
     bootcli_push_line("M11-05b: prova 'epolldemo' per epoll_create1(), ctl(), edge-trigger e timeout.");
     bootcli_push_line("M11-05c: prova 'sysvipcdemo' per shmget/shmat/shmdt e semget/semop/semctl.");
-    bootcli_push_line("M12-02: prova 'desktop' per una sessione Wayland, 'wmdemo' per due finestre demo.");
+    bootcli_push_line("M12-02: prova 'desktop' o 'hello' per la finestra Wayland trascinabile, 'wmdemo' per due finestre demo.");
     bootcli_push_line("M9-04: prova 'nsdemo' per bind mount, cwd reale, unshare e pivot_root.");
     bootcli_push_line("M9-02: vfsd user-space bootstrap attivo sopra il backend VFS kernel.");
     bootcli_push_line("M8-05: prova 'mreactdemo' e poi osserva /data/MREACT.TXT.");
@@ -2832,7 +2892,7 @@ static void bootcli_init(void)
             bootcli_push_line("Mouse guest pronto: puntatore ed eventi attivi.");
         else
             bootcli_push_line("Mouse guest non rilevato: tastiera soltanto.");
-        bootcli_push_line("In desktop: Ctrl+C o Ctrl+] forzano il ritorno alla boot console.");
+        bootcli_push_line("In desktop: Ctrl+] forza il ritorno alla boot console.");
     }
 }
 
@@ -3036,11 +3096,6 @@ void kernel_main(void)
     boot_launch_vfsd();
     boot_launch_blkd();
     boot_launch_netd();
-#ifndef ENLILOS_SELFTEST
-    boot_launch_wld();
-    boot_launch_wm();
-#endif
-
     uart_puts("[EnlilOS] Server di sistema registrati\n");
 
 #ifdef ENLILOS_SELFTEST
@@ -3055,17 +3110,17 @@ void kernel_main(void)
 #endif
 
     bootcli_init();
-    bootcli_launch_default_shell(0);
+    /* wld/wm non auto-avviati: partono solo su comando 'desktop'.
+     * bash non auto-avviata: utente vede bootcli UI e può digitare 'desktop'. */
     bootcli_render();
 
     uart_puts("\n[EnlilOS] ===================================\n");
     uart_puts("[EnlilOS] Boot completato con successo!\n");
     uart_puts("[EnlilOS] Console interattiva pronta\n");
-    uart_puts("[EnlilOS] Login shell: /bin/bash (fallback automatico a /bin/arksh, poi /bin/nsh)\n");
+    uart_puts("[EnlilOS] Comandi: 'desktop' avvia il desktop Wayland, 'bash' apre shell nativa, 'nsh' recovery shell\n");
     uart_puts("[EnlilOS] Layout tastiera: ");
     uart_puts(keyboard_get_layout_name());
     uart_puts(" (usa 'loadkeys us|it' o 'kbdlayout')\n");
-    uart_puts("[EnlilOS] Comandi: 'bash' apre GNU bash nativa, 'arksh' prova la shell reale, 'login' rilancia il bridge, 'nsh' apre la recovery shell\n");
     uart_puts("[EnlilOS] Rete: usa 'net' per vedere MAC/link/counter del driver virtio-net\n");
     uart_puts("[EnlilOS] Scheduler FPP attivo — heartbeat ogni 500ms\n");
     uart_puts("[EnlilOS] ===================================\n\n");

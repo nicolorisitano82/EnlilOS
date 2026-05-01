@@ -16,6 +16,7 @@
 #include "kmon.h"
 #include "ksem.h"
 #include "mreact.h"
+#include "pty.h"
 #include "mmu.h"
 #include "signal.h"
 #include "timer.h"
@@ -1563,6 +1564,7 @@ static void sched_task_finish_exit(sched_tcb_t *task, int32_t code)
     kmon_task_cleanup(task);
     ksem_task_cleanup(task);
     mreact_task_cleanup(task);
+    pty_task_cleanup(task);
     signal_task_exit(task);
 
     if (ctx)

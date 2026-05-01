@@ -14,6 +14,7 @@
 #include "types.h"
 #include "termios.h"
 #include "syscall.h"   /* winsize_t, O_NONBLOCK, EFAULT, EIO, EAGAIN, EINVAL */
+#include "sched.h"     /* sched_tcb_t — per slave_reader / master_reader */
 
 #define PTY_MAX       8U
 #define PTY_BUF_SIZE  4096U
@@ -32,6 +33,7 @@ typedef struct {
     uint8_t   locked;        /* 1=locked (slave non apribile), 0=unlocked */
     uint8_t   _pad[3];
     uint32_t  idx;           /* indice slot 0..PTY_MAX-1 */
+    uint32_t  slave_sid;     /* controlling session dello slave */
     uint32_t  slave_pgid;    /* pgid foreground slave, per SIGWINCH/segnali */
 
     /* master→slave: write(master) -> LD -> read(slave) */
@@ -49,6 +51,10 @@ typedef struct {
 
     termios_t termios;
     winsize_t winsize;
+
+    /* task bloccati in attesa di dati: unblockati da push/close */
+    sched_tcb_t *slave_reader;   /* task in pty_slave_read  (blocking) */
+    sched_tcb_t *master_reader;  /* task in pty_master_read (blocking) */
 } pty_t;
 
 /* Lifecycle */
@@ -58,6 +64,7 @@ pty_t  *pty_get(uint32_t idx);
 void    pty_open_slave(pty_t *p, uint32_t pgid);
 void    pty_close_master(pty_t *p);
 void    pty_close_slave(pty_t *p);
+void    pty_task_cleanup(sched_tcb_t *t);  /* chiama a exit task */
 
 /* I/O */
 ssize_t pty_master_write(pty_t *p, const void *buf, size_t count, uint32_t flags);
@@ -73,5 +80,8 @@ int     pty_tcgetattr(pty_t *p, termios_t *out);
 int     pty_tcsetattr(pty_t *p, int action, const termios_t *in);
 int     pty_get_winsize(pty_t *p, winsize_t *out);
 int     pty_set_winsize(pty_t *p, const winsize_t *in);  /* invia SIGWINCH */
+uint32_t pty_tcgetpgrp(pty_t *p);
+int      pty_tcsetpgrp(pty_t *p, uint32_t sid, uint32_t pgid);
+int      pty_set_ctty(pty_t *p, uint32_t sid, uint32_t pgid);
 
 #endif /* ENLILOS_PTY_H */

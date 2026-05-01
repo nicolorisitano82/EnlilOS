@@ -37,6 +37,11 @@ static int m2s_push(pty_t *p, uint8_t c)
     if (rb_full(p->m2s_head, p->m2s_tail, PTY_BUF_SIZE)) return 0;
     p->m2s_buf[p->m2s_head] = c;
     p->m2s_head = (p->m2s_head + 1U) % PTY_BUF_SIZE;
+    /* sveglia task bloccato in pty_slave_read */
+    if (p->slave_reader) {
+        sched_unblock(p->slave_reader);
+        p->slave_reader = NULL;
+    }
     return 1;
 }
 
@@ -53,6 +58,11 @@ static int s2m_push(pty_t *p, uint8_t c)
     if (rb_full(p->s2m_head, p->s2m_tail, PTY_BUF_SIZE)) return 0;
     p->s2m_buf[p->s2m_head] = c;
     p->s2m_head = (p->s2m_head + 1U) % PTY_BUF_SIZE;
+    /* sveglia task bloccato in pty_master_read */
+    if (p->master_reader) {
+        sched_unblock(p->master_reader);
+        p->master_reader = NULL;
+    }
     return 1;
 }
 
@@ -151,6 +161,11 @@ static void pty_ld_byte(pty_t *p, uint8_t c)
                 p->edit_len = 0U;
             } else {
                 p->eof_pending = 1U;
+                /* nessun byte in m2s_push: sveglia manualmente slave_reader */
+                if (p->slave_reader) {
+                    sched_unblock(p->slave_reader);
+                    p->slave_reader = NULL;
+                }
             }
             return;
         }
@@ -238,12 +253,22 @@ void pty_open_slave(pty_t *p, uint32_t pgid)
     if (!p) return;
     p->slave_open = 1U;
     if (pgid) p->slave_pgid = pgid;
+    if (current_task && sched_task_is_user(current_task)) {
+        uint32_t sid = sched_task_sid(current_task);
+        if (sid)
+            p->slave_sid = sid;
+    }
 }
 
 void pty_close_master(pty_t *p)
 {
     if (!p) return;
     p->master_open = 0U;
+    /* sveglia slave bloccato: vedrà master_open==0 e ritornerà 0 (HUP) */
+    if (p->slave_reader) {
+        sched_unblock(p->slave_reader);
+        p->slave_reader = NULL;
+    }
     if (!p->slave_open)
         p->in_use = 0U;
 }
@@ -252,7 +277,13 @@ void pty_close_slave(pty_t *p)
 {
     if (!p) return;
     p->slave_open  = 0U;
+    p->slave_sid   = 0U;
     p->slave_pgid  = 0U;
+    /* sveglia master bloccato: vedrà slave_open==0 e ritornerà 0 (HUP) */
+    if (p->master_reader) {
+        sched_unblock(p->master_reader);
+        p->master_reader = NULL;
+    }
     if (!p->master_open)
         p->in_use = 0U;
 }
@@ -312,7 +343,10 @@ ssize_t pty_master_read(pty_t *p, void *buf, size_t count, uint32_t flags)
         }
         if (got > 0U)          return (ssize_t)got;
         if (!p->slave_open)    return 0;   /* HUP */
-        sched_yield();
+        /* Blocca il task corrente fino a che s2m_push non lo sveglia. */
+        p->master_reader = current_task;
+        sched_block();
+        p->master_reader = NULL;
     }
 }
 
@@ -368,7 +402,10 @@ ssize_t pty_slave_read(pty_t *p, void *buf, size_t count, uint32_t flags)
 
         if (flags & O_NONBLOCK) return -EAGAIN;
         if (!p->master_open)    return 0;   /* HUP */
-        sched_yield();
+        /* Blocca il task corrente fino a che m2s_push non lo sveglia. */
+        p->slave_reader = current_task;
+        sched_block();
+        p->slave_reader = NULL;
     }
 }
 
@@ -415,4 +452,54 @@ int pty_set_winsize(pty_t *p, const winsize_t *in)
     if (p->slave_pgid)
         (void)signal_send_pgrp(p->slave_pgid, SIGWINCH);
     return 0;
+}
+
+uint32_t pty_tcgetpgrp(pty_t *p)
+{
+    if (!p)
+        return 0U;
+    return p->slave_pgid;
+}
+
+int pty_tcsetpgrp(pty_t *p, uint32_t sid, uint32_t pgid)
+{
+    if (!p)
+        return -EFAULT;
+    if (pgid == 0U)
+        return -EINVAL;
+    if (sid == 0U)
+        return -EPERM;
+    if (p->slave_sid == 0U)
+        p->slave_sid = sid;
+    if (p->slave_sid != sid)
+        return -EPERM;
+    p->slave_pgid = pgid;
+    return 0;
+}
+
+int pty_set_ctty(pty_t *p, uint32_t sid, uint32_t pgid)
+{
+    if (!p)
+        return -EFAULT;
+    if (sid == 0U)
+        return -EPERM;
+    if (p->slave_sid != 0U && p->slave_sid != sid)
+        return -EPERM;
+    p->slave_sid = sid;
+    if (pgid != 0U)
+        p->slave_pgid = pgid;
+    return 0;
+}
+
+/* ── cleanup su exit task ────────────────────────────────────────── */
+
+void pty_task_cleanup(sched_tcb_t *t)
+{
+    uint32_t i;
+    for (i = 0U; i < PTY_MAX; i++) {
+        if (pty_pool[i].slave_reader == t)
+            pty_pool[i].slave_reader = NULL;
+        if (pty_pool[i].master_reader == t)
+            pty_pool[i].master_reader = NULL;
+    }
 }
