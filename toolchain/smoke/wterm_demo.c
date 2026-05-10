@@ -930,7 +930,7 @@ static int app_spawn_bash(app_t *app)
             };
             int i;
             for (i = 0; shells[i] != NULL; i++) {
-                char *const argv_sh[] = { (char *)(uintptr_t)names[i], "-i", NULL };
+                char *const argv_sh[] = { (char *)(uintptr_t)names[i], NULL };
                 execve(shells[i], argv_sh, environ);
             }
         }
