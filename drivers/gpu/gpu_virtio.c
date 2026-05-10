@@ -369,13 +369,13 @@ static uint32_t virtio_gpu_pick_scanout(void)
     vgpu_scanout_id = chosen;
 
     /* Fallback: se GET_DISPLAY_INFO ritorna 0,0 su tutti i scanout,
-     * usa 1280x720 come default QEMU moderno (non 800x600 legacy).
+     * usa 800x600 per compatibility (make test headless -display none).
      */
     uint32_t w = info->pmodes[chosen].r.w;
     uint32_t h = info->pmodes[chosen].r.h;
     if (!w || !h) {
-        w = 1280U;
-        h = 720U;
+        w = 800U;
+        h = 600U;
     }
 
     vgpu_host_w = w;

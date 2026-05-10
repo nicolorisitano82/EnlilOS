@@ -3317,13 +3317,20 @@ static int selftest_case_desktop_hello(void)
     ST_CHECK(case_name, scan != NULL, "scanout visibile non disponibile");
     target = gpu_get_present_target_ptr();
     ST_CHECK(case_name, target != NULL, "target present non disponibile");
-    scan_frame = scan[sample_frame_y * FB_WIDTH + sample_frame_x];
-    scan_body = scan[sample_body_y * FB_WIDTH + sample_body_x];
-    scan_shadow = scan[sample_shadow_y * FB_WIDTH + sample_shadow_x];
-    target_frame = target[sample_frame_y * FB_WIDTH + sample_frame_x];
-    target_body = target[sample_body_y * FB_WIDTH + sample_body_x];
-    target_shadow = target[sample_shadow_y * FB_WIDTH + sample_shadow_x];
-    for (uint32_t i = 0U; i < (FB_WIDTH * FB_HEIGHT); i++) {
+
+    /* Query actual scanout dimensions for stride */
+    gpu_scanout_info_t info;
+    gpu_get_scanout_info(&info);
+    uint32_t stride_w = (info.width > 0) ? info.width : FB_WIDTH;
+    uint32_t stride_h = (info.height > 0) ? info.height : FB_HEIGHT;
+
+    scan_frame = scan[sample_frame_y * stride_w + sample_frame_x];
+    scan_body = scan[sample_body_y * stride_w + sample_body_x];
+    scan_shadow = scan[sample_shadow_y * stride_w + sample_shadow_x];
+    target_frame = target[sample_frame_y * stride_w + sample_frame_x];
+    target_body = target[sample_body_y * stride_w + sample_body_x];
+    target_shadow = target[sample_shadow_y * stride_w + sample_shadow_x];
+    for (uint32_t i = 0U; i < (stride_w * stride_h); i++) {
         if (first_scan_frame == 0xFFFFFFFFU && (scan[i] & 0x00FFFFFFU) == frame_px)
             first_scan_frame = i;
         if (first_scan_body == 0xFFFFFFFFU && (scan[i] & 0x00FFFFFFU) == body_px)

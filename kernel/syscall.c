@@ -8750,12 +8750,14 @@ static uint64_t sys_wld_present(uint64_t args[6])
     size_t    src_span;
     uint32_t *dst;
     uint32_t  row;
+    uint32_t  fb_w = fb_get_width();
+    uint32_t  fb_h = fb_get_height();
 
     if (!src_uva)
         return ERR(EFAULT);
-    if (width  == 0U || width  > FB_WIDTH)
+    if (width  == 0U || width  > fb_w)
         return ERR(EINVAL);
-    if (height == 0U || height > FB_HEIGHT)
+    if (height == 0U || height > fb_h)
         return ERR(EINVAL);
     if (stride < width * 4U)
         return ERR(EINVAL);
@@ -8775,7 +8777,7 @@ static uint64_t sys_wld_present(uint64_t args[6])
 
     for (row = 0U; row < height; row++) {
         uintptr_t row_uva = src_uva + (uintptr_t)(row * stride);
-        uint32_t  tmp_row[FB_WIDTH];
+        uint32_t  tmp_row[1920];
         uint32_t col;
 
         /* Copia la riga user-space una sola volta e poi specchiala sui target. */
@@ -8784,12 +8786,12 @@ static uint64_t sys_wld_present(uint64_t args[6])
         }
         for (col = 0U; col < width; col++)
             tmp_row[col] |= 0xFF000000U;
-        for (col = width; col < FB_WIDTH; col++)
+        for (col = width; col < fb_w; col++)
             tmp_row[col] = 0xFF000000U;
 
         {
-            uint32_t *dst_row = dst + (uintptr_t)(row * FB_WIDTH);
-            for (col = 0U; col < FB_WIDTH; col++)
+            uint32_t *dst_row = dst + (uintptr_t)(row * fb_w);
+            for (col = 0U; col < fb_w; col++)
                 dst_row[col] = tmp_row[col];
         }
     }
