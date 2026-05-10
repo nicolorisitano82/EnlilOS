@@ -1127,6 +1127,13 @@ int main(int argc, char **argv)
     if (session_mode)
         write_marker_file(WTERM_READY_PATH, "ready\n");
 
+    /* Send initial newline to trigger bash prompt output */
+    {
+        uint8_t init_input[] = {'\n'};
+        app_queue_input(&app, init_input, sizeof(init_input));
+        app_flush_pty_input(&app);
+    }
+
     while (app.running) {
         int status = 0;
         pid_t rc;
