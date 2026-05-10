@@ -945,8 +945,16 @@ static int app_spawn_bash(app_t *app)
         if (debug_fd >= 0) write(debug_fd, "C11\n", 4);
 
         /* Output a marker to verify stdout is connected */
-        write(STDOUT_FILENO, "SHELL_START\n", 12);
-        if (debug_fd >= 0) write(debug_fd, "C12\n", 4);
+        ssize_t wrote = write(STDOUT_FILENO, "SHELL_START\n", 12);
+        if (debug_fd >= 0) {
+            write(debug_fd, "C12-wrote:", 10);
+            char wbuf[4];
+            wbuf[0] = '0' + (wrote / 100) % 10;
+            wbuf[1] = '0' + (wrote / 10) % 10;
+            wbuf[2] = '0' + (wrote % 10);
+            wbuf[3] = '\n';
+            write(debug_fd, wbuf, 4);
+        }
 
         /* Try shells in order: nsh → bash → bash-linux → arksh */
         {
