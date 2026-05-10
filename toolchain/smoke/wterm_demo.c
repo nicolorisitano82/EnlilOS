@@ -922,6 +922,10 @@ static int app_spawn_bash(app_t *app)
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
+
+        /* Output a marker to verify stdout is connected */
+        (void)write(STDOUT_FILENO, "SHELL_START\n", 12);
+
         /* Try shells in order: nsh → bash → bash-linux → arksh */
         {
             static const char * const shells[] = {
