@@ -367,15 +367,26 @@ static uint32_t virtio_gpu_pick_scanout(void)
     }
 
     vgpu_scanout_id = chosen;
-    vgpu_host_w = info->pmodes[chosen].r.w ? info->pmodes[chosen].r.w : FB_WIDTH;
-    vgpu_host_h = info->pmodes[chosen].r.h ? info->pmodes[chosen].r.h : FB_HEIGHT;
+
+    /* Fallback: se GET_DISPLAY_INFO ritorna 0,0 su tutti i scanout,
+     * usa 1280x720 come default QEMU moderno (non 800x600 legacy).
+     */
+    uint32_t w = info->pmodes[chosen].r.w;
+    uint32_t h = info->pmodes[chosen].r.h;
+    if (!w || !h) {
+        w = 1280U;
+        h = 720U;
+    }
+
+    vgpu_host_w = w;
+    vgpu_host_h = h;
 
     uart_puts("[VGPU] Host scanout ");
     vgpu_pr_u32(chosen);
-    uart_puts(found_enabled ? " attivo " : " fallback ");
-    vgpu_pr_u32(info->pmodes[chosen].r.w);
+    uart_puts(found_enabled ? " attivo " : found_fallback ? " fallback " : " default ");
+    vgpu_pr_u32(w);
     uart_putc('x');
-    vgpu_pr_u32(info->pmodes[chosen].r.h);
+    vgpu_pr_u32(h);
     uart_puts("\n");
 
     return chosen;
