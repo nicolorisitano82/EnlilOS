@@ -872,8 +872,24 @@ static void app_drain_pty_output(app_t *app)
         return;
     for (;;) {
         ssize_t n = read(app->master_fd, buf, sizeof(buf));
-        if (n <= 0)
+        if (n <= 0) {
+            if (n < 0)
+                write(STDERR_FILENO, "wterm: read() returned error\n", 29);
             break;
+        }
+        write(STDERR_FILENO, "wterm: read ", 12);
+        {
+            char nbuf[16];
+            int nlen = 0;
+            if (n > 99999) nbuf[nlen++] = '9';
+            else if (n > 9999) { nbuf[nlen++] = '0' + (n / 10000) % 10; }
+            if (n > 999) { nbuf[nlen++] = '0' + (n / 1000) % 10; }
+            if (n > 99) { nbuf[nlen++] = '0' + (n / 100) % 10; }
+            if (n > 9) { nbuf[nlen++] = '0' + (n / 10) % 10; }
+            nbuf[nlen++] = '0' + (n % 10);
+            write(STDERR_FILENO, nbuf, nlen);
+        }
+        write(STDERR_FILENO, " bytes\n", 7);
         term_feed_bytes(&app->term, buf, (size_t)n);
     }
 }
@@ -886,26 +902,33 @@ static int app_spawn_bash(app_t *app)
     int            one = 1;
     pid_t          pid;
 
-    if (!app)
+    write(STDERR_FILENO, "wterm: app_spawn_bash called\n", 29);
+
+    if (!app) {
+        write(STDERR_FILENO, "wterm: app is null\n", 19);
         return -1;
+    }
 
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = TERM_ROWS;
     ws.ws_col = TERM_COLS;
 
-    if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) < 0)
+    if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) < 0) {
+        write(STDERR_FILENO, "wterm: openpty failed\n", 22);
         return -1;
+    }
 
     (void)ioctl(master_fd, FIONBIO, &one);
 
     pid = fork();
+    write(STDERR_FILENO, "wterm: fork returned\n", 21);
     if (pid < 0) {
-        close(master_fd);
-        close(slave_fd);
+        write(STDERR_FILENO, "wterm: fork failed\n", 19);
         return -1;
     }
 
     if (pid == 0) {
+        write(STDERR_FILENO, "wterm: in child, about to exec\n", 31);
         close(master_fd);
         (void)setsid();
         (void)ioctl(slave_fd, TIOCSCTTY, 0);
@@ -920,27 +943,43 @@ static int app_spawn_bash(app_t *app)
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
+        (void)setenv("PS1", "wterm\\$ ", 1);
         /* Try shells in order: native bash → bash-linux → nsh → arksh */
         {
             static const char * const shells[] = {
                 "/bin/bash", "/data/bash-linux", "/bin/nsh", "/bin/arksh", NULL
             };
             static const char * const names[] = {
-                "bash", "bash", "nsh", "arksh", NULL
+                "-bash", "-bash", "nsh", "arksh", NULL
             };
             int i;
             for (i = 0; shells[i] != NULL; i++) {
+                write(STDERR_FILENO, "wterm: trying ", 14);
+                write(STDERR_FILENO, shells[i], (i == 0 ? 10 : (i == 1 ? 16 : (i == 2 ? 8 : 9))));
+                write(STDERR_FILENO, "\n", 1);
                 char *const argv_sh[] = { (char *)(uintptr_t)names[i], NULL };
                 execve(shells[i], argv_sh, environ);
+                write(STDERR_FILENO, "wterm: execve failed, errno=", 28);
+                {
+                    int e = errno;
+                    char ebuf[4];
+                    ebuf[0] = '0' + (e / 100) % 10;
+                    ebuf[1] = '0' + (e / 10) % 10;
+                    ebuf[2] = '0' + (e % 10);
+                    ebuf[3] = '\n';
+                    write(STDERR_FILENO, ebuf, 4);
+                }
             }
         }
         write(STDERR_FILENO, "wterm: no shell found\n", 22);
         _exit(127);
     }
 
+    write(STDERR_FILENO, "wterm: parent, child forked\n", 28);
     close(slave_fd);
     app->master_fd = master_fd;
     app->child_pid = pid;
+    write(STDERR_FILENO, "wterm: spawn success\n", 21);
     return 0;
 }
 
@@ -1108,10 +1147,17 @@ int main(int argc, char **argv)
     if (app_wait_initial_configure(&app) < 0) {
         if (session_mode)
             write_marker_file(WTERM_FAIL_PATH, "configure\n");
+        term_feed_bytes(&app.term, (const uint8_t *)"ERR: configure timeout\r\n", 24U);
+        term_render(&app);
+        wl_present_surface(&app);
         write(STDERR_FILENO, "wterm: configure timeout\n", 25);
         app_cleanup(&app);
         return 3;
     }
+
+    term_feed_bytes(&app.term, (const uint8_t *)"Config OK, spawning bash...\r\n", 29U);
+    term_render(&app);
+    wl_present_surface(&app);
 
     if (app_spawn_bash(&app) < 0) {
         term_feed_bytes(&app.term, (const uint8_t *)"Failed to start shell\r\n", 23U);
@@ -1124,31 +1170,65 @@ int main(int argc, char **argv)
         return 4;
     }
 
+    term_feed_bytes(&app.term, (const uint8_t *)"Bash spawned, entering loop\r\n", 29U);
+    term_render(&app);
+    wl_present_surface(&app);
+
     if (session_mode)
         write_marker_file(WTERM_READY_PATH, "ready\n");
 
-    while (app.running) {
-        int status = 0;
-        pid_t rc;
+    {
+        static uint32_t first_output_tick = 0U;
+        uint32_t startup_timeout_ms = 3000U;  /* 3 second timeout for bash to show prompt */
+        uint32_t tick_count = 0U;
 
-        app_drain_wayland(&app);
-        app_flush_pty_input(&app);
-        app_drain_pty_output(&app);
+        while (app.running) {
+            int status = 0;
+            pid_t rc;
 
-        rc = waitpid(app.child_pid, &status, WNOHANG);
-        if (rc == app.child_pid) {
-            app.child_status = status;
-            app.child_pid = 0;
-            app.running = 0;
+            app_drain_wayland(&app);
+            app_flush_pty_input(&app);
+
+            uint32_t output_before = app.term.cursor_y;  /* Track if something was rendered */
+            app_drain_pty_output(&app);
+            if (app.term.cursor_y != output_before && first_output_tick == 0U) {
+                first_output_tick = tick_count;
+                write(STDERR_FILENO, "wterm: bash first output detected\n", 34);
+            }
+
+            /* Timeout if no bash output for too long */
+            if (first_output_tick == 0U && tick_count > (startup_timeout_ms / 10)) {
+                write(STDERR_FILENO, "wterm: bash startup timeout (no output after 3s)\n", 49);
+                app.running = 0;
+                break;
+            }
+
+            rc = waitpid(app.child_pid, &status, WNOHANG);
+            if (rc == app.child_pid) {
+                app.child_status = status;
+                write(STDERR_FILENO, "wterm: bash exited, status=", 27);
+                {
+                    char sbuf[4];
+                    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+                    sbuf[0] = '0' + (code / 100) % 10;
+                    sbuf[1] = '0' + (code / 10) % 10;
+                    sbuf[2] = '0' + (code % 10);
+                    sbuf[3] = '\n';
+                    write(STDERR_FILENO, sbuf, 4);
+                }
+                app.child_pid = 0;
+                app.running = 0;
+            }
+
+            if (app.term.dirty != 0U) {
+                term_render(&app);
+                wl_present_surface(&app);
+            }
+            if (app.close_requested)
+                break;
+            sleep_10ms();
+            tick_count++;
         }
-
-        if (app.term.dirty != 0U) {
-            term_render(&app);
-            wl_present_surface(&app);
-        }
-        if (app.close_requested)
-            break;
-        sleep_10ms();
     }
 
     app_cleanup(&app);
