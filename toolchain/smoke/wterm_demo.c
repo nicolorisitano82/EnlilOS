@@ -922,13 +922,13 @@ static int app_spawn_bash(app_t *app)
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
-        /* Try shells in order: native bash → bash-linux → nsh → arksh */
+        /* Try shells in order: nsh → bash → bash-linux → arksh */
         {
             static const char * const shells[] = {
-                "/bin/bash", "/data/bash-linux", "/bin/nsh", "/bin/arksh", NULL
+                "/bin/nsh", "/bin/bash", "/data/bash-linux", "/bin/arksh", NULL
             };
             static const char * const names[] = {
-                "bash", "bash", "nsh", "arksh", NULL
+                "nsh", "bash", "bash", "arksh", NULL
             };
             int i;
             for (i = 0; shells[i] != NULL; i++) {
@@ -1131,28 +1131,55 @@ int main(int argc, char **argv)
     if (session_mode)
         write_marker_file(WTERM_READY_PATH, "ready\n");
 
-    while (app.running) {
-        int status = 0;
-        pid_t rc;
+    {
+        uint32_t no_output_ticks = 0;
+        while (app.running) {
+            int status = 0;
+            pid_t rc;
 
-        app_drain_wayland(&app);
-        app_flush_pty_input(&app);
-        app_drain_pty_output(&app);
+            app_drain_wayland(&app);
+            app_flush_pty_input(&app);
 
-        rc = waitpid(app.child_pid, &status, WNOHANG);
-        if (rc == app.child_pid) {
-            app.child_status = status;
-            app.child_pid = 0;
-            app.running = 0;
+            uint32_t cursor_before = app.term.cursor_y;
+            app_drain_pty_output(&app);
+            uint32_t cursor_after = app.term.cursor_y;
+
+            if (cursor_after != cursor_before) {
+                no_output_ticks = 0;
+            } else {
+                no_output_ticks++;
+            }
+
+            rc = waitpid(app.child_pid, &status, WNOHANG);
+            if (rc == app.child_pid) {
+                app.child_status = status;
+                app.child_pid = 0;
+                app.running = 0;
+                /* Print bash exit reason to stderr */
+                if (WIFEXITED(status)) {
+                    int code = WEXITSTATUS(status);
+                    if (code != 0) {
+                        write(STDERR_FILENO, "wterm: bash exited with code ", 28);
+                        char cbuf[4];
+                        cbuf[0] = '0' + (code / 100) % 10;
+                        cbuf[1] = '0' + (code / 10) % 10;
+                        cbuf[2] = '0' + (code % 10);
+                        cbuf[3] = '\n';
+                        write(STDERR_FILENO, cbuf, 4);
+                    }
+                } else if (WIFSIGNALED(status)) {
+                    write(STDERR_FILENO, "wterm: bash killed by signal\n", 29);
+                }
+            }
+
+            if (app.term.dirty != 0U) {
+                term_render(&app);
+                wl_present_surface(&app);
+            }
+            if (app.close_requested)
+                break;
+            sleep_10ms();
         }
-
-        if (app.term.dirty != 0U) {
-            term_render(&app);
-            wl_present_surface(&app);
-        }
-        if (app.close_requested)
-            break;
-        sleep_10ms();
     }
 
     app_cleanup(&app);
