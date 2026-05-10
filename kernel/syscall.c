@@ -8779,8 +8779,23 @@ static uint64_t sys_wld_present(uint64_t args[6])
     uint32_t offset_x = (fb_w > width)  ? (fb_w - width) / 2U : 0U;
     uint32_t offset_y = (fb_h > height) ? (fb_h - height) / 2U : 0U;
 
-    /* Clear entire framebuffer with black */
-    for (uint32_t y = 0U; y < fb_h; y++) {
+    /* Clear ONLY the wld composite area (800x600) with black borders */
+    for (uint32_t y = 0U; y < height; y++) {
+        uint32_t *row_ptr = dst + (uintptr_t)((offset_y + y) * fb_w);
+        /* Left border */
+        for (uint32_t x = 0U; x < offset_x; x++)
+            row_ptr[x] = 0xFF000000U;
+        /* Right border */
+        for (uint32_t x = offset_x + width; x < fb_w; x++)
+            row_ptr[x] = 0xFF000000U;
+    }
+    /* Top/bottom borders */
+    for (uint32_t y = 0U; y < offset_y; y++) {
+        uint32_t *row_ptr = dst + (uintptr_t)(y * fb_w);
+        for (uint32_t x = 0U; x < fb_w; x++)
+            row_ptr[x] = 0xFF000000U;
+    }
+    for (uint32_t y = offset_y + height; y < fb_h; y++) {
         uint32_t *row_ptr = dst + (uintptr_t)(y * fb_w);
         for (uint32_t x = 0U; x < fb_w; x++)
             row_ptr[x] = 0xFF000000U;
