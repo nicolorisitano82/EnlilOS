@@ -394,6 +394,10 @@ static int32_t  wld_drag_off_y;
 static uint32_t wld_mouse_log_budget = 0U;
 static uint32_t wld_hello_debug_budget = 0U;
 
+/* Display resolution detected at boot (for Wayland output mode announcement) */
+static unsigned wld_display_w = WLD_FB_W;
+static unsigned wld_display_h = WLD_FB_H;
+
 static void wld_write_log(const char *s);
 static void wld_log_u32(uint32_t value);
 static void wld_log_i32(int32_t value);
@@ -1821,7 +1825,7 @@ static void send_output_info(wclient_t *c, uint32_t out_id)
 
     /* mode: WL_OUTPUT_MODE_CURRENT=1, w, h, refresh */
     msg_begin(c, out_id, WL_OUTPUT_MODE, 16U);
-    out_u32(c, 1U); out_u32(c, WLD_FB_W); out_u32(c, WLD_FB_H);
+    out_u32(c, 1U); out_u32(c, wld_display_w); out_u32(c, wld_display_h);
     out_u32(c, 60000U); /* 60Hz in mHz */
 
     /* done */
@@ -2336,6 +2340,20 @@ static int wld_main(void)
 
     for (uint32_t i = 0U; i < WLD_MAX_CLIENTS; i++)
         wld_clients[i].fd = -1;
+
+    /* Query actual display resolution from kernel for output mode announcement.
+       Rendering still happens at WLD_FB_W/H, but Wayland clients see actual res. */
+    wld_display_w = WLD_FB_W;
+    wld_display_h = WLD_FB_H;
+    long dims = user_svc0(WLD_SYS_GPU_GET_DISPLAY_SIZE);
+    if (dims > 0) {
+        unsigned w = (unsigned)(dims >> 32);
+        unsigned h = (unsigned)(dims & 0xFFFFFFFFUL);
+        if (w > WLD_FB_W && h > WLD_FB_H && w <= 1920U && h <= 1080U) {
+            wld_display_w = w;
+            wld_display_h = h;
+        }
+    }
 
     /* Alloca compositing buffer */
     wld_composite = wld_mmap((long)WLD_FB_SZ);
