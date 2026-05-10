@@ -879,16 +879,31 @@ static void app_drain_pty_output(app_t *app)
             int fd = open("/data/wterm_read.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
             if (fd >= 0) {
                 write(fd, "READ:", 5);
-                char rbuf[8];
-                rbuf[0] = '0' + (read_count / 1000000) % 10;
-                rbuf[1] = '0' + (read_count / 100000) % 10;
-                rbuf[2] = '0' + (read_count / 10000) % 10;
-                rbuf[3] = '0' + (read_count / 1000) % 10;
-                rbuf[4] = '0' + (read_count / 100) % 10;
-                rbuf[5] = '0' + (read_count / 10) % 10;
-                rbuf[6] = '0' + (read_count % 10);
-                rbuf[7] = '\n';
-                write(fd, rbuf, 8);
+                char rbuf[16];
+                int rlen = 0;
+                /* write count */
+                rbuf[rlen++] = '0' + (read_count / 1000000) % 10;
+                rbuf[rlen++] = '0' + (read_count / 100000) % 10;
+                rbuf[rlen++] = '0' + (read_count / 10000) % 10;
+                rbuf[rlen++] = '0' + (read_count / 1000) % 10;
+                rbuf[rlen++] = '0' + (read_count / 100) % 10;
+                rbuf[rlen++] = '0' + (read_count / 10) % 10;
+                rbuf[rlen++] = '0' + (read_count % 10);
+                rbuf[rlen++] = ':';
+                /* write byte count */
+                rbuf[rlen++] = '0' + (n / 100) % 10;
+                rbuf[rlen++] = '0' + (n / 10) % 10;
+                rbuf[rlen++] = '0' + (n % 10);
+                rbuf[rlen++] = ':';
+                /* write first few bytes as hex */
+                for (int i = 0; i < (n < 8 ? n : 8) && rlen < 14; i++) {
+                    uint8_t b = buf[i];
+                    char hex[] = "0123456789ABCDEF";
+                    rbuf[rlen++] = hex[b / 16];
+                    if (rlen < 15) rbuf[rlen++] = hex[b % 16];
+                }
+                rbuf[rlen++] = '\n';
+                write(fd, rbuf, rlen);
                 close(fd);
             }
         }
