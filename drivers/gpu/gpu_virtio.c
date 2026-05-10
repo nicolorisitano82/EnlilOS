@@ -144,7 +144,7 @@ static void vgpu_pr_u32(uint32_t v)
 #define VGPU_MAX_SCANOUTS           16U
 #define VGPU_VSYNC_NS               16666666ULL
 
-static uint32_t vgpu_scanbuf[2][FB_WIDTH * FB_HEIGHT] __attribute__((aligned(4096)));
+static uint32_t vgpu_scanbuf[2][FB_MAX_WIDTH * FB_MAX_HEIGHT] __attribute__((aligned(4096)));
 static uint32_t vgpu_scanout_id = VGPU_SCANOUT_ID;
 static uint32_t vgpu_front_idx;
 static uint32_t vgpu_host_w = FB_WIDTH;
@@ -476,6 +476,7 @@ static bool virtio_transport_init(void)
 static void virtio_gpu_device_init(void)
 {
     virtio_gpu_pick_scanout();
+    fb_set_resolution(vgpu_host_w, vgpu_host_h);
 
     if (vgpu_create_resource(VGPU_RESOURCE_FRONT_ID, vgpu_scanbuf[0]) != 0)
         return;
@@ -489,12 +490,16 @@ static void virtio_gpu_device_init(void)
     if (vgpu_set_scanout_resource(VGPU_RESOURCE_FRONT_ID) != 0)
         return;
     if (vgpu_transfer_and_flush(VGPU_RESOURCE_FRONT_ID, 0U, 0U,
-                                FB_WIDTH, FB_HEIGHT) != 0)
+                                vgpu_host_w, vgpu_host_h) != 0)
         return;
 
     vgpu_device = true;
     uart_puts("[VGPU] Display engine: double buffer + page flip + vsync 60Hz\n");
-    uart_puts("[VGPU] Scanout 800x600 BGRX attivo su display virtio\n");
+    uart_puts("[VGPU] Scanout ");
+    vgpu_pr_u32(vgpu_host_w);
+    uart_putc('x');
+    vgpu_pr_u32(vgpu_host_h);
+    uart_puts(" BGRX attivo\n");
 }
 
 static void vgpu_ensure_device(void)
@@ -530,14 +535,54 @@ static void virtio_query_scanout(gpu_scanout_info_t *out)
     out->frame_counter = vgpu_frame_counter;
 }
 
+/* Magic shader alpha blend (SW fallback per compute dispatch) */
+static uint32_t vgpu_blend_px(uint32_t d, uint32_t s, uint32_t a)
+{
+    if (a >= 255U) return s | 0xFF000000U;
+    uint32_t i = 255U - a;
+    uint32_t r = (((s>>16)&0xFF)*a + ((d>>16)&0xFF)*i) / 255U;
+    uint32_t g = (((s>> 8)&0xFF)*a + ((d>> 8)&0xFF)*i) / 255U;
+    uint32_t b = (((s    )&0xFF)*a + ((d    )&0xFF)*i) / 255U;
+    return 0xFF000000U | (r<<16) | (g<<8) | b;
+}
+
+static void vgpu_do_blend(const gpu_blend_args_t *a)
+{
+    const uint32_t *src = (const uint32_t *)(uintptr_t)a->src_uva;
+    uint32_t       *dst = (uint32_t *)(uintptr_t)a->dst_uva;
+    uint32_t ss = a->src_stride >> 2, ds = a->dst_stride >> 2;
+    uint32_t sw = a->src_w, sh = a->src_h;
+    uint32_t dw = a->dst_w, dh = a->dst_h;
+    uint32_t dx = a->dst_x, dy = a->dst_y, al = a->global_alpha;
+
+    for (uint32_t y = 0; y < dh; y++) {
+        if ((dy + y) >= FB_HEIGHT) break;
+        uint32_t sy = sh ? (y * sh / dh) : 0;
+        for (uint32_t x = 0; x < dw; x++) {
+            if ((dx + x) >= FB_WIDTH) break;
+            uint32_t sx = sw ? (x * sw / dw) : 0;
+            uint32_t dp = dst[(dy+y)*ds + (dx+x)];
+            uint32_t sp = src[sy*ss + sx];
+            dst[(dy+y)*ds + (dx+x)] = vgpu_blend_px(dp, sp, al);
+        }
+    }
+}
+
 static int virtio_execute_cmdbuf(gpu_cmdbuf_entry_t *cb,
                                   gpu_fence_entry_t  *fence)
 {
-    /*
-     * VirtIO-GPU 2D non interpreta command buffer GPU opachi.
-     * Accetta e segnala la fence immediatamente (compat con SW).
-     */
-    (void)cb;
+    /* Interpreta magic shader per compute dispatch (alpha_blend) */
+    if (cb->pub.count >= 8 && cb->pub.cmds[0] == 0x01000000u) {
+        uint64_t sh_pa = (uint64_t)cb->pub.cmds[1] |
+                         ((uint64_t)cb->pub.cmds[2] << 32);
+        uint64_t ab_pa = (uint64_t)cb->pub.cmds[3] |
+                         ((uint64_t)cb->pub.cmds[4] << 32);
+        if (sh_pa && ab_pa) {
+            const uint32_t *sh = (const uint32_t *)(uintptr_t)sh_pa;
+            if (sh[0] == GPU_SHADER_ALPHA_BLEND)
+                vgpu_do_blend((const gpu_blend_args_t *)(uintptr_t)ab_pa);
+        }
+    }
     fence->done_ns = timer_now_ns();
     fence->state   = GPU_FENCE_SIGNALED;
     return 0;
@@ -558,24 +603,24 @@ static int virtio_present(gpu_buf_entry_t   *scanout,
         return -1;
     }
 
-    if (!scanout || x >= FB_WIDTH || y >= FB_HEIGHT) {
+    if (!scanout || x >= vgpu_host_w || y >= vgpu_host_h) {
         fence->state = GPU_FENCE_ERROR;
         return -1;
     }
 
-    if (x + w > FB_WIDTH)  w = FB_WIDTH - x;
-    if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
+    if (x + w > vgpu_host_w)  w = vgpu_host_w - x;
+    if (y + h > vgpu_host_h) h = vgpu_host_h - y;
 
     src = (uint32_t *)(uintptr_t)scanout->phys;
     dst = vgpu_scanbuf[0];   /* single scanout buffer — no page flip needed */
 
     for (uint32_t row = 0U; row < h; row++) {
-        uint32_t base = (y + row) * FB_WIDTH + x;
+        uint32_t base = (y + row) * vgpu_host_w + x;
         for (uint32_t col = 0U; col < w; col++)
             dst[base + col] = src[base + col];
     }
 
-    cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
+    cache_flush_range((uintptr_t)dst, vgpu_host_w * vgpu_host_h * 4U);
 
     /*
      * Single transfer+flush onto VGPU_RESOURCE_FRONT_ID (the scanout
@@ -650,8 +695,8 @@ static int vgpu_create_resource(uint32_t resource_id, uint32_t *pixels)
     vgpu_prepare_hdr(&c2d->hdr, VGPU_CMD_CREATE_2D);
     c2d->resource_id = resource_id;
     c2d->format      = VGPU_FORMAT_B8G8R8X8_UNORM;
-    c2d->width       = FB_WIDTH;
-    c2d->height      = FB_HEIGHT;
+    c2d->width       = vgpu_host_w;
+    c2d->height      = vgpu_host_h;
     if (vq_send((uint32_t)sizeof(vgpu_create_2d_t),
                 (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
         uart_puts("[VGPU] WARN: create_2d fallito\n");
@@ -663,7 +708,7 @@ static int vgpu_create_resource(uint32_t resource_id, uint32_t *pixels)
     ab->resource_id = resource_id;
     ab->nr_entries  = 1U;
     ab->mem_addr    = (uint64_t)(uintptr_t)pixels;
-    ab->mem_len     = FB_WIDTH * FB_HEIGHT * 4U;
+    ab->mem_len     = vgpu_host_w * vgpu_host_h * 4U;
     ab->mem_pad     = 0U;
     if (vq_send((uint32_t)sizeof(vgpu_attach_backing_t),
                 (uint32_t)sizeof(vgpu_hdr_t)) != 0) {
@@ -678,7 +723,7 @@ static int vgpu_set_scanout_resource(uint32_t resource_id)
 {
     vgpu_set_scanout_t *ss = (vgpu_set_scanout_t *)(void *)vgpu_cmd;
     vgpu_prepare_hdr(&ss->hdr, VGPU_CMD_SET_SCANOUT);
-    ss->r           = (vgpu_rect_t){ 0U, 0U, FB_WIDTH, FB_HEIGHT };
+    ss->r           = (vgpu_rect_t){ 0U, 0U, vgpu_host_w, vgpu_host_h };
     ss->scanout_id  = vgpu_scanout_id;
     ss->resource_id = resource_id;
     if (vq_send((uint32_t)sizeof(vgpu_set_scanout_t),
@@ -698,7 +743,7 @@ static int vgpu_transfer_and_flush(uint32_t resource_id,
 
     vgpu_prepare_hdr(&tr->hdr, VGPU_CMD_TRANSFER_TO_HOST);
     tr->r           = (vgpu_rect_t){ x, y, w, h };
-    tr->offset      = ((uint64_t)y * FB_WIDTH + x) * 4ULL;
+    tr->offset      = ((uint64_t)y * vgpu_host_w + x) * 4ULL;
     tr->resource_id = resource_id;
     tr->padding     = 0U;
     if (vq_send((uint32_t)sizeof(vgpu_transfer_t),

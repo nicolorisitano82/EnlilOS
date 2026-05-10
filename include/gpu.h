@@ -36,6 +36,29 @@
 #define SYS_GPU_FENCE_DESTROY    131
 #define SYS_GPU_PRESENT          132
 #define SYS_GPU_COMPUTE_DISPATCH 133
+#define SYS_GPU_BUF_MAP_USER     135
+#define SYS_GPU_GET_DISPLAY_SIZE 136
+
+/* ── GPU Compute Shader Magic ───────────────────────────────────────── */
+
+#define GPU_SHADER_ALPHA_BLEND   0x00AB1E50u
+
+/*
+ * gpu_blend_args_t — parametri per shader alpha_blend.
+ * Usata in gpu_compute_dispatch come args_buf content.
+ * Versione SW backend: blend lineare fra src e dst con alpha globale.
+ */
+typedef struct {
+    uint64_t src_uva;      /* user VA sorgente (pixels client, ARGB8888) */
+    uint64_t dst_uva;      /* user VA destinazione (GPU scanout mappato) */
+    uint32_t src_w, src_h;
+    uint32_t src_stride;   /* bytes per riga sorgente */
+    uint32_t dst_x, dst_y;
+    uint32_t dst_w, dst_h;
+    uint32_t dst_stride;   /* bytes per riga destinazione */
+    uint32_t global_alpha; /* 0-255 */
+    uint32_t _pad;
+} gpu_blend_args_t;
 
 /* ── Capacità GPU ───────────────────────────────────────────────────── */
 

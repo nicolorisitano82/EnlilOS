@@ -82,7 +82,8 @@
       "Bash(sed -n '315,380p' /Users/nicolo/nros/kernel/gpu_syscall.c)",
       "Bash(sed -n '516,560p' /Users/nicolo/nros/kernel/gpu_syscall.c)",
       "Bash(grep -v \"\\\\.o$\\\\|\\\\.elf$\")",
-      "Bash(git -C /Users/nicolo/nros log --oneline -3)"
+      "Bash(git -C /Users/nicolo/nros log --oneline -3)",
+      "Bash(make user/wld.elf)"
     ]
   }
 }

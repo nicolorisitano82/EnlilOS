@@ -21,6 +21,7 @@
 #include "framebuffer.h"
 #include "syscall.h"
 #include "sched.h"
+#include "mmu.h"
 #include "timer.h"
 #include "uart.h"
 #include "utf8.h"
@@ -44,7 +45,7 @@ uint64_t           gpu_next_fence_id = 1;
 #define GPU_MM_GENERAL_SLOTS    8U
 #define GPU_MM_CMD_SLOTS        8U
 
-#define GPU_MM_SCANOUT_BYTES    (FB_WIDTH * FB_HEIGHT * 4U)
+#define GPU_MM_SCANOUT_BYTES    (FB_MAX_WIDTH * FB_MAX_HEIGHT * 4U)
 #define GPU_MM_GENERAL_BYTES    (512U * 1024U)
 #define GPU_MM_CMD_BYTES        (64U * 1024U)
 
@@ -616,7 +617,42 @@ static uint64_t sys_gpu_compute_dispatch(uint64_t args[6])
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * gpu_init — rileva backend e registra syscall 120-133
+ * Syscall 135 — gpu_buf_map_user
+ * args[0] = buf_handle
+ * Ritorna: VA user (o 0 su errore)
+ *
+ * Mappa le pagine fisiche del buffer nel VA space del task chiamante.
+ * retain_pages=1: pagine NON liberate allo unmap del VMA.
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_gpu_buf_map_user(uint64_t args[6])
+{
+    uint32_t h = (uint32_t)args[0];
+    if (!buf_valid(h)) return 0;
+    gpu_buf_entry_t *e = &gpu_buf_pool[h - 1];
+
+    mm_space_t *space = sched_task_space(current_task);
+    if (!space) return 0;
+
+    uintptr_t uva = 0;
+    int ret = mmu_map_user_phys_anywhere(space, e->phys,
+                  (size_t)e->capacity,
+                  MMU_PROT_USER_R | MMU_PROT_USER_W,
+                  &uva, /*retain_pages=*/1);
+    return (ret == 0) ? (uint64_t)uva : 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * syscall 136 — gpu_get_display_size
+ *   Ritorna: (width<<32) | height
+ * ════════════════════════════════════════════════════════════════════ */
+static uint64_t sys_gpu_get_display_size(uint64_t args[6])
+{
+    (void)args;
+    return ((uint64_t)fb_get_width() << 32) | (uint64_t)fb_get_height();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * gpu_init — rileva backend e registra syscall 120-133, 135
  * ════════════════════════════════════════════════════════════════════ */
 void gpu_init(void)
 {
@@ -704,8 +740,14 @@ void gpu_init(void)
     syscall_table[SYS_GPU_COMPUTE_DISPATCH] = (syscall_entry_t){
         sys_gpu_compute_dispatch, SYSCALL_FLAG_RT, "gpu_compute_dispatch"
     };
+    syscall_table[SYS_GPU_BUF_MAP_USER] = (syscall_entry_t){
+        sys_gpu_buf_map_user, 0, "gpu_buf_map_user"
+    };
+    syscall_table[SYS_GPU_GET_DISPLAY_SIZE] = (syscall_entry_t){
+        sys_gpu_get_display_size, 0, "gpu_get_display_size"
+    };
 
-    uart_puts("[GPU] Syscall 120-133 registrate\n");
+    uart_puts("[GPU] Syscall 120-133, 135-136 registrate\n");
     uart_puts("[GPU] Renderer 2D: ring statico ");
     uart_putc('0' + (char)(GPU_2D_RING_MAX / 100U));
     uart_putc('0' + (char)((GPU_2D_RING_MAX / 10U) % 10U));
@@ -747,20 +789,21 @@ void gpu_present_fullscreen(void)
 
     if (!scanout) {
         static gpu_buf_entry_t fb_entry = {
-            .size   = FB_WIDTH * FB_HEIGHT * 4U,
+            .size   = 0,
             .type   = GPU_BUF_SCANOUT,
             .in_use = true,
         };
 
         if (!fb)
             return;
+        fb_entry.size = fb_get_width() * fb_get_height() * 4U;
         fb_entry.phys = (uint64_t)(uintptr_t)fb;
         scanout = &fb_entry;
     }
 
     fence.state = GPU_FENCE_PENDING;
 
-    gpu_active_backend->present(scanout, 0U, 0U, FB_WIDTH, FB_HEIGHT, &fence);
+    gpu_active_backend->present(scanout, 0U, 0U, fb_get_width(), fb_get_height(), &fence);
 }
 
 void gpu_present_framebuffer(void)
@@ -770,7 +813,7 @@ void gpu_present_framebuffer(void)
         .in_use = true,
     };
     static gpu_buf_entry_t fb_entry = {
-        .size   = FB_WIDTH * FB_HEIGHT * 4U,
+        .size   = 0,
         .type   = GPU_BUF_SCANOUT,
         .in_use = true,
     };
@@ -779,9 +822,10 @@ void gpu_present_framebuffer(void)
     if (!gpu_active_backend || !fb)
         return;
 
+    fb_entry.size = fb_get_width() * fb_get_height() * 4U;
     fb_entry.phys = (uint64_t)(uintptr_t)fb;
     fence.state = GPU_FENCE_PENDING;
-    gpu_active_backend->present(&fb_entry, 0U, 0U, FB_WIDTH, FB_HEIGHT, &fence);
+    gpu_active_backend->present(&fb_entry, 0U, 0U, fb_get_width(), fb_get_height(), &fence);
 }
 
 void gpu_set_2d_present_enabled(bool enabled)
@@ -920,14 +964,14 @@ static void gpu_2d_mark_dirty(void)
 static void gpu_2d_fill_rect_apply(uint32_t *dst, uint32_t x, uint32_t y,
                                    uint32_t w, uint32_t h, uint32_t color)
 {
-    if (!dst || x >= FB_WIDTH || y >= FB_HEIGHT || w == 0U || h == 0U)
+    if (!dst || x >= fb_get_width() || y >= fb_get_height() || w == 0U || h == 0U)
         return;
-    if (x + w > FB_WIDTH)  w = FB_WIDTH - x;
-    if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
+    if (x + w > fb_get_width())  w = fb_get_width() - x;
+    if (y + h > fb_get_height()) h = fb_get_height() - y;
 
     color = gpu_2d_opaque(color);
     for (uint32_t row = 0U; row < h; row++) {
-        uint32_t *dst_row = dst + (y + row) * FB_WIDTH + x;
+        uint32_t *dst_row = dst + (y + row) * fb_get_width() + x;
         for (uint32_t col = 0U; col < w; col++)
             dst_row[col] = color;
     }
@@ -940,22 +984,22 @@ static void gpu_2d_blit_apply(uint32_t *dst,
 {
     if (!dst || w == 0U || h == 0U)
         return;
-    if (dst_x >= FB_WIDTH || dst_y >= FB_HEIGHT ||
-        src_x >= FB_WIDTH || src_y >= FB_HEIGHT)
+    if (dst_x >= fb_get_width() || dst_y >= fb_get_height() ||
+        src_x >= fb_get_width() || src_y >= fb_get_height())
         return;
 
-    if (src_x + w > FB_WIDTH) w = FB_WIDTH - src_x;
-    if (dst_x + w > FB_WIDTH) w = FB_WIDTH - dst_x;
-    if (src_y + h > FB_HEIGHT) h = FB_HEIGHT - src_y;
-    if (dst_y + h > FB_HEIGHT) h = FB_HEIGHT - dst_y;
+    if (src_x + w > fb_get_width()) w = fb_get_width() - src_x;
+    if (dst_x + w > fb_get_width()) w = fb_get_width() - dst_x;
+    if (src_y + h > fb_get_height()) h = fb_get_height() - src_y;
+    if (dst_y + h > fb_get_height()) h = fb_get_height() - dst_y;
     if (w == 0U || h == 0U)
         return;
 
     bool reverse_rows = (src_y < dst_y) && (src_y + h > dst_y);
     for (uint32_t rowi = 0U; rowi < h; rowi++) {
         uint32_t row = reverse_rows ? (h - 1U - rowi) : rowi;
-        uint32_t *dst_row = dst + (dst_y + row) * FB_WIDTH + dst_x;
-        uint32_t *src_row = dst + (src_y + row) * FB_WIDTH + src_x;
+        uint32_t *dst_row = dst + (dst_y + row) * fb_get_width() + dst_x;
+        uint32_t *src_row = dst + (src_y + row) * fb_get_width() + src_x;
         bool reverse_cols = ((src_y + row) == (dst_y + row) &&
                              src_x < dst_x &&
                              src_x + w > dst_x);
@@ -978,17 +1022,17 @@ static void gpu_2d_draw_glyph_apply(uint32_t *dst, uint32_t x, uint32_t y,
 {
     const uint8_t *glyph;
 
-    if (!dst || x >= FB_WIDTH || y >= FB_HEIGHT)
+    if (!dst || x >= fb_get_width() || y >= fb_get_height())
         return;
     glyph = fb_font_lookup_glyph(codepoint);
     fg = gpu_2d_opaque(fg);
     bg = gpu_2d_opaque(bg);
 
     for (uint32_t row = 0U; row < 16U; row++) {
-        if (y + row >= FB_HEIGHT)
+        if (y + row >= fb_get_height())
             break;
         uint8_t bits = glyph[row];
-        uint32_t *dst_row = dst + (y + row) * FB_WIDTH + x;
+        uint32_t *dst_row = dst + (y + row) * fb_get_width() + x;
         for (uint32_t col = 0U; col < 8U && x + col < FB_WIDTH; col++) {
             if ((bits & (uint8_t)(0x80U >> col)) != 0U) {
                 dst_row[col] = fg;
@@ -1021,13 +1065,13 @@ static void gpu_2d_alpha_apply(uint32_t *dst, uint32_t x, uint32_t y,
 {
     uint32_t src_stride = w;
 
-    if (!dst || !src || x >= FB_WIDTH || y >= FB_HEIGHT || w == 0U || h == 0U)
+    if (!dst || !src || x >= fb_get_width() || y >= fb_get_height() || w == 0U || h == 0U)
         return;
-    if (x + w > FB_WIDTH)  w = FB_WIDTH - x;
-    if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
+    if (x + w > fb_get_width())  w = fb_get_width() - x;
+    if (y + h > fb_get_height()) h = fb_get_height() - y;
 
     for (uint32_t row = 0U; row < h; row++) {
-        uint32_t *dst_row = dst + (y + row) * FB_WIDTH + x;
+        uint32_t *dst_row = dst + (y + row) * fb_get_width() + x;
         const uint32_t *src_row = src + row * src_stride;
         for (uint32_t col = 0U; col < w; col++) {
             uint32_t spx = src_row[col];
@@ -1054,7 +1098,7 @@ static void gpu_2d_draw_text_apply(uint32_t *dst, uint32_t x, uint32_t y,
             break;
         gpu_2d_draw_glyph_apply(dst, cx, y, cp, fg, bg, flags);
         cx += 8U;
-        if (cx >= FB_WIDTH)
+        if (cx >= fb_get_width())
             break;
     }
 }
@@ -1112,7 +1156,7 @@ static int gpu_2d_ensure_target(void)
     if (gpu_2d_scanout_ptr && buf_valid(gpu_2d_scanout_handle))
         return 0;
 
-    args[0] = FB_WIDTH * FB_HEIGHT * 4U;
+    args[0] = fb_get_width() * fb_get_height() * 4U;
     args[1] = GPU_BUF_SCANOUT | GPU_BUF_PINNED;
     args[2] = args[3] = args[4] = args[5] = 0U;
     ret = sys_gpu_buf_alloc(args);
@@ -1153,7 +1197,7 @@ int gpu_begin_2d_frame(uint32_t clear_color)
     (void)gpu_2d_ensure_target();
     gpu_2d_ring_count = 0U;
     gpu_2d_frame_open = true;
-    return gpu_fill_rect(0U, 0U, FB_WIDTH, FB_HEIGHT, clear_color);
+    return gpu_fill_rect(0U, 0U, fb_get_width(), fb_get_height(), clear_color);
 }
 
 int gpu_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
@@ -1325,21 +1369,21 @@ int gpu_selftest_run(void)
     target = gpu_2d_target_ptr();
     GPU_ST_CHECK(target != NULL, "target scanout nullo");
     GPU_ST_CHECK(target[0] == 0xFF010203U, "clear color inatteso");
-    GPU_ST_CHECK(target[10U + 10U * FB_WIDTH] == 0xFF0A0B0CU,
+    GPU_ST_CHECK(target[10U + 10U * fb_get_width()] == 0xFF0A0B0CU,
                  "fill_rect non applicato");
-    GPU_ST_CHECK(target[20U + 20U * FB_WIDTH] == 0xFF0A0B0CU,
+    GPU_ST_CHECK(target[20U + 20U * fb_get_width()] == 0xFF0A0B0CU,
                  "blit non applicato");
 
     for (uint32_t row = 0U; row < 16U; row++) {
         for (uint32_t col = 0U; col < 8U; col++) {
-            if (target[(30U + row) * FB_WIDTH + 30U + col] == 0xFFF0F0F0U)
+            if (target[(30U + row) * fb_get_width() + 30U + col] == 0xFFF0F0F0U)
                 glyph_hits++;
         }
     }
     GPU_ST_CHECK(glyph_hits > 0U, "glyph rasterizzato vuoto");
 
     expected_blend = gpu_2d_blend_pixel(0xFF010203U, sprite[0], 128U);
-    GPU_ST_CHECK(target[40U + 40U * FB_WIDTH] == expected_blend,
+    GPU_ST_CHECK(target[40U + 40U * fb_get_width()] == expected_blend,
                  "alpha blend inatteso");
 
     gpu_present_fullscreen();
@@ -1348,5 +1392,64 @@ int gpu_selftest_run(void)
                  "present non ha aggiornato il frame counter");
 
 #undef GPU_ST_CHECK
+    return 0;
+}
+
+int gpu_compositor_selftest_run(void)
+{
+    uint32_t s_h = (uint32_t)sys_gpu_buf_alloc((uint64_t[]){
+        fb_get_width()*fb_get_height()*4U, GPU_BUF_SCANOUT|GPU_BUF_PINNED, 0,0,0,0});
+    if (s_h == GPU_INVALID_BUF) return -1;
+
+    uint32_t q_h = (uint32_t)sys_gpu_cmdqueue_create((uint64_t[]){
+        GPU_QUEUE_COMPUTE, 8, 0,0,0,0});
+    if (q_h == GPU_INVALID_QUEUE) { sys_gpu_buf_free((uint64_t[]){s_h,0,0,0,0,0}); return -1; }
+
+    static const uint32_t shader[] = { GPU_SHADER_ALPHA_BLEND, 1, 0, 0 };
+    uint32_t sh_h = (uint32_t)sys_gpu_buf_alloc((uint64_t[]){
+        sizeof(shader), GPU_BUF_SHADER, 0,0,0,0});
+    if (sh_h == GPU_INVALID_BUF) return -1;
+    uint32_t *sp = (uint32_t *)(uintptr_t)
+        sys_gpu_buf_map_cpu((uint64_t[]){sh_h,0,0,0,0,0});
+    if (!sp) return -1;
+    for (int i = 0; i < 4; i++) sp[i] = shader[i];
+    sys_gpu_buf_unmap_cpu((uint64_t[]){sh_h,0,0,0,0,0});
+
+    uint32_t ab_h = (uint32_t)sys_gpu_buf_alloc((uint64_t[]){
+        sizeof(gpu_blend_args_t), GPU_BUF_UNIFORM, 0,0,0,0});
+    if (ab_h == GPU_INVALID_BUF) return -1;
+
+    static uint32_t src_px = 0x00FF4400U;
+    gpu_blend_args_t *aptr = (gpu_blend_args_t *)(uintptr_t)
+        sys_gpu_buf_map_cpu((uint64_t[]){ab_h,0,0,0,0,0});
+    if (!aptr) return -1;
+    aptr->src_uva    = (uint64_t)(uintptr_t)&src_px;
+    aptr->dst_uva    = (uint64_t)(uintptr_t)
+        ((uint32_t *)(uintptr_t)gpu_buf_pool[s_h-1].phys);
+    aptr->src_w      = 1; aptr->src_h = 1; aptr->src_stride = 4;
+    aptr->dst_x      = 0; aptr->dst_y  = 0;
+    aptr->dst_w      = 1; aptr->dst_h  = 1; aptr->dst_stride = fb_get_width() * 4U;
+    aptr->global_alpha = 255;
+    sys_gpu_buf_unmap_cpu((uint64_t[]){ab_h,0,0,0,0,0});
+
+    uint64_t fence = sys_gpu_compute_dispatch((uint64_t[]){
+        q_h, sh_h, 1, 1, 1, ab_h});
+    if (fence == GPU_INVALID_FENCE) return -1;
+
+    uint64_t fw_args[] = { fence, (uint64_t)-1ULL, 0,0,0,0 };
+    if (sys_gpu_fence_wait(fw_args) != 0) return -1;
+
+    uint32_t *px = (uint32_t *)(uintptr_t)gpu_buf_pool[s_h-1].phys;
+    if ((px[0] & 0x00FFFFFFU) != 0x00FF4400U) return -1;
+
+    uint64_t pf = sys_gpu_present((uint64_t[]){s_h, 0, 0, fb_get_width(), fb_get_height(), 0});
+    if (pf == GPU_INVALID_FENCE) return -1;
+
+    sys_gpu_fence_destroy((uint64_t[]){fence,0,0,0,0,0});
+    sys_gpu_fence_destroy((uint64_t[]){pf,0,0,0,0,0});
+    sys_gpu_cmdqueue_destroy((uint64_t[]){q_h,0,0,0,0,0});
+    sys_gpu_buf_free((uint64_t[]){sh_h,0,0,0,0,0});
+    sys_gpu_buf_free((uint64_t[]){ab_h,0,0,0,0,0});
+    sys_gpu_buf_free((uint64_t[]){s_h,0,0,0,0,0});
     return 0;
 }

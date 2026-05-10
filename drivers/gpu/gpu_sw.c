@@ -40,19 +40,58 @@ static void sw_query_caps(gpu_caps_t *out)
 static void sw_query_scanout(gpu_scanout_info_t *out)
 {
     if (!out) return;
+    sw_scanout.width  = fb_get_width();
+    sw_scanout.height = fb_get_height();
     *out = sw_scanout;
 }
 
 /* ── execute_cmdbuf ─────────────────────────────────────────────────── */
 
-/*
- * Il SW backend non interpreta i comandi GPU: li accetta e segnala
- * subito la fence. Questo rende l'API corretta per lo sviluppo
- * anche senza hardware reale.
- */
+static uint32_t sw_blend_px(uint32_t d, uint32_t s, uint32_t a)
+{
+    if (a >= 255U) return s | 0xFF000000U;
+    uint32_t i = 255U - a;
+    uint32_t r = (((s>>16)&0xFF)*a + ((d>>16)&0xFF)*i) / 255U;
+    uint32_t g = (((s>> 8)&0xFF)*a + ((d>> 8)&0xFF)*i) / 255U;
+    uint32_t b = (((s    )&0xFF)*a + ((d    )&0xFF)*i) / 255U;
+    return 0xFF000000U | (r<<16) | (g<<8) | b;
+}
+
+static void sw_do_blend(const gpu_blend_args_t *a)
+{
+    const uint32_t *src = (const uint32_t *)(uintptr_t)a->src_uva;
+    uint32_t       *dst = (uint32_t *)(uintptr_t)a->dst_uva;
+    uint32_t ss = a->src_stride >> 2, ds = a->dst_stride >> 2;
+    uint32_t sw = a->src_w, sh = a->src_h;
+    uint32_t dw = a->dst_w, dh = a->dst_h;
+    uint32_t dx = a->dst_x, dy = a->dst_y, al = a->global_alpha;
+
+    for (uint32_t y = 0; y < dh; y++) {
+        if ((dy + y) >= fb_get_height()) break;
+        uint32_t sy = sh ? (y * sh / dh) : 0;
+        for (uint32_t x = 0; x < dw; x++) {
+            if ((dx + x) >= fb_get_width()) break;
+            uint32_t sx = sw ? (x * sw / dw) : 0;
+            uint32_t dp = dst[(dy+y)*ds + (dx+x)];
+            uint32_t sp = src[sy*ss + sx];
+            dst[(dy+y)*ds + (dx+x)] = sw_blend_px(dp, sp, al);
+        }
+    }
+}
+
 static int sw_execute_cmdbuf(gpu_cmdbuf_entry_t *cb, gpu_fence_entry_t *fence)
 {
-    (void)cb;
+    if (cb->pub.count >= 8 && cb->pub.cmds[0] == 0x01000000u) {
+        uint64_t sh_pa = (uint64_t)cb->pub.cmds[1] |
+                         ((uint64_t)cb->pub.cmds[2] << 32);
+        uint64_t ab_pa = (uint64_t)cb->pub.cmds[3] |
+                         ((uint64_t)cb->pub.cmds[4] << 32);
+        if (sh_pa && ab_pa) {
+            const uint32_t *sh = (const uint32_t *)(uintptr_t)sh_pa;
+            if (sh[0] == GPU_SHADER_ALPHA_BLEND)
+                sw_do_blend((const gpu_blend_args_t *)(uintptr_t)ab_pa);
+        }
+    }
     fence->done_ns = timer_now_ns();
     fence->state   = GPU_FENCE_SIGNALED;
     return 0;
@@ -89,9 +128,9 @@ static int sw_present(gpu_buf_entry_t *scanout, uint32_t x, uint32_t y,
         fb_flush();
     } else {
         /* Caso 2: blit regione (x,y,w,h) */
-        uint32_t fb_w = FB_WIDTH;
+        uint32_t fb_w = fb_get_width();
         uint32_t blit_w = (x + w > fb_w) ? (fb_w - x) : w;
-        uint32_t blit_h = (y + h > FB_HEIGHT) ? (FB_HEIGHT - y) : h;
+        uint32_t blit_h = (y + h > fb_get_height()) ? (fb_get_height() - y) : h;
 
         for (uint32_t row = 0; row < blit_h; row++) {
             uint32_t *dst_row = fb  + (y + row) * fb_w + x;

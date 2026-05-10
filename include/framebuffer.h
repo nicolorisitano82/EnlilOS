@@ -12,6 +12,16 @@
 #define FB_HEIGHT  600
 #define FB_BPP     4    /* 32-bit BGRA */
 
+#define FB_MAX_WIDTH  1920U
+#define FB_MAX_HEIGHT 1080U
+
+extern uint32_t fb_width;
+extern uint32_t fb_height;
+
+void     fb_set_resolution(uint32_t w, uint32_t h);
+uint32_t fb_get_width(void);
+uint32_t fb_get_height(void);
+
 void fb_init(void);
 void fb_clear(uint32_t color);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);

@@ -36,6 +36,7 @@
 extern void *memset(void *dst, int value, size_t n);
 
 extern int gpu_selftest_run(void);
+extern int gpu_compositor_selftest_run(void);
 
 typedef int (*selftest_case_fn)(void);
 
@@ -3419,8 +3420,9 @@ static const selftest_case_t selftest_cases[] = {
     { "kmon-core",   selftest_case_kmon      },
     { "ipc-sync",    selftest_case_ipc_sync  },
     { "kdebug-core", kdebug_selftest_run     },
-    { "gpu-stack",   gpu_selftest_run        },
-    { "procfs-core", selftest_case_procfs    },
+    { "gpu-stack",          gpu_selftest_run               },
+    { "gpu-compositor",     gpu_compositor_selftest_run    },
+    { "procfs-core",        selftest_case_procfs           },
     { "linux-proc-dev-etc", selftest_case_linux_proc_dev_etc },
     { "linux-fs-env",       selftest_case_linux_fs_env },
     { "linux-at-paths", selftest_case_linux_at_paths },

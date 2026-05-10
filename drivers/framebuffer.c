@@ -211,10 +211,24 @@ static const uint8_t font_8x16[][16] = {
 };
 
 /* Framebuffer in memoria - usato come buffer lineare */
-static uint32_t framebuffer[FB_WIDTH * FB_HEIGHT] __attribute__((aligned(4096)));
+static uint32_t framebuffer[FB_MAX_WIDTH * FB_MAX_HEIGHT] __attribute__((aligned(4096)));
 
 /* Puntatore al framebuffer attivo */
 static volatile uint32_t *fb_ptr;
+
+/* Runtime resolution tracking */
+uint32_t fb_width  = FB_WIDTH;
+uint32_t fb_height = FB_HEIGHT;
+
+void fb_set_resolution(uint32_t w, uint32_t h)
+{
+    if (!w || !h || w > FB_MAX_WIDTH || h > FB_MAX_HEIGHT) return;
+    fb_width  = w;
+    fb_height = h;
+}
+
+uint32_t fb_get_width(void)  { return fb_width;  }
+uint32_t fb_get_height(void) { return fb_height; }
 
 static inline uint32_t fb_opaque(uint32_t color)
 {
@@ -522,16 +536,16 @@ void fb_init(void)
     cfg.addr   = bswap64((uint64_t)(uintptr_t)framebuffer);
     cfg.fourcc = bswap32(0x34325258); /* XR24 = XRGB8888 */
     cfg.flags  = 0;
-    cfg.width  = bswap32(FB_WIDTH);
-    cfg.height = bswap32(FB_HEIGHT);
-    cfg.stride = bswap32(FB_WIDTH * FB_BPP);
+    cfg.width  = bswap32(fb_width);
+    cfg.height = bswap32(fb_height);
+    cfg.stride = bswap32(fb_width * FB_BPP);
 
     uart_puts("[FB] ramfb selector=");
     fb_pr_hex32((uint32_t)ramfb_sel);
     uart_puts(" fb=");
     fb_pr_hex64((uint64_t)(uintptr_t)framebuffer);
     uart_puts(" stride=");
-    fb_pr_hex32(FB_WIDTH * FB_BPP);
+    fb_pr_hex32(fb_width * FB_BPP);
     uart_puts("\n");
 
     /* Scrivi tramite DMA fw_cfg (unica modalità affidabile su QEMU virt) */
@@ -552,21 +566,21 @@ uint32_t *fb_get_ptr(void)
 void fb_flush(void)
 {
     cache_flush_range((uintptr_t)framebuffer,
-                      FB_WIDTH * FB_HEIGHT * FB_BPP);
+                      fb_width * fb_height * FB_BPP);
 }
 
 void fb_clear(uint32_t color)
 {
     color = fb_opaque(color);
-    for (uint32_t i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+    for (uint32_t i = 0; i < fb_width * fb_height; i++) {
         fb_ptr[i] = color;
     }
 }
 
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color)
 {
-    if (x < FB_WIDTH && y < FB_HEIGHT) {
-        fb_ptr[y * FB_WIDTH + x] = fb_opaque(color);
+    if (x < fb_width && y < fb_height) {
+        fb_ptr[y * fb_width + x] = fb_opaque(color);
     }
 }
 
@@ -608,8 +622,8 @@ void fb_draw_string_centered(const char *s, uint32_t fg, uint32_t bg)
     uint32_t text_width = len * 8;   /* 8 pixel per carattere */
     uint32_t text_height = 16;       /* 16 pixel per riga */
 
-    uint32_t x = (FB_WIDTH - text_width) / 2;
-    uint32_t y = (FB_HEIGHT - text_height) / 2;
+    uint32_t x = (fb_width - text_width) / 2;
+    uint32_t y = (fb_height - text_height) / 2;
 
     fb_draw_string(x, y, s, fg, bg);
 }
@@ -844,7 +858,7 @@ void fb_draw_string_centered_utf8(const char *s, uint32_t fg, uint32_t bg)
 {
     uint32_t len = utf8_strlen(s);
     uint32_t text_w = len * 8;
-    uint32_t x = (FB_WIDTH > text_w) ? (FB_WIDTH - text_w) / 2 : 0;
-    uint32_t y = (FB_HEIGHT - 16) / 2;
+    uint32_t x = (fb_width > text_w) ? (fb_width - text_w) / 2 : 0;
+    uint32_t y = (fb_height - 16) / 2;
     fb_draw_string_utf8(x, y, s, fg, bg);
 }

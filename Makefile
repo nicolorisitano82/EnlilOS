@@ -798,7 +798,7 @@ run-gpu: $(KERNEL)
 		-global virtio-mmio.force-legacy=false \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
-		-device virtio-gpu-device \
+		-device virtio-gpu-device,xres=1280,yres=720 \
 		-device virtio-keyboard-device \
 		-device virtio-tablet-device \
 		-display default,show-cursor=off \
@@ -870,7 +870,7 @@ run-blk: $(KERNEL) disk-ready
 		-global virtio-mmio.force-legacy=false \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
-		-device virtio-gpu-device \
+		-device virtio-gpu-device,xres=1280,yres=720 \
 		-device virtio-keyboard-device \
 		-device virtio-tablet-device \
 		-drive format=raw,file=disk.img,if=none,id=blk0 \
