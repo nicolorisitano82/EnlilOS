@@ -870,10 +870,29 @@ static void app_drain_pty_output(app_t *app)
 
     if (!app || app->master_fd < 0)
         return;
+
+    static uint32_t read_count = 0;
     for (;;) {
         ssize_t n = read(app->master_fd, buf, sizeof(buf));
+        if (n > 0) {
+            read_count++;
+            int fd = open("/data/wterm_read.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd >= 0) {
+                write(fd, "READ:", 5);
+                char rbuf[8];
+                rbuf[0] = '0' + (read_count / 1000000) % 10;
+                rbuf[1] = '0' + (read_count / 100000) % 10;
+                rbuf[2] = '0' + (read_count / 10000) % 10;
+                rbuf[3] = '0' + (read_count / 1000) % 10;
+                rbuf[4] = '0' + (read_count / 100) % 10;
+                rbuf[5] = '0' + (read_count / 10) % 10;
+                rbuf[6] = '0' + (read_count % 10);
+                rbuf[7] = '\n';
+                write(fd, rbuf, 8);
+                close(fd);
+            }
+        }
         if (n <= 0) {
-            /* n=0 means EOF (child closed fd), n<0 with EAGAIN is normal for non-blocking */
             break;
         }
         term_feed_bytes(&app->term, buf, (size_t)n);
