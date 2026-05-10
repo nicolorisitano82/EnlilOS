@@ -908,23 +908,37 @@ static int app_spawn_bash(app_t *app)
     }
 
     if (pid == 0) {
+        write(2, "C1\n", 3);  /* Checkpoint 1: child started */
         close(master_fd);
+        write(2, "C2\n", 3);  /* Checkpoint 2: closed master */
         (void)setsid();
+        write(2, "C3\n", 3);  /* Checkpoint 3: setsid done */
         (void)ioctl(slave_fd, TIOCSCTTY, 0);
+        write(2, "C4\n", 3);  /* Checkpoint 4: TIOCSCTTY done */
         (void)setpgid(0, 0);
-        (void)dup2(slave_fd, STDIN_FILENO);
-        (void)dup2(slave_fd, STDOUT_FILENO);
-        (void)dup2(slave_fd, STDERR_FILENO);
+        write(2, "C5\n", 3);  /* Checkpoint 5: setpgid done */
+
+        int r1 = dup2(slave_fd, STDIN_FILENO);
+        write(2, "C6\n", 3);  /* Checkpoint 6: dup2 stdin done, r1=? */
+        int r2 = dup2(slave_fd, STDOUT_FILENO);
+        write(2, "C7\n", 3);  /* Checkpoint 7: dup2 stdout done, r2=? */
+        int r3 = dup2(slave_fd, STDERR_FILENO);
+        write(2, "C8\n", 3);  /* Checkpoint 8: dup2 stderr done, r3=? */
+
         if (slave_fd > STDERR_FILENO)
             close(slave_fd);
+        write(2, "C9\n", 3);  /* Checkpoint 9: slave_fd closed */
         (void)tcsetpgrp(STDIN_FILENO, getpid());
+        write(2, "C10\n", 4); /* Checkpoint 10: tcsetpgrp done */
         (void)setenv("TERM", "vt100", 1);
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
+        write(2, "C11\n", 4); /* Checkpoint 11: env vars set */
 
         /* Output a marker to verify stdout is connected */
-        (void)write(STDOUT_FILENO, "SHELL_START\n", 12);
+        write(STDOUT_FILENO, "SHELL_START\n", 12);
+        write(2, "C12\n", 4); /* Checkpoint 12: marker written */
 
         /* Try shells in order: nsh → bash → bash-linux → arksh */
         {
@@ -937,9 +951,13 @@ static int app_spawn_bash(app_t *app)
             int i;
             for (i = 0; shells[i] != NULL; i++) {
                 char *const argv_sh[] = { (char *)(uintptr_t)names[i], NULL };
+                write(2, "EXEC:", 5);
+                write(2, shells[i], (i == 0 ? 8 : (i == 1 ? 10 : (i == 2 ? 16 : 9))));
+                write(2, "\n", 1);
                 execve(shells[i], argv_sh, environ);
             }
         }
+        write(2, "NOSHELL\n", 8);
         _exit(127);
     }
 
