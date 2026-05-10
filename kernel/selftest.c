@@ -3324,12 +3324,22 @@ static int selftest_case_desktop_hello(void)
     uint32_t stride_w = (info.width > 0) ? info.width : FB_WIDTH;
     uint32_t stride_h = (info.height > 0) ? info.height : FB_HEIGHT;
 
-    scan_frame = scan[sample_frame_y * stride_w + sample_frame_x];
-    scan_body = scan[sample_body_y * stride_w + sample_body_x];
-    scan_shadow = scan[sample_shadow_y * stride_w + sample_shadow_x];
-    target_frame = target[sample_frame_y * stride_w + sample_frame_x];
-    target_body = target[sample_body_y * stride_w + sample_body_x];
-    target_shadow = target[sample_shadow_y * stride_w + sample_shadow_x];
+    /* Account for centered compositing: wld renders 800x600 centered in stride_w×stride_h */
+    uint32_t offset_x = (stride_w > 800U) ? (stride_w - 800U) / 2U : 0U;
+    uint32_t offset_y = (stride_h > 600U) ? (stride_h - 600U) / 2U : 0U;
+    uint32_t actual_frame_x = offset_x + sample_frame_x;
+    uint32_t actual_frame_y = offset_y + sample_frame_y;
+    uint32_t actual_body_x = offset_x + sample_body_x;
+    uint32_t actual_body_y = offset_y + sample_body_y;
+    uint32_t actual_shadow_x = offset_x + sample_shadow_x;
+    uint32_t actual_shadow_y = offset_y + sample_shadow_y;
+
+    scan_frame = scan[actual_frame_y * stride_w + actual_frame_x];
+    scan_body = scan[actual_body_y * stride_w + actual_body_x];
+    scan_shadow = scan[actual_shadow_y * stride_w + actual_shadow_x];
+    target_frame = target[actual_frame_y * stride_w + actual_frame_x];
+    target_body = target[actual_body_y * stride_w + actual_body_x];
+    target_shadow = target[actual_shadow_y * stride_w + actual_shadow_x];
     for (uint32_t i = 0U; i < (stride_w * stride_h); i++) {
         if (first_scan_frame == 0xFFFFFFFFU && (scan[i] & 0x00FFFFFFU) == frame_px)
             first_scan_frame = i;

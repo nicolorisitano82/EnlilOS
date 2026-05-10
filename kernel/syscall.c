@@ -8775,35 +8775,38 @@ static uint64_t sys_wld_present(uint64_t args[6])
     if (!dst)
         return ERR(EIO);
 
+    /* Center content: calculate offsets */
+    uint32_t offset_x = (fb_w > width)  ? (fb_w - width) / 2U : 0U;
+    uint32_t offset_y = (fb_h > height) ? (fb_h - height) / 2U : 0U;
+
+    /* Clear entire framebuffer with black */
+    for (uint32_t y = 0U; y < fb_h; y++) {
+        uint32_t *row_ptr = dst + (uintptr_t)(y * fb_w);
+        for (uint32_t x = 0U; x < fb_w; x++)
+            row_ptr[x] = 0xFF000000U;
+    }
+
+    /* Blit centered content */
     for (row = 0U; row < height; row++) {
         uintptr_t row_uva = src_uva + (uintptr_t)(row * stride);
         uint32_t  tmp_row[1920];
         uint32_t col;
 
-        /* Copia la riga user-space una sola volta e poi specchiala sui target. */
+        /* Copia la riga user-space una sola volta. */
         if (user_copy_bytes(row_uva, tmp_row, width * 4U) < 0) {
             return ERR(EFAULT);
         }
         for (col = 0U; col < width; col++)
             tmp_row[col] |= 0xFF000000U;
-        for (col = width; col < fb_w; col++)
-            tmp_row[col] = 0xFF000000U;
 
         {
-            uint32_t *dst_row = dst + (uintptr_t)(row * fb_w);
-            for (col = 0U; col < fb_w; col++)
+            uint32_t *dst_row = dst + (uintptr_t)((offset_y + row) * fb_w + offset_x);
+            for (col = 0U; col < width; col++)
                 dst_row[col] = tmp_row[col];
         }
     }
-    /* Righe rimanenti nere */
-    if (height < FB_HEIGHT) {
-        uint32_t remaining = (FB_HEIGHT - height) * FB_WIDTH;
-        uint32_t *tail = dst + height * FB_WIDTH;
-        for (row = 0U; row < remaining; row++)
-            tail[row] = 0xFF000000U;
-    }
 
-    cache_flush_range((uintptr_t)dst, FB_WIDTH * FB_HEIGHT * 4U);
+    cache_flush_range((uintptr_t)dst, fb_w * fb_h * 4U);
     gpu_mark_present_target_dirty();
     gpu_present_fullscreen();
     return 0ULL;
