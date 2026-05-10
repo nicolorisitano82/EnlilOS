@@ -333,8 +333,14 @@ static int wl_connect_runtime(app_t *app)
 
 static void term_mark_dirty(term_state_t *t)
 {
-    if (t)
+    if (t) {
         t->dirty = 1U;
+        int fd = open("/data/wterm_dirty.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            write(fd, "DIRTY\n", 6);
+            close(fd);
+        }
+    }
 }
 
 static void term_reset_style(term_state_t *t)
