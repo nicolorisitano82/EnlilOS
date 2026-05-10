@@ -929,18 +929,24 @@ static int app_spawn_bash(app_t *app)
 
         if (slave_fd > STDERR_FILENO)
             close(slave_fd);
-        write(2, "C9\n", 3);  /* Checkpoint 9: slave_fd closed */
+
+        /* Open debug log file (now that stderr is PTY, can't use it) */
+        int debug_fd = open("/data/wterm_debug.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+        if (debug_fd >= 0) write(debug_fd, "C9\n", 3);
+
         (void)tcsetpgrp(STDIN_FILENO, getpid());
-        write(2, "C10\n", 4); /* Checkpoint 10: tcsetpgrp done */
+        if (debug_fd >= 0) write(debug_fd, "C10\n", 4);
+
         (void)setenv("TERM", "vt100", 1);
         (void)setenv("COLORTERM", "enlilos", 1);
         (void)setenv("COLUMNS", "80", 1);
         (void)setenv("LINES", "24", 1);
-        write(2, "C11\n", 4); /* Checkpoint 11: env vars set */
+        if (debug_fd >= 0) write(debug_fd, "C11\n", 4);
 
         /* Output a marker to verify stdout is connected */
         write(STDOUT_FILENO, "SHELL_START\n", 12);
-        write(2, "C12\n", 4); /* Checkpoint 12: marker written */
+        if (debug_fd >= 0) write(debug_fd, "C12\n", 4);
 
         /* Try shells in order: nsh → bash → bash-linux → arksh */
         {
@@ -952,14 +958,19 @@ static int app_spawn_bash(app_t *app)
             };
             int i;
             for (i = 0; shells[i] != NULL; i++) {
+                if (debug_fd >= 0) {
+                    write(debug_fd, "EXEC:", 5);
+                    write(debug_fd, shells[i], (i == 0 ? 8 : (i == 1 ? 10 : (i == 2 ? 16 : 9))));
+                    write(debug_fd, "\n", 1);
+                }
                 char *const argv_sh[] = { (char *)(uintptr_t)names[i], NULL };
-                write(2, "EXEC:", 5);
-                write(2, shells[i], (i == 0 ? 8 : (i == 1 ? 10 : (i == 2 ? 16 : 9))));
-                write(2, "\n", 1);
                 execve(shells[i], argv_sh, environ);
             }
         }
-        write(2, "NOSHELL\n", 8);
+        if (debug_fd >= 0) {
+            write(debug_fd, "NOSHELL\n", 8);
+            close(debug_fd);
+        }
         _exit(127);
     }
 
