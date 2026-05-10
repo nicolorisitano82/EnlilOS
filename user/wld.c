@@ -110,12 +110,10 @@ static const unsigned wld_alpha_blend_shader[] = {
 #define WLD_KEY_INSERT     110U
 #define WLD_KEY_DELETE     111U
 
-/* framebuffer dimensions - runtime settable */
-#define WLD_MAX_FB_W  1920U
-#define WLD_MAX_FB_H  1080U
-static unsigned wld_fb_w = 800U;
-static unsigned wld_fb_h = 600U;
-#define WLD_FB_SZ   (wld_fb_w * wld_fb_h * 4U)
+/* framebuffer dimensions */
+#define WLD_FB_W    800U
+#define WLD_FB_H    600U
+#define WLD_FB_SZ   (WLD_FB_W * WLD_FB_H * 4U)
 #define WLD_TITLE_H 22U
 #define WLD_FRAME_BORDER 2U
 #define WLD_TITLE_BTN_SZ 12U
@@ -385,8 +383,8 @@ static uint32_t wld_frame_serial = 1U;
 static uint32_t wld_present_count = 0U;
 static uint32_t wld_layout_mode = ENLIL_WM_LAYOUT_TILE;
 static uint32_t wld_focus_idx = 0xFFFFU;
-static int32_t  wld_pointer_x = 400;
-static int32_t  wld_pointer_y = 300;
+static int32_t  wld_pointer_x = (int32_t)(WLD_FB_W / 2U);
+static int32_t  wld_pointer_y = (int32_t)(WLD_FB_H / 2U);
 static uint32_t wld_pointer_buttons;
 static uint8_t  wld_focus_follow_pointer = 0U;
 static uint8_t  wld_drag_active;
@@ -762,13 +760,13 @@ static void wld_fill_rect(uint32_t *dst, int32_t x, int32_t y,
 {
     for (uint32_t row = 0U; row < h; row++) {
         int32_t dy = y + (int32_t)row;
-        if (dy < 0 || dy >= (int32_t)wld_fb_h)
+        if (dy < 0 || dy >= (int32_t)WLD_FB_H)
             continue;
         for (uint32_t col = 0U; col < w; col++) {
             int32_t dx = x + (int32_t)col;
-            if (dx < 0 || dx >= (int32_t)wld_fb_w)
+            if (dx < 0 || dx >= (int32_t)WLD_FB_W)
                 continue;
-            dst[(uint32_t)dy * wld_fb_w + (uint32_t)dx] = color;
+            dst[(uint32_t)dy * WLD_FB_W + (uint32_t)dx] = color;
         }
     }
 }
@@ -800,12 +798,12 @@ static void wld_draw_cursor(uint32_t *dst, int32_t x, int32_t y, uint32_t button
                 continue;
 
             if (spx >= 0 && spy >= 0 &&
-                spx < (int32_t)wld_fb_w && spy < (int32_t)wld_fb_h) {
-                uint32_t *shadow_px = &dst[(uint32_t)spy * wld_fb_w + (uint32_t)spx];
+                spx < (int32_t)WLD_FB_W && spy < (int32_t)WLD_FB_H) {
+                uint32_t *shadow_px = &dst[(uint32_t)spy * WLD_FB_W + (uint32_t)spx];
                 *shadow_px = wld_blend_rgb(*shadow_px, shadow, 120U);
             }
 
-            if (px < 0 || py < 0 || px >= (int32_t)wld_fb_w || py >= (int32_t)wld_fb_h)
+            if (px < 0 || py < 0 || px >= (int32_t)WLD_FB_W || py >= (int32_t)WLD_FB_H)
                 continue;
 
             if (col == 0U || !(mask[row] & (uint16_t)(bit << 1)))
@@ -817,12 +815,12 @@ static void wld_draw_cursor(uint32_t *dst, int32_t x, int32_t y, uint32_t button
             else if (row == 23U || !(mask[row + 1U] & bit))
                 edge_px = 1;
 
-            dst[(uint32_t)py * wld_fb_w + (uint32_t)px] = edge_px ? edge : fill;
+            dst[(uint32_t)py * WLD_FB_W + (uint32_t)px] = edge_px ? edge : fill;
         }
     }
 
-    if (x >= 0 && y >= 0 && x < (int32_t)wld_fb_w && y < (int32_t)wld_fb_h)
-        dst[(uint32_t)y * wld_fb_w + (uint32_t)x] = 0x00FF3B30U;
+    if (x >= 0 && y >= 0 && x < (int32_t)WLD_FB_W && y < (int32_t)WLD_FB_H)
+        dst[(uint32_t)y * WLD_FB_W + (uint32_t)x] = 0x00FF3B30U;
 }
 
 static uint32_t wld_blend_rgb(uint32_t dst, uint32_t src, uint8_t alpha)
@@ -850,9 +848,9 @@ static void wld_blit_scaled(uint32_t *dst, int32_t dx0, int32_t dy0,
         return;
 
     /* Precompute x source map: one division per column, not per pixel */
-    uint16_t x_map[WLD_MAX_FB_W];
+    uint16_t x_map[WLD_FB_W];
     {
-        uint32_t cap = (dw < wld_fb_w) ? dw : wld_fb_w;
+        uint32_t cap = (dw < WLD_FB_W) ? dw : WLD_FB_W;
         for (uint32_t dx = 0U; dx < cap; dx++) {
             uint32_t sx = (dx * sw) / dw;
             x_map[dx] = (uint16_t)((sx < sw) ? sx : sw - 1U);
@@ -863,7 +861,7 @@ static void wld_blit_scaled(uint32_t *dst, int32_t dx0, int32_t dy0,
         int32_t out_y = dy0 + (int32_t)dy;
         uint32_t sy;
 
-        if (out_y < 0 || out_y >= (int32_t)wld_fb_h)
+        if (out_y < 0 || out_y >= (int32_t)WLD_FB_H)
             continue;
         sy = (dy * sh) / dh;
         if (sy >= sh)
@@ -874,10 +872,10 @@ static void wld_blit_scaled(uint32_t *dst, int32_t dx0, int32_t dy0,
         for (uint32_t dx = 0U; dx < dw; dx++) {
             int32_t out_x = dx0 + (int32_t)dx;
 
-            if (out_x < 0 || out_x >= (int32_t)wld_fb_w)
+            if (out_x < 0 || out_x >= (int32_t)WLD_FB_W)
                 continue;
             uint32_t pix = src_row[x_map[dx]];
-            uint32_t *dst_px = &dst[(uint32_t)out_y * wld_fb_w + (uint32_t)out_x];
+            uint32_t *dst_px = &dst[(uint32_t)out_y * WLD_FB_W + (uint32_t)out_x];
             *dst_px = (alpha >= 255U) ? pix : wld_blend_rgb(*dst_px, pix, alpha);
         }
     }
@@ -969,10 +967,10 @@ static void wld_relayout(int send_cfg)
         avail_w = 0U;
         col_w = 0U;
     } else if (count == 1U) {
-        avail_w = wld_fb_w - (gap * 2U);
+        avail_w = WLD_FB_W - (gap * 2U);
         col_w = avail_w;
     } else {
-        avail_w = wld_fb_w - gap * (count + 1U);
+        avail_w = WLD_FB_W - gap * (count + 1U);
         col_w = (count > 0U) ? (avail_w / count) : avail_w;
     }
 
@@ -981,7 +979,7 @@ static void wld_relayout(int send_cfg)
         wclient_t *c;
         uint32_t x;
         uint32_t y = gap;
-        uint32_t h = wld_fb_h - (gap * 2U);
+        uint32_t h = WLD_FB_H - (gap * 2U);
 
         surf->focused = 0U;
         if (!wsurf_is_viewable(surf))
@@ -994,11 +992,11 @@ static void wld_relayout(int send_cfg)
                 surf->view_w = buf->width;
                 surf->view_h = buf->height;
             } else {
-                if (surf->view_w == 0U) surf->view_w = wld_fb_w;
+                if (surf->view_w == 0U) surf->view_w = WLD_FB_W;
                 if (surf->view_h == 0U) surf->view_h = 56U;
             }
             surf->x = 0;
-            surf->y = (int32_t)(wld_fb_h - surf->view_h);
+            surf->y = (int32_t)(WLD_FB_H - surf->view_h);
             surf->placed = 1U;
             /* No focus for dock */
             if (send_cfg) {
@@ -1018,8 +1016,8 @@ static void wld_relayout(int send_cfg)
                     surf->view_h = 246U;
             }
             if (!surf->placed) {
-                surf->x = (int32_t)((wld_fb_w > surf->view_w) ? ((wld_fb_w - surf->view_w) / 2U) : 0U);
-                surf->y = (int32_t)((wld_fb_h > surf->view_h) ? ((wld_fb_h - surf->view_h) / 2U) : 0U);
+                surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
+                surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
                 surf->placed = 1U;
             }
         } else if (surf->floating) {
@@ -1034,10 +1032,10 @@ static void wld_relayout(int send_cfg)
                     surf->view_h = 220U;
             }
             if (!surf->placed) {
-                uint32_t max_x = (wld_fb_w > surf->view_w) ? (wld_fb_w - surf->view_w) : 0U;
-                uint32_t max_y = (wld_fb_h > surf->view_h) ? (wld_fb_h - surf->view_h) : 0U;
-                surf->x = (int32_t)((wld_fb_w > surf->view_w) ? ((wld_fb_w - surf->view_w) / 2U) : 0U);
-                surf->y = (int32_t)((wld_fb_h > surf->view_h) ? ((wld_fb_h - surf->view_h) / 2U) : 0U);
+                uint32_t max_x = (WLD_FB_W > surf->view_w) ? (WLD_FB_W - surf->view_w) : 0U;
+                uint32_t max_y = (WLD_FB_H > surf->view_h) ? (WLD_FB_H - surf->view_h) : 0U;
+                surf->x = (int32_t)((WLD_FB_W > surf->view_w) ? ((WLD_FB_W - surf->view_w) / 2U) : 0U);
+                surf->y = (int32_t)((WLD_FB_H > surf->view_h) ? ((WLD_FB_H - surf->view_h) / 2U) : 0U);
                 if ((uint32_t)surf->x > max_x) surf->x = (int32_t)max_x;
                 if ((uint32_t)surf->y > max_y) surf->y = (int32_t)max_y;
                 surf->placed = 1U;
@@ -1432,8 +1430,8 @@ static uint8_t wld_handle_mouse(void)
         }
         if (wld_pointer_x < 0) wld_pointer_x = 0;
         if (wld_pointer_y < 0) wld_pointer_y = 0;
-        if (wld_pointer_x >= (int32_t)wld_fb_w) wld_pointer_x = (int32_t)wld_fb_w - 1;
-        if (wld_pointer_y >= (int32_t)wld_fb_h) wld_pointer_y = (int32_t)wld_fb_h - 1;
+        if (wld_pointer_x >= (int32_t)WLD_FB_W) wld_pointer_x = (int32_t)WLD_FB_W - 1;
+        if (wld_pointer_y >= (int32_t)WLD_FB_H) wld_pointer_y = (int32_t)WLD_FB_H - 1;
         wld_pointer_buttons = ev.buttons;
 
         hit = wld_hit_test_surface(wld_pointer_x, wld_pointer_y);
@@ -1501,8 +1499,8 @@ static uint8_t wld_handle_mouse(void)
             wsurf_t *surf = &wld_surfs[wld_drag_idx];
             int32_t nx = wld_pointer_x - wld_drag_off_x;
             int32_t ny = wld_pointer_y - wld_drag_off_y;
-            int32_t max_x = (surf->view_w < wld_fb_w) ? (int32_t)(wld_fb_w - surf->view_w) : 0;
-            int32_t max_y = (surf->view_h < wld_fb_h) ? (int32_t)(wld_fb_h - surf->view_h) : 0;
+            int32_t max_x = (surf->view_w < WLD_FB_W) ? (int32_t)(WLD_FB_W - surf->view_w) : 0;
+            int32_t max_y = (surf->view_h < WLD_FB_H) ? (int32_t)(WLD_FB_H - surf->view_h) : 0;
 
             if (nx < 0) nx = 0;
             if (ny < 0) ny = 0;
@@ -1529,63 +1527,6 @@ static uint8_t wld_handle_mouse(void)
     }
 
     return dirty;
-}
-
-static void wld_gpu_init(void)
-{
-    wld_gpu_queue = (unsigned)user_svc2(WLD_SYS_GPU_CMDQUEUE_CREATE,
-                        (long)WLD_GPU_QUEUE_COMPUTE, 16);
-    if (wld_gpu_queue == WLD_GPU_INVALID_QUEUE) return;
-
-    wld_gpu_shader_buf = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
-                             (long)WLD_GPU_BUF_SHADER,
-                             (long)sizeof(wld_alpha_blend_shader));
-    if (wld_gpu_shader_buf == WLD_GPU_INVALID_BUF) return;
-    unsigned *sp = (unsigned *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_CPU,
-                                               (long)wld_gpu_shader_buf);
-    if (!sp) return;
-    for (int i = 0; i < 4; i++) sp[i] = wld_alpha_blend_shader[i];
-    user_svc1(WLD_SYS_GPU_BUF_UNMAP_CPU, (long)wld_gpu_shader_buf);
-
-    wld_gpu_args_buf = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
-                           (long)WLD_GPU_BUF_UNIFORM,
-                           (long)sizeof(wld_blend_args_t));
-    if (wld_gpu_args_buf == WLD_GPU_INVALID_BUF) return;
-    wld_gpu_args_ptr = (void *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_CPU,
-                                               (long)wld_gpu_args_buf);
-    if (!wld_gpu_args_ptr) return;
-
-    wld_gpu_scanout_handle = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
-                                 (long)(WLD_GPU_BUF_SCANOUT | WLD_GPU_BUF_PINNED),
-                                 (long)(wld_fb_w * wld_fb_h * 4));
-    if (wld_gpu_scanout_handle == WLD_GPU_INVALID_BUF) return;
-    wld_gpu_scanout_ptr = (unsigned *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_USER,
-                                                      (long)wld_gpu_scanout_handle);
-    if (!wld_gpu_scanout_ptr) return;
-
-    wld_gpu_ok = 1;
-}
-
-static void wld_gpu_composite_surface(unsigned *src, unsigned sw, unsigned sh,
-                                      unsigned str, unsigned cx, unsigned cy,
-                                      unsigned cw, unsigned ch, unsigned alpha)
-{
-    wld_blend_args_t *a = (wld_blend_args_t *)wld_gpu_args_ptr;
-    a->src_uva     = (long long)(long)src;
-    a->dst_uva     = (long long)(long)wld_gpu_scanout_ptr;
-    a->src_w       = sw; a->src_h = sh; a->src_stride = str;
-    a->dst_x       = cx; a->dst_y = cy;
-    a->dst_w       = cw; a->dst_h = ch;
-    a->dst_stride  = wld_fb_w * 4U;
-    a->global_alpha = alpha;
-
-    long fence = user_svc6(WLD_SYS_GPU_COMPUTE_DISPATCH,
-                    (long)wld_gpu_queue, (long)wld_gpu_shader_buf,
-                    1, 1, 1, (long)wld_gpu_args_buf);
-    if (fence != WLD_GPU_INVALID_FENCE) {
-        user_svc2(WLD_SYS_GPU_FENCE_WAIT, fence, -1L);
-        user_svc1(WLD_SYS_GPU_FENCE_DESTROY, fence);
-    }
 }
 
 /* ── Compositor logic ───────────────────────────────────────────── */
@@ -1715,15 +1656,9 @@ static void composite_and_present(void)
                 alpha = 255U;
         }
 
-        if (wld_gpu_ok) {
-            wld_gpu_composite_surface((unsigned *)src, w, h, str,
-                                      content_x, content_y,
-                                      content_w, content_h, alpha);
-        } else {
-            wld_blit_scaled(dst, (int32_t)content_x, (int32_t)content_y,
-                            content_w, content_h, (const uint32_t *)src,
-                            w, h, str / 4U, (uint8_t)alpha);
-        }
+        wld_blit_scaled(dst, (int32_t)content_x, (int32_t)content_y,
+                        content_w, content_h, (const uint32_t *)src,
+                        w, h, str / 4U, (uint8_t)alpha);
 
         if (surf->fade_ticks > 0U)
             surf->fade_ticks--;
@@ -1748,29 +1683,22 @@ static void composite_and_present(void)
             continue;
 
         uint8_t *src = (uint8_t *)pool->ptr + buf->offset;
-        if (wld_gpu_ok) {
-            wld_gpu_composite_surface((unsigned *)src, buf->width, buf->height,
-                                      buf->stride, (unsigned)surf->x,
-                                      (unsigned)surf->y,
-                                      surf->view_w, surf->view_h, 255U);
-        } else {
-            wld_blit_scaled(dst, surf->x, surf->y,
-                            surf->view_w, surf->view_h,
-                            (const uint32_t *)src,
-                            buf->width, buf->height, buf->stride / 4U, 255U);
-        }
+        wld_blit_scaled(dst, surf->x, surf->y,
+                        surf->view_w, surf->view_h,
+                        (const uint32_t *)src,
+                        buf->width, buf->height, buf->stride / 4U, 255U);
     }
 
     wld_draw_cursor(dst, wld_pointer_x, wld_pointer_y, wld_pointer_buttons);
     if (wld_gpu_ok) {
         long pf = user_svc5(WLD_SYS_GPU_PRESENT, (long)wld_gpu_scanout_handle,
-                            0, 0, (long)wld_fb_w, (long)wld_fb_h);
+                            0, 0, (long)WLD_FB_W, (long)WLD_FB_H);
         if (pf != WLD_GPU_INVALID_FENCE) {
             user_svc2(WLD_SYS_GPU_FENCE_WAIT, pf, -1L);
             user_svc1(WLD_SYS_GPU_FENCE_DESTROY, pf);
         }
     } else {
-        (void)wld_present((long)wld_fb_w, (long)wld_fb_h, (long)(wld_fb_w * 4U));
+        (void)wld_present((long)WLD_FB_W, (long)WLD_FB_H, (long)(WLD_FB_W * 4U));
     }
     wld_present_count++;
 }
@@ -1893,7 +1821,7 @@ static void send_output_info(wclient_t *c, uint32_t out_id)
 
     /* mode: WL_OUTPUT_MODE_CURRENT=1, w, h, refresh */
     msg_begin(c, out_id, WL_OUTPUT_MODE, 16U);
-    out_u32(c, 1U); out_u32(c, wld_fb_w); out_u32(c, wld_fb_h);
+    out_u32(c, 1U); out_u32(c, WLD_FB_W); out_u32(c, WLD_FB_H);
     out_u32(c, 60000U); /* 60Hz in mHz */
 
     /* done */
@@ -2309,6 +2237,63 @@ static void client_close(wclient_t *c)
     wld_relayout(1);
 }
 
+static void wld_gpu_init(void)
+{
+    wld_gpu_queue = (unsigned)user_svc2(WLD_SYS_GPU_CMDQUEUE_CREATE,
+                        (long)WLD_GPU_QUEUE_COMPUTE, 16);
+    if (wld_gpu_queue == WLD_GPU_INVALID_QUEUE) return;
+
+    wld_gpu_shader_buf = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
+                             (long)WLD_GPU_BUF_SHADER,
+                             (long)sizeof(wld_alpha_blend_shader));
+    if (wld_gpu_shader_buf == WLD_GPU_INVALID_BUF) return;
+    unsigned *sp = (unsigned *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_CPU,
+                                               (long)wld_gpu_shader_buf);
+    if (!sp) return;
+    for (int i = 0; i < 4; i++) sp[i] = wld_alpha_blend_shader[i];
+    user_svc1(WLD_SYS_GPU_BUF_UNMAP_CPU, (long)wld_gpu_shader_buf);
+
+    wld_gpu_args_buf = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
+                           (long)WLD_GPU_BUF_UNIFORM,
+                           (long)sizeof(wld_blend_args_t));
+    if (wld_gpu_args_buf == WLD_GPU_INVALID_BUF) return;
+    wld_gpu_args_ptr = (void *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_CPU,
+                                               (long)wld_gpu_args_buf);
+    if (!wld_gpu_args_ptr) return;
+
+    wld_gpu_scanout_handle = (unsigned)user_svc2(WLD_SYS_GPU_BUF_ALLOC,
+                                 (long)(WLD_GPU_BUF_SCANOUT | WLD_GPU_BUF_PINNED),
+                                 (long)(WLD_FB_W * WLD_FB_H * 4));
+    if (wld_gpu_scanout_handle == WLD_GPU_INVALID_BUF) return;
+    wld_gpu_scanout_ptr = (unsigned *)(long)user_svc1(WLD_SYS_GPU_BUF_MAP_USER,
+                                                      (long)wld_gpu_scanout_handle);
+    if (!wld_gpu_scanout_ptr) return;
+
+    wld_gpu_ok = 1;
+}
+
+static void wld_gpu_composite_surface(unsigned *src, unsigned sw, unsigned sh,
+                                      unsigned str, unsigned cx, unsigned cy,
+                                      unsigned cw, unsigned ch, unsigned alpha)
+{
+    wld_blend_args_t *a = (wld_blend_args_t *)wld_gpu_args_ptr;
+    a->src_uva     = (long long)(long)src;
+    a->dst_uva     = (long long)(long)wld_gpu_scanout_ptr;
+    a->src_w       = sw; a->src_h = sh; a->src_stride = str;
+    a->dst_x       = cx; a->dst_y = cy;
+    a->dst_w       = cw; a->dst_h = ch;
+    a->dst_stride  = WLD_FB_W * 4U;
+    a->global_alpha = alpha;
+
+    long fence = user_svc6(WLD_SYS_GPU_COMPUTE_DISPATCH,
+                    (long)wld_gpu_queue, (long)wld_gpu_shader_buf,
+                    1, 1, 1, (long)wld_gpu_args_buf);
+    if (fence != WLD_GPU_INVALID_FENCE) {
+        user_svc2(WLD_SYS_GPU_FENCE_WAIT, fence, -1L);
+        user_svc1(WLD_SYS_GPU_FENCE_DESTROY, fence);
+    }
+}
+
 /* ── Create /run directory and socket ───────────────────────────── */
 static void wld_setup_socket(void)
 {
@@ -2351,15 +2336,6 @@ static int wld_main(void)
 
     for (uint32_t i = 0U; i < WLD_MAX_CLIENTS; i++)
         wld_clients[i].fd = -1;
-
-    /* Query runtime display resolution */
-    long dims = user_svc0(WLD_SYS_GPU_GET_DISPLAY_SIZE);
-    if ((unsigned)(dims >> 32) && (unsigned)(dims & 0xFFFFFFFF)) {
-        wld_fb_w = (unsigned)(dims >> 32);
-        wld_fb_h = (unsigned)(dims & 0xFFFFFFFF);
-    }
-    wld_pointer_x = (int32_t)(wld_fb_w / 2U);
-    wld_pointer_y = (int32_t)(wld_fb_h / 2U);
 
     /* Alloca compositing buffer */
     wld_composite = wld_mmap((long)WLD_FB_SZ);
