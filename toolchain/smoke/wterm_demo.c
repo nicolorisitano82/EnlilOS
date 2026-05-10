@@ -919,11 +919,19 @@ static int app_spawn_bash(app_t *app)
         write(2, "C5\n", 3);  /* Checkpoint 5: setpgid done */
 
         int r1 = dup2(slave_fd, STDIN_FILENO);
-        write(2, "C6\n", 3);  /* Checkpoint 6: dup2 stdin done, r1=? */
+        write(2, "C6\n", 3);  /* Checkpoint 6: dup2 stdin done */
+
+        close(STDOUT_FILENO);
+        write(2, "C6b\n", 4); /* Checkpoint 6b: close stdout done */
+
         int r2 = dup2(slave_fd, STDOUT_FILENO);
-        write(2, "C7\n", 3);  /* Checkpoint 7: dup2 stdout done, r2=? */
+        write(2, "C7\n", 3);  /* Checkpoint 7: dup2 stdout done */
+
+        close(STDERR_FILENO);
+        write(2, "C7b\n", 4); /* Checkpoint 7b: close stderr done */
+
         int r3 = dup2(slave_fd, STDERR_FILENO);
-        write(2, "C8\n", 3);  /* Checkpoint 8: dup2 stderr done, r3=? */
+        write(2, "C8\n", 3);  /* Checkpoint 8: dup2 stderr done */
 
         if (slave_fd > STDERR_FILENO)
             close(slave_fd);
